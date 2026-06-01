@@ -24,7 +24,7 @@
     "test:compliance": "node test/compliance.mjs"
   },
   "devDependencies": {
-    "@napi-rs/cli": "^3",
+    "@napi-rs/cli": "^3.7.0",
     "@types/node": "^25.6.0",
     "typescript": "^5"
   },
@@ -34,8 +34,8 @@
   "optionalDependencies": {
     "@momics/iroh-http-node-darwin-arm64": "0.4.0",
     "@momics/iroh-http-node-darwin-x64": "0.4.0",
-    "@momics/iroh-http-node-linux-x64-gnu": "0.4.0",
     "@momics/iroh-http-node-linux-arm64-gnu": "0.4.0",
+    "@momics/iroh-http-node-linux-x64-gnu": "0.4.0",
     "@momics/iroh-http-node-win32-x64-msvc": "0.4.0"
   },
   "files": [
@@ -45,8 +45,15 @@
   "publishConfig": {
     "access": "public"
   },
-  "os": ["darwin", "linux", "win32"],
-  "cpu": ["x64", "arm64"],
+  "os": [
+    "darwin",
+    "linux",
+    "win32"
+  ],
+  "cpu": [
+    "x64",
+    "arm64"
+  ],
   "license": "(MIT OR Apache-2.0)",
   "repository": {
     "type": "git",
