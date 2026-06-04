@@ -9,6 +9,8 @@ use iroh_http_core::{
 use serde::{Deserialize, Serialize};
 use tauri::{command, ipc::Channel, ipc::Response};
 
+use tauri::Manager;
+
 use crate::state;
 
 use iroh_http_adapter::{core_error_to_json, format_error_json};
@@ -55,7 +57,8 @@ pub struct EndpointInfoPayload {
 
 /// Bind an Iroh endpoint and return a handle + identity info.
 #[command]
-pub async fn create_endpoint(
+pub async fn create_endpoint<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     args: Option<CreateEndpointArgs>,
 ) -> Result<EndpointInfoPayload, String> {
     let opts = args
@@ -129,6 +132,13 @@ pub async fn create_endpoint(
     // Never log, include in error payloads, or pass to untrusted code.
     let keypair = ep.secret_key_bytes().to_vec();
     let handle = state::insert_endpoint(ep);
+
+    // Auto-bind the httpi:// scheme handler to the first endpoint created.
+    // `try_state` returns None when `with_scheme()` was not set, so this
+    // is a no-op in apps that don't use the scheme handler.
+    if let Some(scheme_state) = app.try_state::<state::SchemeState>() {
+        scheme_state.bind_if_unbound(handle);
+    }
 
     Ok(EndpointInfoPayload {
         endpoint_handle: handle,
