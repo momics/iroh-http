@@ -32,6 +32,17 @@ fn main() {
 }
 ```
 
+To enable native `httpi://` URL resolution in the webview (see [below](#httpi-scheme-handler)):
+
+```rust
+fn main() {
+    tauri::Builder::default()
+        .plugin(tauri_plugin_iroh_http::builder().with_scheme().build())
+        .run(tauri::generate_context!())
+        .unwrap();
+}
+```
+
 ## Quick start
 
 ```ts
@@ -79,12 +90,28 @@ A typical app using fetch and serve:
 }
 ```
 
+## `httpi://` scheme handler
+
+Call `.with_scheme()` on the plugin builder to register `httpi://` as a native URI scheme in the webview. Once an endpoint is created, standard browser APIs resolve `httpi://` URLs directly through iroh-http-core — no JavaScript bridging required.
+
+```ts
+// After createNode(), these all just work:
+const res = await fetch("httpi://<peer-id>/path");
+document.querySelector("img").src = "httpi://<peer-id>/photo.jpg";
+document.querySelector("audio").src = "httpi://<peer-id>/track.flac"; // seeking supported
+```
+
+The handler auto-binds to the first endpoint created. There is nothing else to configure.\n\n> **GET only:** The scheme handler resolves GET requests. Non-GET callers receive `405 Method Not Allowed`. Use `node.fetch()` for POST, PUT, DELETE.\n
+
+> **Platform note:** On macOS, Linux, and iOS the origin is `httpi://<nodeid>/path`. On Windows and Android, Tauri rewrites the origin to `http://httpi.localhost/path` — the handler accounts for this automatically.
+
 ## Tauri specifics
 
 - Serve callbacks are delivered to the frontend via Tauri `Channel` events (push model).
 - All crypto functions are async (round-trip through the Rust plugin via Tauri invoke).
 - QUIC sessions require the `iroh-http:connect` permission.
 - mDNS requires the `iroh-http:mdns` permission.
+- The `httpi://` scheme handler (opt-in via `.with_scheme()`) enables native URL resolution without IPC overhead.
 
 ## Supported platforms
 
