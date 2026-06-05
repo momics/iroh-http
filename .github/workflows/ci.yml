@@ -250,8 +250,14 @@ jobs:
               # and removal lines from the diff output (fixes false-positive where
               # a dependency bump landed within context distance of the package
               # "version" field in package.json).
+              # Use specific filenames (not globs) to exclude lock files like
+              # package-lock.json and yarn.lock whose "version" entries are
+              # dependency versions, not the package's own version.
               VERSION_DIFF=$(git diff-tree --no-commit-id -r -p "$sha" -- \
-                '*.toml' '*.json' '*.jsonc' 2>/dev/null \
+                'Cargo.toml' '*/Cargo.toml' \
+                'package.json' '*/package.json' \
+                'deno.json' '*/deno.json' \
+                'deno.jsonc' '*/deno.jsonc' 2>/dev/null \
                 | grep -E '^\+[^+].*((^|\s)version = "|"version": ")' || true)
               [[ -z "$VERSION_DIFF" ]] && continue
 
