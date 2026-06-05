@@ -243,10 +243,16 @@ jobs:
             if echo "$CHANGED" | grep -qE '(Cargo\.toml|package\.json|deno\.jsonc?)$'; then
               # Narrow to actual version-field changes: a dep bump or script
               # addition is not a version bump and should not be blocked.
-              # Match `version = "X.Y.Z"` (Cargo) or `"version": "X.Y.Z"` (JSON).
+              # Match added lines (+) only — never context lines — that contain:
+              #   Cargo: `version = "X.Y.Z"`
+              #   JSON : `"version": "X.Y.Z"`
+              # Both alternatives are anchored with ^\+[^+] to exclude context
+              # and removal lines from the diff output (fixes false-positive where
+              # a dependency bump landed within context distance of the package
+              # "version" field in package.json).
               VERSION_DIFF=$(git diff-tree --no-commit-id -r -p "$sha" -- \
                 '*.toml' '*.json' '*.jsonc' 2>/dev/null \
-                | grep -E '^\+[^+].*(^|\s)version = "|"version": "' || true)
+                | grep -E '^\+[^+].*((^|\s)version = "|"version": ")' || true)
               [[ -z "$VERSION_DIFF" ]] && continue
 
               SUBJECT=$(git log -1 --format=%s "$sha")
