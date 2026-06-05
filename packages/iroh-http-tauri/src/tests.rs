@@ -21,9 +21,19 @@ mod tests {
         }
     }
 
+    /// Build a minimal mock Tauri app handle for tests.
+    ///
+    /// `AppHandle` is Arc-backed internally: the app internals stay alive as
+    /// long as any handle clone exists, even after the `App` value is dropped.
+    /// No `SchemeState` is managed, so `create_endpoint`'s scheme bind is a
+    /// no-op in all tests below.
+    fn mock_handle() -> tauri::AppHandle<tauri::test::MockRuntime> {
+        tauri::test::mock_app().handle().clone()
+    }
+
     /// Create a real endpoint in loopback/offline mode for testing.
     async fn make_test_endpoint() -> u64 {
-        let result = create_endpoint(Some(CreateEndpointArgs {
+        let result = create_endpoint(mock_handle(), Some(CreateEndpointArgs {
             key: None,
             idle_timeout: None,
             relay_mode: Some("disabled".into()),
@@ -75,7 +85,7 @@ mod tests {
     #[tokio::test]
     async fn test_create_endpoint_default_args() {
         // create_endpoint(None) should bind with defaults.
-        let result = create_endpoint(None).await;
+        let result = create_endpoint(mock_handle(), None).await;
         assert!(result.is_ok(), "default create_endpoint should succeed");
         let info = result.unwrap();
         assert!(!info.node_id.is_empty());
@@ -249,7 +259,7 @@ mod tests {
     #[tokio::test]
     async fn test_sign_and_verify() {
         // Create an endpoint to get a real keypair and node_id (public key).
-        let info = create_endpoint(Some(CreateEndpointArgs {
+        let info = create_endpoint(mock_handle(), Some(CreateEndpointArgs {
             key: None,
             idle_timeout: None,
             relay_mode: Some("disabled".into()),
