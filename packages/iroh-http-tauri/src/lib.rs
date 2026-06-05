@@ -188,7 +188,7 @@ mod scheme {
         // <img>, <audio>, <video> are always GET. Non-GET callers should use
         // the node.fetch() IPC command instead of the scheme handler.
         if request.method() != tauri::http::Method::GET {
-            return Ok(Response::builder()
+            return Response::builder()
                 .status(StatusCode::METHOD_NOT_ALLOWED)
                 .header("allow", "GET")
                 .header("content-type", "text/plain")
@@ -196,7 +196,7 @@ mod scheme {
                     b"httpi:// scheme handler is GET-only; use node.fetch() for other methods"
                         .to_vec(),
                 )
-                .map_err(|e| e.to_string())?);
+                .map_err(|e| e.to_string());
         }
 
         // ── 1. Resolve the active endpoint ───────────────────────────────────
