@@ -15,7 +15,7 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/Momics/iroh-http"
 
 [workspace.dependencies]
-iroh = { version = "0.98.1" }
+iroh = { version = "1.0.0" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "io-util"] }
 bytes = "1"
 slab = "0.4"

@@ -12,7 +12,7 @@
 #![deny(unsafe_code)]
 
 #[cfg(feature = "mdns")]
-use iroh::address_lookup::{DiscoveryEvent, MdnsAddressLookup};
+use iroh_mdns_address_lookup::{DiscoveryEvent, MdnsAddressLookup};
 #[cfg(feature = "mdns")]
 use std::sync::Arc;
 

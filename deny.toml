@@ -6,16 +6,7 @@ yanked = "deny"
 
 # ── Advisory skips blocked on upstream ───────────────────────────────────────
 #
-# iroh 0.98.x pins hickory-* = "=0.26.0-beta.4" exactly; we cannot upgrade
-# until iroh itself releases a version that uses hickory 0.26.1+.
-# Remove both entries once iroh bumps hickory.
-[[advisories.ignore]]
-id = "RUSTSEC-2026-0119"
-reason = "hickory-proto O(n²) name compression — blocked on iroh upgrading; cannot force-update exact-pinned transitive dep"
-
-[[advisories.ignore]]
-id = "RUSTSEC-2026-0120"
-reason = "hickory-net NSEC3 unbounded loop — blocked on iroh upgrading; cannot force-update exact-pinned transitive dep"
+# (none currently — hickory was upgraded via iroh 1.0.0)
 
 [bans]
 # Warn on duplicate versions to keep the dependency tree auditable.

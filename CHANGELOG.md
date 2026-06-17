@@ -14,6 +14,7 @@
 - *(ci)* Check no-default-features with compression kept on — tests discovery-off path only
 ### 🚜 Refactor
 
+- *(deps)* Upgrade `iroh` from 0.98.x to 1.0.0. mDNS discovery now uses the standalone `iroh-mdns-address-lookup` crate (Iroh removed the `address-lookup-mdns` feature). `RecvStream::read_chunk` returns `Bytes` directly.
 - *(core)* Replace hand-rolled `max_request_body_bytes` accounting in `FfiDispatcher::dispatch` with `tower_http::limit::RequestBodyLimitLayer`. Closes the last bespoke enforcement in the request path; per ADR-013, body-size enforcement now lives entirely in the standard tower-http stack. The layer rejects oversized requests with `413 Payload Too Large` (immediately for known `Content-Length`, or by erroring the wrapped `Limited` body mid-stream for chunked uploads).
 ### 📚 Documentation
 
