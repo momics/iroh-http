@@ -290,3 +290,9 @@ export function classifyBindError(raw: string | unknown): IrohBindError {
   // Re-wrap with bind context so callers always get IrohBindError.
   return new IrohBindError(classified.message, classified.code);
 }
+
+/** True when an FFI call failed because the endpoint was already torn down. */
+export function isEndpointGoneError(err: unknown): boolean {
+  if (err instanceof IrohHandleError) return true;
+  return err instanceof IrohError && err.code === "INVALID_HANDLE";
+}

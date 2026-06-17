@@ -5,6 +5,10 @@
  *
  * If `force` is `true`, aborts immediately without draining in-flight
  * requests.  Otherwise performs a graceful shutdown.
+ *
+ * The endpoint is removed from the registry **after** closing, not before.
+ * This ensures that background tasks (transport events, serve callbacks)
+ * that need the endpoint handle during the drain period can still look it up.
  */
 export declare function closeEndpoint(endpointHandle: number, force?: boolean | undefined | null): Promise<void>
 
@@ -404,6 +408,9 @@ export declare function startTransportEvents(endpointHandle: number, handler: ((
  * This signals the accept loop to stop but does NOT close the endpoint or
  * drain in-flight requests.  Call `closeEndpoint` afterwards if you want
  * a full teardown.
+ *
+ * If the endpoint handle is already gone (e.g. the node was closed), this
+ * is a no-op — the serve loop is already stopped.
  */
 export declare function stopServe(endpointHandle: number): void
 
@@ -420,5 +427,8 @@ export declare function waitEndpointClosed(endpointHandle: number): Promise<void
  *
  * Resolves immediately if `rawServe` was never called on this endpoint.
  * Call this after `stopServe` to confirm the loop has actually terminated.
+ *
+ * If the endpoint handle is already gone (e.g. the node was closed), this
+ * resolves immediately — the serve loop is already stopped.
  */
 export declare function waitServeStop(endpointHandle: number): Promise<void>

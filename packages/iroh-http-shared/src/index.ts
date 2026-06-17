@@ -57,6 +57,7 @@ export {
   IrohHandleError,
   IrohProtocolError,
   IrohStreamError,
+  isEndpointGoneError,
 } from "./errors.js";
 export { decodeBase64, encodeBase64, normaliseRelayMode } from "./utils.js";
 export type { NormalisedRelay } from "./utils.js";
