@@ -11,7 +11,7 @@ use std::{sync::Arc, time::Duration};
 
 use iroh::{
     address_lookup::{DnsAddressLookup, PkarrPublisher},
-    endpoint::{Builder, IdleTimeout, QuicTransportConfig},
+    endpoint::{IdleTimeout, QuicTransportConfig},
     Endpoint, RelayMode, SecretKey,
 };
 
@@ -109,7 +109,7 @@ impl IrohEndpoint {
             list
         };
 
-        let mut builder = Builder::new(iroh::endpoint::presets::Minimal)
+        let mut builder = Endpoint::builder(iroh::endpoint::presets::Minimal)
             .relay_mode(relay_mode)
             .alpns(alpns);
 

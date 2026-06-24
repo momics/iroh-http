@@ -37,7 +37,7 @@ pub(crate) async fn pump_quic_recv_to_body(
     writer: BodyWriter,
 ) {
     while let Ok(Some(chunk)) = recv.read_chunk(PUMP_READ_BUF).await {
-        if writer.send_chunk(chunk.bytes).await.is_err() {
+        if writer.send_chunk(chunk).await.is_err() {
             break;
         }
     }

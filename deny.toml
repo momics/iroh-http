@@ -4,19 +4,6 @@
 unmaintained = "none"
 yanked = "deny"
 
-# ── Advisory skips blocked on upstream ───────────────────────────────────────
-#
-# iroh 0.98.x pins hickory-* = "=0.26.0-beta.4" exactly; we cannot upgrade
-# until iroh itself releases a version that uses hickory 0.26.1+.
-# Remove both entries once iroh bumps hickory.
-[[advisories.ignore]]
-id = "RUSTSEC-2026-0119"
-reason = "hickory-proto O(n²) name compression — blocked on iroh upgrading; cannot force-update exact-pinned transitive dep"
-
-[[advisories.ignore]]
-id = "RUSTSEC-2026-0120"
-reason = "hickory-net NSEC3 unbounded loop — blocked on iroh upgrading; cannot force-update exact-pinned transitive dep"
-
 [bans]
 # Warn on duplicate versions to keep the dependency tree auditable.
 multiple-versions = "warn"
@@ -104,10 +91,6 @@ name = "cpufeatures"
 reason = "0.2/0.3 coexist across ring and other crypto libs in iroh"
 
 [[bans.skip]]
-name = "spin"
-reason = "0.9/0.10 split across iroh transitive deps"
-
-[[bans.skip]]
 name = "convert_case"
 reason = "0.6/0.10 split across iroh transitive deps (proc-macro crates)"
 
@@ -118,10 +101,6 @@ reason = "5.x/6.x split across iroh transitive deps"
 [[bans.skip]]
 name = "netlink-packet-route"
 reason = "0.28/0.29 split across iroh transitive deps"
-
-[[bans.skip]]
-name = "vergen-lib"
-reason = "0.1/9.x split in vergen build tooling — iroh transitive"
 
 [licenses]
 allow = [
