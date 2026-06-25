@@ -19,6 +19,7 @@ fn main() {
         "cancel_request",
         "create_body_writer",
         "next_chunk",
+        "try_next_chunk",
         "send_chunk",
         "finish_body",
         // HTTP server (internal primitives bundled into iroh-http:serve)
@@ -28,6 +29,7 @@ fn main() {
         "respond_to_request",
         // Session / duplex streams (iroh-http:connect)
         "session_connect",
+        "session_accept",
         "session_create_bidi_stream",
         "session_next_bidi_stream",
         "session_close",
@@ -47,6 +49,8 @@ fn main() {
         "mdns_browse_close",
         "mdns_advertise",
         "mdns_advertise_close",
+        // Transport / path-change events (bundled into iroh-http:default)
+        "start_transport_events",
     ])
     .android_path("android")
     .ios_path("ios")

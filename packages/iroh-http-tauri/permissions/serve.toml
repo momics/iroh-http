@@ -9,6 +9,7 @@ permissions = [
   "allow-wait-serve-stop",
   "allow-respond-to-request",
   "allow-next-chunk",
+  "allow-try-next-chunk",
   "allow-send-chunk",
   "allow-finish-body",
   "allow-create-body-writer",

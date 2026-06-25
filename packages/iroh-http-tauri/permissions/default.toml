@@ -13,4 +13,5 @@ permissions = [
   "allow-peer-info",
   "allow-peer-stats",
   "allow-endpoint-stats",
+  "allow-start-transport-events",
 ]

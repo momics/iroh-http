@@ -10,6 +10,7 @@ permissions = [
   "allow-cancel-request",
   "allow-create-body-writer",
   "allow-next-chunk",
+  "allow-try-next-chunk",
   "allow-send-chunk",
   "allow-finish-body",
 ]
