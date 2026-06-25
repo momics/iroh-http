@@ -33,6 +33,7 @@ import {
   classifyError,
   decodeBase64,
   encodeBase64,
+  isEndpointGoneError,
   normaliseRelayMode,
 } from "@momics/iroh-http-shared";
 
@@ -656,19 +657,27 @@ export const rawServe: RawServeFn = (
       if (options.onConnectionEvent) {
         const onEv = options.onConnectionEvent;
         (async () => {
-          while (true) {
-            const ev = await call<PeerConnectionEvent | null>(
-              "nextConnectionEvent",
-              { endpointHandle },
-            );
-            if (ev === null) break;
-            try {
-              onEv(ev);
-            } catch (err) {
-              console.error("[iroh-http-deno] onConnectionEvent error:", err);
+          try {
+            while (true) {
+              const ev = await call<PeerConnectionEvent | null>(
+                "nextConnectionEvent",
+                { endpointHandle },
+              );
+              if (ev === null) break;
+              try {
+                onEv(ev);
+              } catch (err) {
+                console.error("[iroh-http-deno] onConnectionEvent error:", err);
+              }
             }
+          } catch (err) {
+            if (!isEndpointGoneError(err)) throw err;
           }
-        })();
+        })().catch((err) => {
+          if (!isEndpointGoneError(err)) {
+            console.error("[iroh-http-deno] connection event loop error:", err);
+          }
+        });
       }
 
       // Track in-flight handler tasks so the loop drains them before resolving.
@@ -756,7 +765,11 @@ export const rawServe: RawServeFn = (
         }
       })();
     },
-  );
+  ).catch((err) => {
+    // close_all / closeEndpoint can win the race before serveStart returns.
+    if (isEndpointGoneError(err)) return;
+    throw err;
+  });
 };
 
 export function makeAllocBodyWriter(endpointHandle: number): AllocBodyWriterFn {
@@ -1374,29 +1387,35 @@ export class DenoAdapter extends IrohAdapter {
     // closed, and null from nextTransportEvent when the channel closes.
     // Both are clean shutdown signals — the loop resolves without error.
     this.#transportLoopDone = (async () => {
-      const subscribed = await call<null | boolean>("startTransportEvents", {
-        endpointHandle: this.#eh,
-      });
-      if (subscribed === false) return; // endpoint gone before subscribe
-      while (true) {
-        const event = await call<TransportEventPayload | null>(
-          "nextTransportEvent",
-          { endpointHandle: this.#eh },
-        );
-        if (event === null) break;
-        try {
-          callback(event);
-        } catch (err) {
-          console.error(
-            "[iroh-http-deno] transport event callback error:",
-            err,
+      try {
+        const subscribed = await call<null | boolean>("startTransportEvents", {
+          endpointHandle: this.#eh,
+        });
+        if (subscribed === false) return; // endpoint gone before subscribe
+        while (true) {
+          const event = await call<TransportEventPayload | null>(
+            "nextTransportEvent",
+            { endpointHandle: this.#eh },
           );
+          if (event === null) break;
+          try {
+            callback(event);
+          } catch (err) {
+            console.error(
+              "[iroh-http-deno] transport event callback error:",
+              err,
+            );
+          }
         }
+      } catch (err) {
+        if (isEndpointGoneError(err)) return;
+        throw err;
       }
     })();
-    this.#transportLoopDone.catch((err: unknown) =>
-      console.error("[iroh-http-deno] startTransportEvents error:", err)
-    );
+    this.#transportLoopDone.catch((err: unknown) => {
+      if (isEndpointGoneError(err)) return;
+      console.error("[iroh-http-deno] startTransportEvents error:", err);
+    });
   }
 
   override drainTransportEvents(): Promise<void> {
