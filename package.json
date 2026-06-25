@@ -8,6 +8,8 @@
   ],
   "scripts": {
     "typecheck": "npm run typecheck --workspaces",
+    "fmt": "deno fmt",
+    "fmt:check": "deno fmt --check",
     "build:core":   "cargo build --release --workspace && cargo build --release --manifest-path packages/iroh-http-tauri/Cargo.toml",
     "build:shared": "npm run build --workspace=packages/iroh-http-shared",
     "build:node":   "npm run build --workspace=packages/iroh-http-node",
