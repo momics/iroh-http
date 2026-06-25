@@ -1,6 +1,6 @@
 "$schema" = "../schemas/schema.json"
 
-[[permission]]
+[[set]]
 identifier = "mdns"
 description = "Enables local peer discovery via mDNS — browse for peers on the local network and advertise this node."
 permissions = [

@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-start-transport-events"
+description = "Enables the start_transport_events command without any pre-configured scope."
+commands.allow = ["start_transport_events"]
+
+[[permission]]
+identifier = "deny-start-transport-events"
+description = "Denies the start_transport_events command without any pre-configured scope."
+commands.deny = ["start_transport_events"]

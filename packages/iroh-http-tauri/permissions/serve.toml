@@ -1,6 +1,6 @@
 "$schema" = "../schemas/schema.json"
 
-[[permission]]
+[[set]]
 identifier = "serve"
 description = "Enables node.serve() — accept incoming HTTP requests from remote peers. Includes all internal body-streaming primitives required for handlers to read and write bodies."
 permissions = [
@@ -9,6 +9,7 @@ permissions = [
   "allow-wait-serve-stop",
   "allow-respond-to-request",
   "allow-next-chunk",
+  "allow-try-next-chunk",
   "allow-send-chunk",
   "allow-finish-body",
   "allow-create-body-writer",

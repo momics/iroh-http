@@ -1,6 +1,6 @@
 "$schema" = "../schemas/schema.json"
 
-[[permission]]
+[[set]]
 identifier = "fetch"
 description = "Enables node.fetch() — send HTTP requests to remote peers. Includes all internal body-streaming primitives required for fetch to function."
 permissions = [
@@ -10,6 +10,7 @@ permissions = [
   "allow-cancel-request",
   "allow-create-body-writer",
   "allow-next-chunk",
+  "allow-try-next-chunk",
   "allow-send-chunk",
   "allow-finish-body",
 ]

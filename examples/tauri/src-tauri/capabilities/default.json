@@ -5,6 +5,11 @@
   "windows": ["main"],
   "permissions": [
     "core:default",
-    "iroh-http:default"
+    "iroh-http:default",
+    "iroh-http:fetch",
+    "iroh-http:serve",
+    "iroh-http:connect",
+    "iroh-http:crypto",
+    "iroh-http:mdns"
   ]
 }

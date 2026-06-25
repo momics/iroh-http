@@ -14,6 +14,7 @@ Node lifecycle and introspection. Covers createNode() and close(). Add iroh-http
 - `allow-peer-info`
 - `allow-peer-stats`
 - `allow-endpoint-stats`
+- `allow-start-transport-events`
 
 ## Permission Table
 
@@ -1015,6 +1016,32 @@ Denies the session_send_datagram command without any pre-configured scope.
 <tr>
 <td>
 
+`iroh-http:allow-start-transport-events`
+
+</td>
+<td>
+
+Enables the start_transport_events command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`iroh-http:deny-start-transport-events`
+
+</td>
+<td>
+
+Denies the start_transport_events command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
 `iroh-http:allow-stop-serve`
 
 </td>
@@ -1034,6 +1061,32 @@ Enables the stop_serve command without any pre-configured scope.
 <td>
 
 Denies the stop_serve command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`iroh-http:allow-try-next-chunk`
+
+</td>
+<td>
+
+Enables the try_next_chunk command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`iroh-http:deny-try-next-chunk`
+
+</td>
+<td>
+
+Denies the try_next_chunk command without any pre-configured scope.
 
 </td>
 </tr>

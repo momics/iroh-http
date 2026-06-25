@@ -40,6 +40,7 @@ iroh-http-discovery = { path = "../../crates/iroh-http-discovery", version = "0.
 tauri = { version = "2", features = ["test"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 base32 = "0.5"
+toml = "0.8"
 
 [build-dependencies]
 tauri-plugin = { version = "2", features = ["build"] }

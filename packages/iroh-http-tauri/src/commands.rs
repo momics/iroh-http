@@ -1284,9 +1284,16 @@ pub fn mdns_browse_close<R: tauri::Runtime>(
 }
 
 /// Start advertising this node on the local network via mDNS.
+///
+/// Declared `async` so Tauri runs it inside the async (Tokio) runtime. The mDNS
+/// address-lookup constructor (`start_advertise` → `MdnsAddressLookup::build`)
+/// calls `tokio::runtime::Handle::current()`, which panics with "there is no
+/// reactor running" when invoked outside a runtime context. A synchronous Tauri
+/// command runs on a plain worker thread with no runtime, so enabling mDNS
+/// advertising aborted the process. Mirrors the Node adapter fix (#243).
 #[command]
 #[cfg(all(feature = "discovery", not(mobile)))]
-pub fn mdns_advertise(endpoint_handle: u64, service_name: String) -> Result<u64, String> {
+pub async fn mdns_advertise(endpoint_handle: u64, service_name: String) -> Result<u64, String> {
     let ep = state::get_endpoint(endpoint_handle).ok_or_else(|| {
         format_error_json(
             "INVALID_HANDLE",

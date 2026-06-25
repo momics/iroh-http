@@ -7,7 +7,7 @@
     "start": "tsx index.ts"
   },
   "dependencies": {
-    "@momics/iroh-http-node": "^0.2.1"
+    "@momics/iroh-http-node": "^0.5.1"
   },
   "devDependencies": {
     "tsx": "^4",

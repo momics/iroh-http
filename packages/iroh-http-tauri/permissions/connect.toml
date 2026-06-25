@@ -1,6 +1,6 @@
 "$schema" = "../schemas/schema.json"
 
-[[permission]]
+[[set]]
 identifier = "connect"
 description = "Enables raw QUIC sessions — bidirectional streams and datagrams directly to a peer, outside of HTTP framing."
 permissions = [
