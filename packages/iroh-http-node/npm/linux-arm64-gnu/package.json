@@ -8,5 +8,5 @@
   "files": ["iroh-http-node.linux-arm64-gnu.node"],
   "license": "(MIT OR Apache-2.0)",
   "publishConfig": { "access": "public" },
-  "repository": { "type": "git", "url": "git+https://github.com/Momics/iroh-http.git" }
+  "repository": { "type": "git", "url": "git+https://github.com/momics/iroh-http.git" }
 }
