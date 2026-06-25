@@ -15,7 +15,7 @@
 //! every existing test (none exercised ACL resolution). These tests close that
 //! gap by reading the source `.toml` files the way the schema defines them.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 /// Named permission *sets* the plugin promises to expose, each paired with the
@@ -123,4 +123,144 @@ fn no_permission_block_carries_a_permissions_array() {
             }
         }
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Command-registry parity guards.
+//
+// A Tauri command is only invokable if it is (1) wired into the plugin's
+// `tauri::generate_handler![...]`, (2) listed in `build.rs` so an `allow-*`
+// leaf permission is generated for it, and (3) granted by at least one
+// hand-written permission set (or `[default]`). If a command is in the handler
+// but missing from `build.rs`, no permission exists and invoking it fails at
+// runtime with "<cmd> not allowed. Command not found" — exactly how
+// `start_transport_events`, `session_accept`, and `try_next_chunk` shipped
+// broken in 0.5.1. These tests keep the three lists in lock-step.
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn manifest_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).to_path_buf()
+}
+
+/// Commands wired into `tauri::generate_handler![...]` in `src/lib.rs`.
+fn registered_commands() -> BTreeSet<String> {
+    let src = std::fs::read_to_string(manifest_dir().join("src/lib.rs"))
+        .expect("read src/lib.rs");
+    let start = src
+        .find("generate_handler![")
+        .expect("generate_handler! macro in src/lib.rs");
+    let rest = &src[start..];
+    let end = rest.find(']').expect("closing ] of generate_handler!");
+    rest[..end]
+        .lines()
+        .filter_map(|l| {
+            l.trim()
+                .trim_end_matches(',')
+                .strip_prefix("commands::")
+                .map(str::to_owned)
+        })
+        .collect()
+}
+
+/// Commands declared in `tauri_plugin::Builder::new(&[...])` in `build.rs`.
+fn build_rs_commands() -> BTreeSet<String> {
+    let src = std::fs::read_to_string(manifest_dir().join("build.rs")).expect("read build.rs");
+    let start = src
+        .find("Builder::new(&[")
+        .expect("Builder::new(&[ in build.rs");
+    let rest = &src[start..];
+    let end = rest.find("])").expect("closing ]) in build.rs");
+    let block = &rest.as_bytes()[..end];
+
+    let mut out = BTreeSet::new();
+    let mut i = 0;
+    while i < block.len() {
+        if block[i] == b'"' {
+            let mut j = i + 1;
+            while j < block.len() && block[j] != b'"' {
+                j += 1;
+            }
+            out.insert(String::from_utf8_lossy(&block[i + 1..j]).into_owned());
+            i = j + 1;
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
+/// Commands granted by any hand-written `[[set]]` or `[default]` block, derived
+/// from their `allow-<command>` permission identifiers.
+fn granted_commands() -> BTreeSet<String> {
+    let mut cmds = BTreeSet::new();
+    let collect = |perms: &toml::value::Array, cmds: &mut BTreeSet<String>| {
+        for p in perms.iter().filter_map(toml::Value::as_str) {
+            if let Some(cmd) = p.strip_prefix("allow-") {
+                cmds.insert(cmd.replace('-', "_"));
+            }
+        }
+    };
+
+    for path in hand_written_permission_files() {
+        let raw = std::fs::read_to_string(&path).expect("read permission file");
+        let value: toml::Value = toml::from_str(&raw)
+            .unwrap_or_else(|e| panic!("{} is not valid TOML: {e}", path.display()));
+
+        if let Some(sets) = value.get("set").and_then(toml::Value::as_array) {
+            for set in sets {
+                if let Some(perms) = set.get("permissions").and_then(toml::Value::as_array) {
+                    collect(perms, &mut cmds);
+                }
+            }
+        }
+        if let Some(perms) = value
+            .get("default")
+            .and_then(|d| d.get("permissions"))
+            .and_then(toml::Value::as_array)
+        {
+            collect(perms, &mut cmds);
+        }
+    }
+    cmds
+}
+
+/// Every command in the `invoke_handler` must have a generated permission
+/// (i.e. appear in `build.rs`), and vice versa. A handler command missing from
+/// `build.rs` is uninvokable: "Command not found".
+#[test]
+fn handler_and_build_rs_command_lists_match() {
+    let registered = registered_commands();
+    let built = build_rs_commands();
+    assert!(
+        !registered.is_empty(),
+        "parsed zero commands from generate_handler! — parser is broken"
+    );
+
+    let missing: Vec<_> = registered.difference(&built).cloned().collect();
+    assert!(
+        missing.is_empty(),
+        "commands wired into generate_handler! but absent from build.rs — no permission is \
+         generated for them, so invoking them fails with \"<cmd> not allowed. Command not \
+         found\": {missing:?}"
+    );
+
+    let extra: Vec<_> = built.difference(&registered).cloned().collect();
+    assert!(
+        extra.is_empty(),
+        "commands listed in build.rs but not registered in generate_handler!: {extra:?}"
+    );
+}
+
+/// Every generated command must be reachable through a named set or `[default]`,
+/// otherwise no capability can enable it.
+#[test]
+fn every_command_is_granted_by_a_set_or_default() {
+    let built = build_rs_commands();
+    let granted = granted_commands();
+    let ungranted: Vec<_> = built.difference(&granted).cloned().collect();
+    assert!(
+        ungranted.is_empty(),
+        "commands generated by build.rs but not granted by any [[set]] or [default] — callers \
+         have no capability that enables them: {ungranted:?}"
+    );
 }
