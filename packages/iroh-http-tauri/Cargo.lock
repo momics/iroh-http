@@ -5171,6 +5171,7 @@ dependencies = [
  "tauri",
  "tauri-plugin",
  "tokio",
+ "toml 0.8.2",
  "tracing",
 ]
 
