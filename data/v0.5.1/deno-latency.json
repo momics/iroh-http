@@ -1,0 +1,52 @@
+[
+  {
+    "name": "deno/iroh/cold-connect",
+    "unit": "us",
+    "value": 1019582.2964000005
+  },
+  {
+    "name": "deno/native/cold-connect",
+    "unit": "us",
+    "value": 43125.940100000116
+  },
+  {
+    "name": "deno/iroh/warm-request",
+    "unit": "us",
+    "value": 2412.7365199998894
+  },
+  {
+    "name": "deno/native/warm-request",
+    "unit": "us",
+    "value": 43509.43436000016
+  },
+  {
+    "name": "deno/iroh/multiplex-x8",
+    "unit": "us",
+    "value": 4818.8664400005655
+  },
+  {
+    "name": "deno/native/multiplex-x8",
+    "unit": "us",
+    "value": 37009.90404000084
+  },
+  {
+    "name": "deno/iroh/multiplex-x32",
+    "unit": "us",
+    "value": 11972.362639999337
+  },
+  {
+    "name": "deno/native/multiplex-x32",
+    "unit": "us",
+    "value": 18950.42496000009
+  },
+  {
+    "name": "deno/iroh/serve-rps",
+    "unit": "us",
+    "value": 2165.898880000168
+  },
+  {
+    "name": "deno/native/serve-rps",
+    "unit": "us",
+    "value": 42770.52303999968
+  }
+]
