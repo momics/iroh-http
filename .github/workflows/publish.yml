@@ -171,10 +171,13 @@ jobs:
         with:
           ref: ${{ github.event.workflow_run.head_sha || github.sha }}
 
+      # NOTE: deliberately no `registry-url` here. setup-node's registry-url
+      # writes an .npmrc with an empty `_authToken=${NODE_AUTH_TOKEN}`, which
+      # suppresses npm's OIDC Trusted Publishing exchange and causes anonymous
+      # publishes (E404). Trusted Publishing needs a clean .npmrc + id-token.
       - uses: actions/setup-node@v6
         with:
           node-version: '24'
-          registry-url: 'https://registry.npmjs.org'
 
       - run: npm ci --omit=optional
 
