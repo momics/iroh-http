@@ -26,7 +26,7 @@ http = "1"
 http-body = "1"
 http-body-util = "0.1"
 tower = { version = "0.5", features = ["limit", "timeout", "load-shed", "util"] }
-tower-http = { version = "0.6" }
+tower-http = { version = "0.7" }
 moka = { version = "0.12", features = ["future"] }
 slotmap = "1"
 futures = "0.3"
