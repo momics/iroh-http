@@ -2,7 +2,9 @@
   "version": "0.1.0",
   "tasks": {
     "server": "deno run --allow-ffi --allow-read --allow-env main.ts server",
-    "client": "deno run --allow-ffi --allow-read --allow-env main.ts client"
+    "client": "deno run --allow-ffi --allow-read --allow-env main.ts client",
+    "advertise": "deno run --allow-ffi --allow-read --allow-env main.ts advertise",
+    "browse": "deno run --allow-ffi --allow-read --allow-env main.ts browse"
   },
   "imports": {
     "@momics/iroh-http-deno": "jsr:@momics/iroh-http-deno@^0.5.1",
