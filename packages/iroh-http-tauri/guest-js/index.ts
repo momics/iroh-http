@@ -499,6 +499,31 @@ function normaliseDiscovery(disc?: NodeOptions["discovery"]): {
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
+/**
+ * Create an Iroh node — the entry point for peer-to-peer HTTP in a Tauri app.
+ *
+ * A node is both client and server: call {@link IrohNode.fetch} to send requests
+ * to peers and {@link IrohNode.serve} to handle incoming ones. Each node has a
+ * stable Ed25519 identity ({@link IrohNode.publicKey}) that peers use to address
+ * it — there is no DNS. The node runs in the Rust process; this function drives
+ * it over Tauri's `invoke` bridge.
+ *
+ * @param options Optional configuration ({@link NodeOptions}). Omit `key` to
+ *   generate a fresh identity; pass a saved `key` to keep a stable node ID across
+ *   restarts. Relay, discovery, and tuning are all configured here.
+ * @returns A ready-to-use {@link IrohNode}.
+ *
+ * @example
+ * ```ts
+ * import { createNode } from "@momics/iroh-http-tauri";
+ *
+ * const node = await createNode();
+ * const server = node.serve((req) => new Response("hello"));
+ * const res = await node.fetch(`httpi://${peerId}/`);
+ * console.log(await res.text());
+ * await node.close();
+ * ```
+ */
 export async function createNode(options?: NodeOptions): Promise<IrohNode> {
   const keyBytes: string | null = options?.key
     ? encodeBase64(

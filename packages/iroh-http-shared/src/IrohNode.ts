@@ -122,16 +122,87 @@ export class IrohNode extends EventTarget {
     return new IrohNode(_INTERNAL, adapter, info, options, nativeClosed);
   }
 
+  /**
+   * Send an HTTP request to a remote peer over the Iroh overlay network.
+   *
+   * Works like the web-standard `fetch`, except the target peer is addressed by
+   * its public key embedded in an `httpi://` URL hostname rather than by DNS.
+   * The connection is established lazily (relay-assisted hole-punching) on the
+   * first request to a given peer.
+   *
+   * @param input An `httpi://<peer-public-key>/path` URL, as a string or `URL`.
+   * @param init Standard `RequestInit` plus Iroh extras (`directAddrs`,
+   *   `requestTimeout`, `decompress`, `maxResponseBodyBytes`). Supports
+   *   cancellation via `init.signal`.
+   * @returns The peer's `Response`.
+   *
+   * ```ts
+   * const res = await node.fetch(`httpi://${peerId}/api/data`, {
+   *   method: "POST",
+   *   body: JSON.stringify({ hello: "world" }),
+   * });
+   * console.log(res.status, await res.text());
+   * ```
+   */
   fetch(input: string | URL, init?: IrohFetchInit): Promise<Response> {
     return this.#fetchFn(input, init);
   }
 
+  /**
+   * Serve HTTP requests from remote peers on this node's public endpoint.
+   *
+   * Each incoming request is delivered to `handler` as a web-standard `Request`
+   * augmented with a `Peer-Id` header carrying the authenticated caller's public
+   * key. The returned {@link ServeHandle} exposes `finished`, which resolves when
+   * the serve loop stops — via `node.close()`, an aborted `options.signal`, or a
+   * fatal error.
+   *
+   * @remarks
+   * **Security:** this opens a *public* endpoint — any peer that knows this
+   * node's public key can connect. Iroh authenticates peer *identity* but not
+   * *authorization*; check `req.headers.get("Peer-Id")` and reject untrusted
+   * peers.
+   *
+   * @param options Serve tuning (error handler, shutdown signal, concurrency and
+   *   body-size limits). May be omitted to use defaults.
+   * @param handler Async function mapping a `Request` to a `Response`.
+   * @returns A {@link ServeHandle} whose `finished` promise settles on shutdown.
+   *
+   * ```ts
+   * const server = node.serve((req) => {
+   *   if (req.headers.get("Peer-Id") !== trustedPeerId) {
+   *     return new Response("Forbidden", { status: 403 });
+   *   }
+   *   return Response.json({ ok: true });
+   * });
+   * await server.finished;
+   * ```
+   */
   serve(handler: ServeHandler): ServeHandle;
   serve(options: ServeOptions, handler: ServeHandler): ServeHandle;
   serve(...args: unknown[]): ServeHandle {
     return (this.#serveFn as (...a: unknown[]) => ServeHandle)(...args);
   }
 
+  /**
+   * Open a raw QUIC session to a remote peer for bidirectional, message-style
+   * communication — the lower-level counterpart to {@link IrohNode.fetch}.
+   *
+   * Use this when you need a persistent, full-duplex channel rather than HTTP
+   * request/response. The remote peer accepts the session via
+   * {@link IrohNode.incoming}.
+   *
+   * @param peer The target peer, as a {@link PublicKey} or its string form.
+   * @param init Optional `directAddrs` (known `"ip:port"` addresses) that speed
+   *   up the initial connection when the peer's address is known out-of-band.
+   * @returns The established {@link IrohSession}.
+   * @throws If the platform adapter does not support raw sessions.
+   *
+   * ```ts
+   * const session = await node.dial(peerId);
+   * console.log("connected to", session.remoteId.toString());
+   * ```
+   */
   async dial(
     peer: PublicKey | string,
     init?: { directAddrs?: string[] },
@@ -335,30 +406,93 @@ export class IrohNode extends EventTarget {
     }
   }
 
+  /**
+   * Return this node's current address: its public key plus the set of direct
+   * socket addresses it is currently reachable on.
+   *
+   * The address set changes over time as the node learns new paths, so call
+   * this when you need a fresh snapshot to share out-of-band.
+   *
+   * @returns The node's id and current direct addresses.
+   */
   async addr(): Promise<NodeAddrInfo> {
     return this.#adapter.nodeAddr(this.#endpointHandle);
   }
 
+  /**
+   * Return a shareable connection *ticket* for this node — an opaque,
+   * self-contained string bundling the node's public key and current addresses.
+   *
+   * Hand the ticket to another peer out-of-band so it can connect without
+   * resolving the address separately.
+   *
+   * @returns The encoded node ticket.
+   */
   async ticket(): Promise<string> {
     return this.#adapter.nodeTicket(this.#endpointHandle);
   }
 
+  /**
+   * Return the URL of this node's current home relay, or `null` if the node is
+   * not currently using a relay (e.g. it has only direct connectivity).
+   *
+   * @returns The home relay URL, or `null`.
+   */
   async homeRelay(): Promise<string | null> {
     return this.#adapter.homeRelay(this.#endpointHandle);
   }
 
+  /**
+   * Look up the last known address information for a remote peer.
+   *
+   * @param peer The peer to query, as a {@link PublicKey} or its string form.
+   * @returns The peer's id and known addresses, or `null` if this node has never
+   *   seen the peer.
+   */
   async peerInfo(peer: PublicKey | string): Promise<NodeAddrInfo | null> {
     return this.#adapter.peerInfo(this.#endpointHandle, resolveNodeId(peer));
   }
 
+  /**
+   * Return live connection statistics for a remote peer — RTT, byte counters,
+   * packet loss, congestion window, and the active network paths.
+   *
+   * @param peer The peer to query, as a {@link PublicKey} or its string form.
+   * @returns The peer's {@link PeerStats}, or `null` if there is no active
+   *   connection to it.
+   */
   async peerStats(peer: PublicKey | string): Promise<PeerStats | null> {
     return this.#adapter.peerStats(this.#endpointHandle, resolveNodeId(peer));
   }
 
+  /**
+   * Return endpoint-wide runtime statistics for this node: active readers,
+   * writers, sessions, connections, in-flight requests, and the internal handle
+   * pool size. Useful for diagnostics and leak detection.
+   *
+   * @returns A snapshot of this node's {@link EndpointStats}.
+   */
   async stats(): Promise<EndpointStats> {
     return this.#adapter.stats(this.#endpointHandle);
   }
 
+  /**
+   * Observe network-path changes for a connection to a remote peer.
+   *
+   * Returns an async iterable that yields a {@link PathInfo} each time the active
+   * path to `peer` changes — for example a relay-to-direct upgrade or a
+   * successful hole-punch. The iterable ends when the node closes or
+   * `options.signal` is aborted.
+   *
+   * @param peer The peer to watch, as a {@link PublicKey} or its string form.
+   * @param options.signal Abort signal to stop watching and end the iterable.
+   *
+   * ```ts
+   * for await (const path of node.pathChanges(peerId)) {
+   *   console.log(path.relay ? "relay" : "direct", path.active, path.addr);
+   * }
+   * ```
+   */
   pathChanges(
     peer: PublicKey | string,
     options?: { signal?: AbortSignal },
@@ -418,6 +552,17 @@ export class IrohNode extends EventTarget {
     );
   }
 
+  /**
+   * Shut the node down: close the endpoint, drop all connections and sessions,
+   * and stop the transport event loop. Resolves once shutdown is complete, after
+   * which the {@link IrohNode.closed} promise also resolves.
+   *
+   * The node implements `Symbol.asyncDispose`, so `await using node = ...` calls
+   * this automatically when the binding goes out of scope.
+   *
+   * @param options.force When `true`, tear down immediately without gracefully
+   *   draining in-flight work.
+   */
   async close(options?: CloseOptions): Promise<void> {
     await this.#adapter.closeEndpoint(this.#endpointHandle, options?.force);
     this.#resolveClose({ closeCode: 0, reason: "" });
