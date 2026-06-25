@@ -4,7 +4,8 @@
 
 > Pre-v1.0. APIs may change between minor releases.
 
-Deno adapter for [iroh-http](https://github.com/momics/iroh-http). Uses Deno FFI (`dlopen`). No child processes, no WASM.
+Deno adapter for [iroh-http](https://github.com/momics/iroh-http). Uses Deno FFI
+(`dlopen`). No child processes, no WASM.
 
 ## Install
 
@@ -18,7 +19,8 @@ Or import directly:
 import { createNode } from "jsr:@momics/iroh-http-deno";
 ```
 
-Pre-built native libraries for macOS (x64, ARM), Linux (x64, ARM), and Windows (x64). Build from source for other platforms:
+Pre-built native libraries for macOS (x64, ARM), Linux (x64, ARM), and Windows
+(x64). Build from source for other platforms:
 
 ```sh
 cd packages/iroh-http-deno && deno task build
@@ -33,8 +35,9 @@ const node = await createNode();
 console.log("Node ID:", node.publicKey.toString());
 
 node.serve({}, (req) => {
-  if (req.headers.get("Peer-Id") !== ALLOWED_PEER)
+  if (req.headers.get("Peer-Id") !== ALLOWED_PEER) {
     return new Response("Forbidden", { status: 403 });
+  }
   return new Response("hello");
 });
 
@@ -45,13 +48,17 @@ await node.close();
 
 ## Full API
 
-The API is identical across Node.js, Deno, and Tauri: HTTP fetch/serve, QUIC sessions, mDNS discovery, and Ed25519 crypto. See the [API overview](../../docs/api-overview.md) for the complete reference.
+The API is identical across Node.js, Deno, and Tauri: HTTP fetch/serve, QUIC
+sessions, mDNS discovery, and Ed25519 crypto. See the
+[API overview](../../docs/api-overview.md) for the complete reference.
 
 ## Deno specifics
 
 - Requires `--unstable-ffi` and `--allow-ffi` flags (Deno FFI is unstable).
-- Standalone crypto functions (`generateSecretKey`, `secretKeySign`, `publicKeyVerify`) are **async**. They round-trip through Rust via FFI.
-- Serve uses a pull model internally: JS polls for incoming requests via `nextRequest()` rather than receiving push callbacks.
+- Standalone crypto functions (`generateSecretKey`, `secretKeySign`,
+  `publicKeyVerify`) are **async**. They round-trip through Rust via FFI.
+- Serve uses a pull model internally: JS polls for incoming requests via
+  `nextRequest()` rather than receiving push callbacks.
 
 ## Permissions
 
@@ -63,9 +70,9 @@ deno run --unstable-ffi --allow-ffi --allow-net --allow-env your-app.ts
 
 ## Other runtimes
 
-| Runtime | Package |
-|---------|---------|
-| Node.js | [`@momics/iroh-http-node`](https://www.npmjs.com/package/@momics/iroh-http-node) |
+| Runtime  | Package                                                                            |
+| -------- | ---------------------------------------------------------------------------------- |
+| Node.js  | [`@momics/iroh-http-node`](https://www.npmjs.com/package/@momics/iroh-http-node)   |
 | Tauri v2 | [`@momics/iroh-http-tauri`](https://www.npmjs.com/package/@momics/iroh-http-tauri) |
 
 ## License

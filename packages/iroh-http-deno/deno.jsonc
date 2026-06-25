@@ -4,19 +4,19 @@
   "exports": "./mod.ts",
   "license": "MIT",
   "tasks": {
-    "build":       "deno run --allow-run --allow-env --allow-read --allow-write --allow-sys scripts/build-native.mts",
+    "build": "deno run --allow-run --allow-env --allow-read --allow-write --allow-sys scripts/build-native.mts",
     "build:debug": "deno run --allow-run --allow-env --allow-read --allow-write --allow-sys scripts/build-native.mts --debug",
-    "build:all":   "deno run --allow-run --allow-env --allow-read --allow-write --allow-sys scripts/build-all.mts",
-    "test":        "deno test -A test/adapter.test.ts && deno run -A test/compliance.ts",
-    "test:adapter":  "deno test -A test/adapter.test.ts",
+    "build:all": "deno run --allow-run --allow-env --allow-read --allow-write --allow-sys scripts/build-all.mts",
+    "test": "deno test -A test/adapter.test.ts && deno run -A test/compliance.ts",
+    "test:adapter": "deno test -A test/adapter.test.ts",
     "test:compliance": "deno run -A test/compliance.ts"
   },
   "publish": {
     "include": ["mod.ts", "src/", "README.md"]
   },
   "imports": {
-    "@std/path":                  "jsr:@std/path@^1",
-    "@std/fs":                    "jsr:@std/fs@^1",
-    "@momics/iroh-http-shared":   "jsr:@momics/iroh-http-shared@^0.5"
+    "@std/path": "jsr:@std/path@^1",
+    "@std/fs": "jsr:@std/fs@^1",
+    "@momics/iroh-http-shared": "jsr:@momics/iroh-http-shared@^0.5"
   }
 }

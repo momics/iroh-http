@@ -11,13 +11,10 @@
  * ```
  */
 
+import { IrohNode, type NodeOptions } from "@momics/iroh-http-shared";
 import {
-  IrohNode,
-  type NodeOptions,
-} from "@momics/iroh-http-shared";
-import {
-  DenoAdapter,
   createEndpointInfo,
+  DenoAdapter,
   generateSecretKey,
   publicKeyVerify,
   secretKeySign,
@@ -53,7 +50,12 @@ export { PublicKey, SecretKey } from "@momics/iroh-http-shared";
 export async function createNode(options?: NodeOptions): Promise<IrohNode> {
   const info = await createEndpointInfo(options);
   const adapter = new DenoAdapter(info.endpointHandle);
-  return IrohNode._create(adapter, info, options, waitEndpointClosed(info.endpointHandle));
+  return IrohNode._create(
+    adapter,
+    info,
+    options,
+    waitEndpointClosed(info.endpointHandle),
+  );
 }
 
 export type { IrohNode, NodeOptions };

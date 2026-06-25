@@ -62,7 +62,9 @@ switch (mode) {
     const abort = new AbortController();
     Deno.addSignalListener("SIGINT", () => abort.abort());
     console.log(`Browsing for "${serviceName}". Press Ctrl+C to stop.`);
-    for await (const peer of node.browse({ serviceName, signal: abort.signal })) {
+    for await (
+      const peer of node.browse({ serviceName, signal: abort.signal })
+    ) {
       const status = peer.isActive ? "discovered" : "expired";
       const addrs = peer.addrs.length > 0 ? `  [${peer.addrs.join(", ")}]` : "";
       console.log(`  ${status}: ${peer.nodeId}${addrs}`);
@@ -77,4 +79,3 @@ switch (mode) {
     );
     Deno.exit(1);
 }
-

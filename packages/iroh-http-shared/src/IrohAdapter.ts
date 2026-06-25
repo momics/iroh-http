@@ -228,7 +228,9 @@ export abstract class IrohAdapter {
    * async FFI ops are settled before the close promise resolves.
    * Override in adapters that run a background polling loop (Deno).
    */
-  drainTransportEvents(): Promise<void> { return Promise.resolve(); }
+  drainTransportEvents(): Promise<void> {
+    return Promise.resolve();
+  }
 
   /** Subscribe to path changes for a specific peer. Blocks until a change occurs or the subscription ends. */
   nextPathChange(

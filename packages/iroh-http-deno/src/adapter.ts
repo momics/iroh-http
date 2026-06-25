@@ -403,7 +403,10 @@ export function makeBridge(endpointHandle: number) {
           BigInt(bigBuf.byteLength),
         ) as number;
         if (retryN > 0) {
-          chunkBufHint = Math.min(Math.max(chunkBufHint, retryN), MAX_CHUNK_BUF);
+          chunkBufHint = Math.min(
+            Math.max(chunkBufHint, retryN),
+            MAX_CHUNK_BUF,
+          );
           return bigBuf.slice(0, retryN);
         }
         if (retryN === 0) return null;
@@ -575,11 +578,21 @@ export const rawFetch: RawFetchFn = async (
   }
 
   if (n <= 0) {
-    throw classifyError("FETCH_FAILED: poll_fetch returned no data after callback");
+    throw classifyError(
+      "FETCH_FAILED: poll_fetch returned no data after callback",
+    );
   }
 
   const result = JSON.parse(dec.decode(buf.subarray(0, n))) as
-    | { ok: { status: number; headers: [string, string][]; bodyHandle: number; url: string; inlineBody?: string } }
+    | {
+      ok: {
+        status: number;
+        headers: [string, string][];
+        bodyHandle: number;
+        url: string;
+        inlineBody?: string;
+      };
+    }
     | { err: string };
 
   if ("err" in result) {
@@ -692,73 +705,73 @@ export const rawServe: RawServeFn = (
         serveCancellers.set(endpointHandle, () => yielder.cancel());
         let pollCount = 0;
         try {
-        while (true) {
-          // Sync poll — runs on JS thread, never enters spawn_blocking pool.
-          let n = lib.symbols.iroh_http_try_next_request(
-            eh,
-            pollBuf,
-            BigInt(pollBuf.byteLength),
-          ) as number;
-
-          pollCount++;
-
-          if (n < -1) {
-            // Buffer too small — grow and retry immediately.
-            pollBuf = new Uint8Array(-n) as Uint8Array<ArrayBuffer>;
-            n = lib.symbols.iroh_http_try_next_request(
+          while (true) {
+            // Sync poll — runs on JS thread, never enters spawn_blocking pool.
+            let n = lib.symbols.iroh_http_try_next_request(
               eh,
               pollBuf,
               BigInt(pollBuf.byteLength),
             ) as number;
-          }
 
-          if (n === -1) {
-            // Serve stopped or queue removed.
-            break;
-          }
+            pollCount++;
 
-          if (n === 0) {
-            // Queue empty — yield to the event loop so rawFetch results
-            // and I/O can be processed, then poll again.
-            // #126: MessageChannel gives ~0.017ms yields vs setTimeout(0)'s
-            // ~2.5ms — critical for same-process client+server latency.
-            await yielder.yield();
-            continue;
-          }
-
-          // Got a request — parse and dispatch.
-          const raw = JSON.parse(
-            dec.decode(pollBuf.subarray(0, n)),
-          );
-          const payload: RequestPayload = {
-            reqHandle: BigInt(raw.reqHandle),
-            reqBodyHandle: BigInt(raw.reqBodyHandle),
-            resBodyHandle: BigInt(raw.resBodyHandle),
-            method: raw.method,
-            url: raw.url,
-            headers: raw.headers,
-            remoteNodeId: raw.remoteNodeId,
-          };
-
-          // Handle in the background — track for drain on shutdown.
-          const task: Promise<void> = (async () => {
-            try {
-              const head = await callback(payload);
-              syncRespond(
-                endpointHandle,
-                payload.reqHandle,
-                head.status,
-                head.headers,
-              );
-            } catch (err) {
-              console.error("[iroh-http-deno] handler error:", err);
-              syncRespond(endpointHandle, payload.reqHandle, 500, []);
+            if (n < -1) {
+              // Buffer too small — grow and retry immediately.
+              pollBuf = new Uint8Array(-n) as Uint8Array<ArrayBuffer>;
+              n = lib.symbols.iroh_http_try_next_request(
+                eh,
+                pollBuf,
+                BigInt(pollBuf.byteLength),
+              ) as number;
             }
-          })();
-          pending.add(task);
-          task.finally(() => pending.delete(task));
-        }
-        await Promise.allSettled([...pending]);
+
+            if (n === -1) {
+              // Serve stopped or queue removed.
+              break;
+            }
+
+            if (n === 0) {
+              // Queue empty — yield to the event loop so rawFetch results
+              // and I/O can be processed, then poll again.
+              // #126: MessageChannel gives ~0.017ms yields vs setTimeout(0)'s
+              // ~2.5ms — critical for same-process client+server latency.
+              await yielder.yield();
+              continue;
+            }
+
+            // Got a request — parse and dispatch.
+            const raw = JSON.parse(
+              dec.decode(pollBuf.subarray(0, n)),
+            );
+            const payload: RequestPayload = {
+              reqHandle: BigInt(raw.reqHandle),
+              reqBodyHandle: BigInt(raw.reqBodyHandle),
+              resBodyHandle: BigInt(raw.resBodyHandle),
+              method: raw.method,
+              url: raw.url,
+              headers: raw.headers,
+              remoteNodeId: raw.remoteNodeId,
+            };
+
+            // Handle in the background — track for drain on shutdown.
+            const task: Promise<void> = (async () => {
+              try {
+                const head = await callback(payload);
+                syncRespond(
+                  endpointHandle,
+                  payload.reqHandle,
+                  head.status,
+                  head.headers,
+                );
+              } catch (err) {
+                console.error("[iroh-http-deno] handler error:", err);
+                syncRespond(endpointHandle, payload.reqHandle, 500, []);
+              }
+            })();
+            pending.add(task);
+            task.finally(() => pending.delete(task));
+          }
+          await Promise.allSettled([...pending]);
         } finally {
           serveCancellers.delete(endpointHandle);
           yielder.close();
@@ -1210,7 +1223,10 @@ export class DenoAdapter extends IrohAdapter {
 
   async finishBody(handle: bigint): Promise<void> {
     // #122: sync FFI — no spawn_blocking contention.
-    const rc = lib.symbols.iroh_http_finish_body(BigInt(this.#eh), handle) as number;
+    const rc = lib.symbols.iroh_http_finish_body(
+      BigInt(this.#eh),
+      handle,
+    ) as number;
     if (rc < 0) throw new Error(`finishBody failed: handle ${handle}`);
   }
 

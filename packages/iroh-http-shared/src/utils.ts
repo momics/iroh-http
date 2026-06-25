@@ -22,7 +22,11 @@ export function normaliseRelayMode(
   relay?: { mode?: RelayMode; urls?: string[] },
 ): NormalisedRelay {
   if (relay?.urls && relay.urls.length > 0) {
-    return { relayMode: "custom", relays: relay.urls, disableNetworking: false };
+    return {
+      relayMode: "custom",
+      relays: relay.urls,
+      disableNetworking: false,
+    };
   }
   const mode = relay?.mode;
   if (mode === "disabled") {
@@ -61,11 +65,13 @@ export function encodeBase64(u8: Uint8Array): string {
 export const decodeBase64: (s: string) => Uint8Array =
   typeof (globalThis as Record<string, unknown>).Buffer === "function"
     ? (s) =>
-        (globalThis as unknown as { Buffer: { from(s: string, e: string): Uint8Array } })
-          .Buffer.from(s, "base64")
+      (globalThis as unknown as {
+        Buffer: { from(s: string, e: string): Uint8Array };
+      })
+        .Buffer.from(s, "base64")
     : (s) => {
-        const bin = atob(s);
-        const out = new Uint8Array(bin.length);
-        for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
-        return out;
-      };
+      const bin = atob(s);
+      const out = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+      return out;
+    };

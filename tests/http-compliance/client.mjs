@@ -11,7 +11,7 @@
 import { createNode } from "../../packages/iroh-http-node/lib.js";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { join, dirname } from "node:path";
+import { dirname, join } from "node:path";
 
 const raw = process.argv[2];
 if (!raw) {
@@ -24,12 +24,15 @@ const __dir = dirname(fileURLToPath(import.meta.url));
 const cases = JSON.parse(readFileSync(join(__dir, "cases.json"), "utf8"));
 
 async function assertResponse(resp, expected) {
-  if (resp.status !== expected.status)
+  if (resp.status !== expected.status) {
     return `status: got ${resp.status}, want ${expected.status}`;
+  }
   if (expected.bodyExact !== undefined) {
     const text = await resp.text();
     return text !== expected.bodyExact
-      ? `body: got ${JSON.stringify(text)}, want ${JSON.stringify(expected.bodyExact)}`
+      ? `body: got ${JSON.stringify(text)}, want ${
+        JSON.stringify(expected.bodyExact)
+      }`
       : null;
   }
   if (expected.bodyNot !== undefined) {
@@ -51,8 +54,11 @@ async function assertResponse(resp, expected) {
   if (expected.headers) {
     for (const [k, v] of Object.entries(expected.headers)) {
       const actual = resp.headers.get(k);
-      if (actual !== v)
-        return `header ${k}: got ${JSON.stringify(actual)}, want ${JSON.stringify(v)}`;
+      if (actual !== v) {
+        return `header ${k}: got ${JSON.stringify(actual)}, want ${
+          JSON.stringify(v)
+        }`;
+      }
     }
     await resp.body?.cancel();
     return null;
@@ -74,7 +80,10 @@ let failed = 0;
 try {
   for (const c of cases) {
     if (!c.id) continue; // skip comment entries
-    if (c.skip) { console.log(`  skip  ${c.id}: ${c.skip}`); continue; }
+    if (c.skip) {
+      console.log(`  skip  ${c.id}: ${c.skip}`);
+      continue;
+    }
     if (c.requests || c.concurrent > 1 || c.repeat > 1) continue;
     let resp;
     try {

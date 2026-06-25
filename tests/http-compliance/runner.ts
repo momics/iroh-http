@@ -172,7 +172,9 @@ async function assertResponse(
   if (expected.bodyExact !== undefined) {
     const text = await resp.text();
     if (text !== expected.bodyExact) {
-      return `body: got ${JSON.stringify(text)}, want ${JSON.stringify(expected.bodyExact)}`;
+      return `body: got ${JSON.stringify(text)}, want ${
+        JSON.stringify(expected.bodyExact)
+      }`;
     }
     return null;
   }
@@ -180,7 +182,9 @@ async function assertResponse(
   if (expected.bodyNot !== undefined) {
     const text = await resp.text();
     if (text === expected.bodyNot) {
-      return `body: must not equal ${JSON.stringify(expected.bodyNot)}, but it did`;
+      return `body: must not equal ${
+        JSON.stringify(expected.bodyNot)
+      }, but it did`;
     }
     return null;
   }
@@ -203,7 +207,9 @@ async function assertResponse(
     for (const [k, v] of Object.entries(expected.headers)) {
       const actual = resp.headers.get(k);
       if (actual !== v) {
-        return `header ${k}: got ${JSON.stringify(actual)}, want ${JSON.stringify(v)}`;
+        return `header ${k}: got ${JSON.stringify(actual)}, want ${
+          JSON.stringify(v)
+        }`;
       }
     }
     // Consume body to avoid leaks.
@@ -245,16 +251,16 @@ export async function runCompliance(
       const reqBody = buildRequestBody(c.request.body);
       let resp: Response;
       try {
-        resp = await client.fetch(`httpi://${serverId}${c.request.path}`,
-          {
-            method: c.request.method,
-            headers: c.request.headers,
-            body: reqBody,
-            directAddrs: serverAddrs,
-          },
-        );
+        resp = await client.fetch(`httpi://${serverId}${c.request.path}`, {
+          method: c.request.method,
+          headers: c.request.headers,
+          body: reqBody,
+          directAddrs: serverAddrs,
+        });
       } catch (e) {
-        const reason = `fetch threw: ${e instanceof Error ? e.message : String(e)}`;
+        const reason = `fetch threw: ${
+          e instanceof Error ? e.message : String(e)
+        }`;
         result.failed++;
         result.failures.push({ id: c.id, reason });
         report(`  FAIL ${c.id}: ${reason}`);

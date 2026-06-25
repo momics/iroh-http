@@ -28,9 +28,9 @@ import {
   rawFetch as napiRawFetch,
   rawRespond as napiRawRespond,
   rawServe as napiRawServe,
+  sessionAccept as napiSessionAccept,
   sessionClosed as napiSessionClosed,
   sessionCloseHandle as napiSessionClose,
-  sessionAccept as napiSessionAccept,
   sessionConnect as napiSessionConnect,
   sessionCreateBidiStream as napiSessionCreateBidiStream,
   sessionCreateUniStream as napiSessionCreateUniStream,
@@ -54,11 +54,11 @@ import {
   type SecretKey,
 } from "@momics/iroh-http-shared";
 import {
+  type FetchOptions,
   type FfiDuplexStream,
   type FfiResponse,
   type FfiResponseHead,
   IrohAdapter,
-  type FetchOptions,
   type PeerConnectionEvent,
   type RequestPayload,
   type TransportEventPayload,
@@ -254,7 +254,11 @@ class NodeAdapter extends IrohAdapter {
     await napiRawServe(
       endpointHandle,
       (options.serveOptions ?? null) as Parameters<typeof napiRawServe>[1],
-      (payload: Parameters<typeof napiRawServe>[2] extends (arg: infer A) => void ? A : never) => {
+      (
+        payload: Parameters<typeof napiRawServe>[2] extends
+          (arg: infer A) => void ? A
+          : never,
+      ) => {
         const typed = payload as unknown as RequestPayload;
         const task = callback(typed)
           .then((head) => {

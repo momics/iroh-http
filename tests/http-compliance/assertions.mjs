@@ -39,7 +39,11 @@ export function assertResponse(testCase, res, bodyText, bodyLength) {
     if (bodyText !== expected.bodyExact) {
       const truncActual = truncate(bodyText, 120);
       const truncExpected = truncate(expected.bodyExact, 120);
-      failures.push(`bodyExact: expected ${JSON.stringify(truncExpected)}, got ${JSON.stringify(truncActual)}`);
+      failures.push(
+        `bodyExact: expected ${JSON.stringify(truncExpected)}, got ${
+          JSON.stringify(truncActual)
+        }`,
+      );
     }
   }
 
@@ -53,14 +57,20 @@ export function assertResponse(testCase, res, bodyText, bodyLength) {
   // bodyNot
   if (expected.bodyNot !== undefined) {
     if (bodyText === expected.bodyNot) {
-      failures.push(`bodyNot: body must not equal ${JSON.stringify(expected.bodyNot)}`);
+      failures.push(
+        `bodyNot: body must not equal ${JSON.stringify(expected.bodyNot)}`,
+      );
     }
   }
 
   // bodyContains
   if (expected.bodyContains !== undefined) {
     if (!bodyText || !bodyText.includes(expected.bodyContains)) {
-      failures.push(`bodyContains: body does not contain ${JSON.stringify(expected.bodyContains)}`);
+      failures.push(
+        `bodyContains: body does not contain ${
+          JSON.stringify(expected.bodyContains)
+        }`,
+      );
     }
   }
 
@@ -68,15 +78,20 @@ export function assertResponse(testCase, res, bodyText, bodyLength) {
   if (expected.bodyMatchesRegex !== undefined) {
     const re = new RegExp(expected.bodyMatchesRegex);
     if (!bodyText || !re.test(bodyText)) {
-      failures.push(`bodyMatchesRegex: body does not match /${expected.bodyMatchesRegex}/`);
+      failures.push(
+        `bodyMatchesRegex: body does not match /${expected.bodyMatchesRegex}/`,
+      );
     }
   }
 
   // bodyLengthExact
   if (expected.bodyLengthExact !== undefined) {
-    const len = bodyLength ?? (bodyText ? new TextEncoder().encode(bodyText).byteLength : 0);
+    const len = bodyLength ??
+      (bodyText ? new TextEncoder().encode(bodyText).byteLength : 0);
     if (len !== expected.bodyLengthExact) {
-      failures.push(`bodyLengthExact: expected ${expected.bodyLengthExact}, got ${len}`);
+      failures.push(
+        `bodyLengthExact: expected ${expected.bodyLengthExact}, got ${len}`,
+      );
     }
   }
 
@@ -84,7 +99,9 @@ export function assertResponse(testCase, res, bodyText, bodyLength) {
   if (expected.bodyMinLength !== undefined) {
     const len = bodyLength ?? (bodyText ? bodyText.length : 0);
     if (len < expected.bodyMinLength) {
-      failures.push(`bodyMinLength: expected >= ${expected.bodyMinLength}, got ${len}`);
+      failures.push(
+        `bodyMinLength: expected >= ${expected.bodyMinLength}, got ${len}`,
+      );
     }
   }
 
@@ -95,7 +112,11 @@ export function assertResponse(testCase, res, bodyText, bodyLength) {
       if (actual === null) {
         failures.push(`header ${name}: missing`);
       } else if (actual !== expectedValue) {
-        failures.push(`header ${name}: expected ${JSON.stringify(expectedValue)}, got ${JSON.stringify(actual)}`);
+        failures.push(
+          `header ${name}: expected ${JSON.stringify(expectedValue)}, got ${
+            JSON.stringify(actual)
+          }`,
+        );
       }
     }
   }

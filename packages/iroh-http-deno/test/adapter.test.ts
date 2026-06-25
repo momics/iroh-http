@@ -11,17 +11,9 @@
  * Run:  deno test -A test/adapter.test.ts
  */
 
-import {
-  assert,
-  assertEquals,
-  assertInstanceOf,
-} from "jsr:@std/assert@^1";
+import { assert, assertEquals, assertInstanceOf } from "jsr:@std/assert@^1";
 import { createNode } from "../mod.ts";
-import {
-  generateSecretKey,
-  publicKeyVerify,
-  secretKeySign,
-} from "../mod.ts";
+import { generateSecretKey, publicKeyVerify, secretKeySign } from "../mod.ts";
 
 // ── generateSecretKey (FFI-only) ─────────────────────────────────────────────
 
@@ -114,8 +106,14 @@ Deno.test({
   const STREAMS = 8;
   const CONCURRENCY_LIMIT = 2;
 
-  const server = await createNode({ disableNetworking: true, bindAddr: "127.0.0.1:0" });
-  const client = await createNode({ disableNetworking: true, bindAddr: "127.0.0.1:0" });
+  const server = await createNode({
+    disableNetworking: true,
+    bindAddr: "127.0.0.1:0",
+  });
+  const client = await createNode({
+    disableNetworking: true,
+    bindAddr: "127.0.0.1:0",
+  });
   const { id: serverId, addrs: serverAddrs } = await server.addr();
 
   const ac = new AbortController();
@@ -132,14 +130,16 @@ Deno.test({
       Array.from({ length: STREAMS }, () =>
         client
           .fetch(`httpi://${serverId}/load`, { directAddrs: serverAddrs })
-          .then(async (r) => ({ status: r.status }))
-      ),
+          .then(async (r) => ({ status: r.status }))),
     );
 
     const ok = results.filter((r) => r.status === 200);
     const shed = results.filter((r) => r.status === 503);
 
-    assert(shed.length > 0, `Expected ≥1 load-shed 503, all ${STREAMS} got 200`);
+    assert(
+      shed.length > 0,
+      `Expected ≥1 load-shed 503, all ${STREAMS} got 200`,
+    );
     assert(ok.length > 0, `Expected ≥1 success, all ${STREAMS} got 503`);
   } finally {
     ac.abort();
@@ -152,7 +152,8 @@ Deno.test({
 // ── Low-concurrency stale-handle variant (#119) ──────────────────────────────
 
 Deno.test({
-  name: "regression #119 — 8-stream burst × 20 iterations: no stale-handle errors",
+  name:
+    "regression #119 — 8-stream burst × 20 iterations: no stale-handle errors",
   sanitizeOps: false,
 }, async () => {
   const STREAMS = 8;
@@ -173,23 +174,29 @@ Deno.test({
     originalConsoleError(...args);
   };
 
-  const server = await createNode({ disableNetworking: true, bindAddr: "127.0.0.1:0" });
-  const client = await createNode({ disableNetworking: true, bindAddr: "127.0.0.1:0" });
+  const server = await createNode({
+    disableNetworking: true,
+    bindAddr: "127.0.0.1:0",
+  });
+  const client = await createNode({
+    disableNetworking: true,
+    bindAddr: "127.0.0.1:0",
+  });
   const { id: serverId, addrs: serverAddrs } = await server.addr();
 
   try {
     for (let iter = 0; iter < ITERS; iter++) {
       const ac = new AbortController();
-      const handle = server.serve({ signal: ac.signal, loadShed: false }, () =>
-        new Response(BODY)
+      const handle = server.serve(
+        { signal: ac.signal, loadShed: false },
+        () => new Response(BODY),
       );
 
       await Promise.all(
         Array.from({ length: STREAMS }, () =>
           client
             .fetch(`httpi://${serverId}/data`, { directAddrs: serverAddrs })
-            .then((r) => r.text())
-        ),
+            .then((r) => r.text())),
       );
 
       ac.abort();

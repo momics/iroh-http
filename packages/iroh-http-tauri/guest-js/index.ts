@@ -213,10 +213,13 @@ class TauriAdapter extends IrohAdapter {
       args: {
         endpointHandle: Number(endpointHandle),
         maxConcurrency: options.serveOptions?.maxConcurrency ?? null,
-        maxConnectionsPerPeer: options.serveOptions?.maxConnectionsPerPeer ?? null,
+        maxConnectionsPerPeer: options.serveOptions?.maxConnectionsPerPeer ??
+          null,
         requestTimeout: options.serveOptions?.requestTimeout ?? null,
-        maxRequestBodyWireBytes: options.serveOptions?.maxRequestBodyWireBytes ?? null,
-        maxRequestBodyDecodedBytes: options.serveOptions?.maxRequestBodyDecodedBytes ?? null,
+        maxRequestBodyWireBytes:
+          options.serveOptions?.maxRequestBodyWireBytes ?? null,
+        maxRequestBodyDecodedBytes:
+          options.serveOptions?.maxRequestBodyDecodedBytes ?? null,
         maxTotalConnections: options.serveOptions?.maxTotalConnections ?? null,
         maxServeErrors: options.serveOptions?.maxServeErrors ?? null,
         drainTimeout: options.serveOptions?.drainTimeout ?? null,
@@ -357,7 +360,9 @@ function makeTauriSessionFns(epHandle: number): RawSessionFns {
       }).then(BigInt);
     },
     sessionAccept: async (endpointHandle) => {
-      const res = await invoke<{ sessionHandle: number; nodeId: string } | null>(
+      const res = await invoke<
+        { sessionHandle: number; nodeId: string } | null
+      >(
         `${PLUGIN}|session_accept`,
         { endpointHandle: Number(endpointHandle) },
       );

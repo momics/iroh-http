@@ -18,7 +18,9 @@ node.serve({ signal: ac.signal }, handleRequest);
 Deno.stdout.writeSync(
   new TextEncoder().encode("READY:" + JSON.stringify({ nodeId, addrs }) + "\n"),
 );
-Deno.stderr.writeSync(new TextEncoder().encode(`[server.deno.ts] serving as ${nodeId}\n`));
+Deno.stderr.writeSync(
+  new TextEncoder().encode(`[server.deno.ts] serving as ${nodeId}\n`),
+);
 
 // Wait for signal.
 Deno.addSignalListener("SIGINT", async () => {

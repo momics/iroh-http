@@ -35,13 +35,18 @@ function getArg(args, flag) {
 }
 
 // ── Load cases ──────────────────────────────────────────────────────────────
-const casesRaw = await readFile(new URL("./cases.json", import.meta.url), "utf-8");
+const casesRaw = await readFile(
+  new URL("./cases.json", import.meta.url),
+  "utf-8",
+);
 const allCases = JSON.parse(casesRaw).filter((c) => c.id); // skip comment entries
 
 let cases = allCases;
 if (filterPattern) {
   cases = cases.filter((c) => c.id.includes(filterPattern));
-  console.log(`Filter: "${filterPattern}" → ${cases.length}/${allCases.length} cases\n`);
+  console.log(
+    `Filter: "${filterPattern}" → ${cases.length}/${allCases.length} cases\n`,
+  );
 }
 
 // ── Create nodes ────────────────────────────────────────────────────────────
@@ -115,7 +120,11 @@ const startTime = Date.now();
 
 for (const tc of cases) {
   if (!tc.id) continue; // skip comment entries
-  if (tc.skip) { skipped++; console.log(`  skip  [${tc.id}]: ${tc.skip}`); continue; }
+  if (tc.skip) {
+    skipped++;
+    console.log(`  skip  [${tc.id}]: ${tc.skip}`);
+    continue;
+  }
   // Skip cases with features we can't handle yet
   if (tc.requests) {
     // Sequential multi-request test
@@ -129,7 +138,7 @@ for (const tc of cases) {
           { response: sub.expect },
           res,
           bodyText,
-          bodyLength
+          bodyLength,
         );
         if (!result.pass) {
           allPassed = false;
@@ -164,7 +173,9 @@ for (const tc of cases) {
       // Run N sequential requests
       let allPassed = true;
       for (let i = 0; i < sequential; i++) {
-        const { res, bodyText, bodyLength } = await runSingleRequest(tc.request);
+        const { res, bodyText, bodyLength } = await runSingleRequest(
+          tc.request,
+        );
         const result = assertResponse(tc, res, bodyText, bodyLength);
         if (!result.pass) {
           allPassed = false;
@@ -186,8 +197,9 @@ for (const tc of cases) {
 
     if (concurrency > 1 || repeatCount > 1) {
       // Concurrent / repeated requests
-      const promises = Array.from({ length: totalRuns }, () =>
-        runSingleRequest(tc.request)
+      const promises = Array.from(
+        { length: totalRuns },
+        () => runSingleRequest(tc.request),
       );
       const results = await Promise.all(promises);
 
@@ -249,7 +261,9 @@ for (const tc of cases) {
 // ── Summary ─────────────────────────────────────────────────────────────────
 const elapsed = ((Date.now() - startTime) / 1000).toFixed(2);
 console.log("\n" + "─".repeat(60));
-console.log(`Results: ${passed} passed, ${failed} failed, ${skipped} skipped (${elapsed}s)`);
+console.log(
+  `Results: ${passed} passed, ${failed} failed, ${skipped} skipped (${elapsed}s)`,
+);
 if (failedCases.length > 0) {
   console.log(`\nFailed cases:`);
   failedCases.forEach((id) => console.log(`  - ${id}`));

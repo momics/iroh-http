@@ -11,9 +11,17 @@
  *   - Error propagation from IPC failures
  */
 
-import { beforeAll, beforeEach, afterEach, describe, expect, it, vi } from "vitest";
+import {
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
 import { randomFillSync } from "crypto";
-import { mockIPC, mockWindows, clearMocks } from "@tauri-apps/api/mocks";
+import { clearMocks, mockIPC, mockWindows } from "@tauri-apps/api/mocks";
 
 // jsdom lacks WebCrypto — polyfill for Tauri internals.
 beforeAll(() => {
@@ -168,7 +176,10 @@ describe("createNode IPC", () => {
         return new Promise(() => {});
       }
       if (cmd === "plugin:iroh-http|node_addr") {
-        return { id: "testnode123456789012345678901234567890123456789012", addrs: [] };
+        return {
+          id: "testnode123456789012345678901234567890123456789012",
+          addrs: [],
+        };
       }
     });
 
