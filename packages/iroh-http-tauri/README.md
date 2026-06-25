@@ -112,9 +112,10 @@ document.querySelector("audio").src = "httpi://<peer-id>/track.flac"; // seeking
 ```
 
 The handler auto-binds to the first endpoint created. There is nothing else to
-configure.\n\n> **GET only:** The scheme handler resolves GET requests. Non-GET
-callers receive `405 Method Not Allowed`. Use `node.fetch()` for POST, PUT,
-DELETE.\n
+configure.
+
+> **GET only:** The scheme handler resolves GET requests. Non-GET callers
+> receive `405 Method Not Allowed`. Use `node.fetch()` for POST, PUT, DELETE.
 
 > **Platform note:** On macOS, Linux, and iOS the origin is
 > `httpi://<nodeid>/path`. On Windows and Android, Tauri rewrites the origin to

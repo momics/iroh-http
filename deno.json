@@ -12,7 +12,7 @@
     "target"
   ],
   "fmt": {
-    "include": ["packages", "examples"],
+    "include": ["packages", "examples", "tests/http-compliance"],
     "exclude": [
       "**/node_modules",
       "**/dist",
