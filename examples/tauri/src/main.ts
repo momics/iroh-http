@@ -275,7 +275,7 @@ advertiseBtn.addEventListener("click", async () => {
   setStatus(advertiseStatus, `Advertising as "${serviceName}"`, "ok");
 
   try {
-    await node.advertise({ serviceName }, advertiseAbort.signal);
+    await node.advertise({ serviceName, signal: advertiseAbort.signal });
   } catch { /* aborted or error */ }
 
   advertiseAbort = null;
@@ -297,9 +297,9 @@ browseBtn.addEventListener("click", async () => {
   browseLog.textContent = "";
 
   try {
-    for await (const ev of node.browse({ serviceName }, browseAbort.signal)) {
-      const icon = ev.type === "discovered" ? "+" : "-";
-      appendLog(browseLog, `${icon} ${ev.nodeId.slice(0, 20)}… [${(ev.addrs ?? []).join(", ")}]`);
+    for await (const ev of node.browse({ serviceName, signal: browseAbort.signal })) {
+      const icon = ev.isActive ? "+" : "-";
+      appendLog(browseLog, `${icon} ${ev.nodeId.slice(0, 20)}… [${ev.addrs.join(", ")}]`);
     }
   } catch (e) {
     appendLog(browseLog, `Error: ${e}`);
