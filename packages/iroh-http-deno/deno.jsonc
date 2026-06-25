@@ -1,6 +1,6 @@
 {
   "name": "@momics/iroh-http-deno",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "exports": "./mod.ts",
   "license": "MIT",
   "tasks": {
@@ -17,6 +17,6 @@
   "imports": {
     "@std/path":                  "jsr:@std/path@^1",
     "@std/fs":                    "jsr:@std/fs@^1",
-    "@momics/iroh-http-shared":   "jsr:@momics/iroh-http-shared@^0.4"
+    "@momics/iroh-http-shared":   "jsr:@momics/iroh-http-shared@^0.5"
   }
 }

@@ -1,6 +1,6 @@
 {
   "name": "@momics/iroh-http-node-linux-x64-gnu",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "iroh-http Node.js native addon — Linux x64 (glibc)",
   "os": ["linux"],
   "cpu": ["x64"],

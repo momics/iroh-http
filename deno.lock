@@ -135,14 +135,7 @@
     "@emnapi/core@1.10.0": {
       "integrity": "sha512-yq6OkJ4p82CAfPl0u9mQebQHKPJkY7WrIuk205cTYnYe+k2Z8YBh11FrbRG/H6ihirqcacOgl2BIO8oyMQLeXw==",
       "dependencies": [
-        "@emnapi/wasi-threads@1.2.1",
-        "tslib"
-      ]
-    },
-    "@emnapi/core@1.11.1": {
-      "integrity": "sha512-RSvbQmHzdKzNsLYa/wHrbc3KN4sYLKAdPZxqiM2HATqv/SBk2/ENSHpvXGaLOMcsAyz0poEGqkmmKYG3OWiJEQ==",
-      "dependencies": [
-        "@emnapi/wasi-threads@1.2.2",
+        "@emnapi/wasi-threads",
         "tslib"
       ]
     },
@@ -152,20 +145,8 @@
         "tslib"
       ]
     },
-    "@emnapi/runtime@1.11.1": {
-      "integrity": "sha512-vgj7R3y3Wgx24IQaGPA/R6YFXLHVMOZ0uVEyIQPaWs+rd1AzfEMXlAC22FYwO1XkKR6NPsq7mUandH8oIRdZFw==",
-      "dependencies": [
-        "tslib"
-      ]
-    },
     "@emnapi/wasi-threads@1.2.1": {
       "integrity": "sha512-uTII7OYF+/Mes/MrcIOYp5yOtSMLBWSIoLPpcgwipoiKbli6k322tcoFsxoIIxPDqW01SQGAgko4EzZi2BNv2w==",
-      "dependencies": [
-        "tslib"
-      ]
-    },
-    "@emnapi/wasi-threads@1.2.2": {
-      "integrity": "sha512-c95qOXkHdydNKhscBTebqEC1CVAZpyqOfVfBzQ1qgzyl3gfeldUjIggDbIZgDKsHLgnsM+igH7TJ/eAasaVuMA==",
       "dependencies": [
         "tslib"
       ]
@@ -357,7 +338,6 @@
     "@napi-rs/cli@3.7.2_@emnapi+runtime@1.11.1_@emnapi+core@1.11.1_@types+node@25.6.0": {
       "integrity": "sha512-shDW0Td/XZQpP04Yy+OsMt1ILMKGGkoLcy1zVAsSAK0fLfWm0Upgkmfs/NOV2ZhMQwkgpR3ZEdyHmTwgrUDQuA==",
       "dependencies": [
-        "@emnapi/runtime@1.11.1",
         "@inquirer/prompts",
         "@napi-rs/cross-toolchain",
         "@napi-rs/wasm-tools",
@@ -370,9 +350,6 @@
         "obug",
         "semver",
         "typanion"
-      ],
-      "optionalPeers": [
-        "@emnapi/runtime@1.11.1"
       ],
       "bin": true
     },
@@ -599,16 +576,14 @@
     "@napi-rs/wasm-runtime@1.1.5_@emnapi+core@1.10.0_@emnapi+runtime@1.10.0": {
       "integrity": "sha512-AWPoBRJ9tsnVhor4sjO7rkni+7p+2IAEFj6cx06UgP10jkQHqay/36uRV/bFkgrh18D9vb4cr8Q0Pthskgzy+Q==",
       "dependencies": [
-        "@emnapi/core@1.10.0",
-        "@emnapi/runtime@1.10.0",
+        "@emnapi/core",
+        "@emnapi/runtime",
         "@tybys/wasm-util"
       ]
     },
     "@napi-rs/wasm-runtime@1.1.5_@emnapi+core@1.11.1_@emnapi+runtime@1.11.1": {
       "integrity": "sha512-AWPoBRJ9tsnVhor4sjO7rkni+7p+2IAEFj6cx06UgP10jkQHqay/36uRV/bFkgrh18D9vb4cr8Q0Pthskgzy+Q==",
       "dependencies": [
-        "@emnapi/core@1.11.1",
-        "@emnapi/runtime@1.11.1",
         "@tybys/wasm-util"
       ]
     },
@@ -848,8 +823,8 @@
     "@rolldown/binding-wasm32-wasi@1.0.3": {
       "integrity": "sha512-JTtb8BWFynicNSoPrehsCzBtOKjZ6jhMiPFEmOiuXg1Fl8dn2KHQob+GuPSGR0dryQa1PQJbzjF3dqO/whhjLg==",
       "dependencies": [
-        "@emnapi/core@1.10.0",
-        "@emnapi/runtime@1.10.0",
+        "@emnapi/core",
+        "@emnapi/runtime",
         "@napi-rs/wasm-runtime@1.1.5_@emnapi+core@1.10.0_@emnapi+runtime@1.10.0"
       ],
       "cpu": ["wasm32"]
@@ -1465,7 +1440,7 @@
       },
       "packages/iroh-http-deno": {
         "dependencies": [
-          "jsr:@momics/iroh-http-shared@0.4",
+          "jsr:@momics/iroh-http-shared@0.5",
           "jsr:@std/fs@1",
           "jsr:@std/path@1"
         ]
@@ -1473,7 +1448,7 @@
       "packages/iroh-http-node": {
         "packageJson": {
           "dependencies": [
-            "npm:@momics/iroh-http-shared@0.4",
+            "npm:@momics/iroh-http-shared@0.5",
             "npm:@napi-rs/cli@^3.7.0",
             "npm:@types/node@^25.6.0",
             "npm:typescript@5"
@@ -1490,7 +1465,7 @@
       "packages/iroh-http-tauri": {
         "packageJson": {
           "dependencies": [
-            "npm:@momics/iroh-http-shared@0.4",
+            "npm:@momics/iroh-http-shared@0.5",
             "npm:@tauri-apps/api@2",
             "npm:jsdom@^29.1.0",
             "npm:typescript@5",
