@@ -805,10 +805,10 @@
           "markdownDescription": "Node lifecycle and introspection. Covers createNode() and close(). Add iroh-http:fetch and/or iroh-http:serve for HTTP capability.\n#### This default permission set includes:\n\n- `allow-create-endpoint`\n- `allow-close-endpoint`\n- `allow-wait-endpoint-closed`\n- `allow-ping`\n- `allow-node-addr`\n- `allow-node-ticket`\n- `allow-home-relay`\n- `allow-peer-info`\n- `allow-peer-stats`\n- `allow-endpoint-stats`"
         },
         {
-          "description": "Enables node.fetch() — send HTTP requests to remote peers. Includes all internal body-streaming primitives required for fetch to function.",
+          "description": "Enables node.fetch() — send HTTP requests to remote peers. Includes all internal body-streaming primitives required for fetch to function.\n#### This permission set includes:\n\n- `allow-fetch`\n- `allow-create-fetch-token`\n- `allow-cancel-in-flight`\n- `allow-cancel-request`\n- `allow-create-body-writer`\n- `allow-next-chunk`\n- `allow-send-chunk`\n- `allow-finish-body`",
           "type": "string",
           "const": "fetch",
-          "markdownDescription": "Enables node.fetch() — send HTTP requests to remote peers. Includes all internal body-streaming primitives required for fetch to function."
+          "markdownDescription": "Enables node.fetch() — send HTTP requests to remote peers. Includes all internal body-streaming primitives required for fetch to function.\n#### This permission set includes:\n\n- `allow-fetch`\n- `allow-create-fetch-token`\n- `allow-cancel-in-flight`\n- `allow-cancel-request`\n- `allow-create-body-writer`\n- `allow-next-chunk`\n- `allow-send-chunk`\n- `allow-finish-body`"
         },
         {
           "description": "Enables local peer discovery via mDNS — browse for peers on the local network and advertise this node.\n#### This permission set includes:\n\n- `allow-mdns-browse`\n- `allow-mdns-browse-close`\n- `allow-mdns-next-event`\n- `allow-mdns-advertise`\n- `allow-mdns-advertise-close`",
