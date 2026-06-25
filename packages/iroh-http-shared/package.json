@@ -30,7 +30,7 @@
   "license": "(MIT OR Apache-2.0)",
   "repository": {
     "type": "git",
-    "url": "https://github.com/Momics/iroh-http"
+    "url": "https://github.com/momics/iroh-http"
   },
-  "homepage": "https://github.com/Momics/iroh-http"
+  "homepage": "https://github.com/momics/iroh-http"
 }

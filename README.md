@@ -1,6 +1,6 @@
 # iroh-http
 
-[![CI](https://github.com/Momics/iroh-http/actions/workflows/ci.yml/badge.svg)](https://github.com/Momics/iroh-http/actions/workflows/ci.yml)
+[![CI](https://github.com/momics/iroh-http/actions/workflows/ci.yml/badge.svg)](https://github.com/momics/iroh-http/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/@momics/iroh-http-node)](https://www.npmjs.com/package/@momics/iroh-http-node)
 [![JSR](https://jsr.io/badges/@momics/iroh-http-deno)](https://jsr.io/@momics/iroh-http-deno)
 [![crates.io](https://img.shields.io/crates/v/iroh-http-core)](https://crates.io/crates/iroh-http-core)

@@ -19,10 +19,10 @@
     "@tauri-apps/api": "^2"
   },
   "devDependencies": {
-    "@tauri-apps/api": "^2",
+    "@tauri-apps/api": "^2.11.1",
     "jsdom": "^29.1.0",
     "typescript": "^5",
-    "vitest": "^4.1.8"
+    "vitest": "^4.1.9"
   },
   "dependencies": {
     "@momics/iroh-http-shared": "^0.5"
@@ -37,7 +37,7 @@
   "license": "(MIT OR Apache-2.0)",
   "repository": {
     "type": "git",
-    "url": "https://github.com/Momics/iroh-http"
+    "url": "https://github.com/momics/iroh-http"
   },
-  "homepage": "https://github.com/Momics/iroh-http"
+  "homepage": "https://github.com/momics/iroh-http"
 }

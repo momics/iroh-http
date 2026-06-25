@@ -57,7 +57,7 @@ function libName(): string {
 /** Version must match the tag used for GitHub releases (v0.1.0 → tag v0.1.0). */
 const VERSION = "0.5.0";
 const DOWNLOAD_BASE =
-  `https://github.com/Momics/iroh-http/releases/download/v${VERSION}`;
+  `https://github.com/momics/iroh-http/releases/download/v${VERSION}`;
 
 function cacheDir(): string {
   // Local dev: import.meta.url is file://, use lib/ next to src/.

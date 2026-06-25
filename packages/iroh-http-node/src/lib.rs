@@ -641,9 +641,17 @@ pub fn mdns_browse_close(_browse_handle: u32) {}
 
 /// Start advertising this node on the local network via mDNS.
 /// Returns an advertise handle.
+///
+/// Declared `async` so napi runs it inside the global Tokio runtime. The mDNS
+/// address-lookup constructor calls `tokio::runtime::Handle::current()`, which
+/// panics outside a runtime context. A synchronous binding ran on the bare JS
+/// thread and could panic—aborting the process under `panic = "abort"`—when
+/// invoked from a late promise continuation during `--test-force-exit` teardown
+/// (issue #243). Running inside the runtime keeps the handle valid and lets
+/// post-shutdown calls reject gracefully instead of aborting.
 #[napi]
 #[cfg(feature = "discovery")]
-pub fn mdns_advertise(endpoint_handle: u32, service_name: String) -> napi::Result<u32> {
+pub async fn mdns_advertise(endpoint_handle: u32, service_name: String) -> napi::Result<u32> {
     let ep = get_endpoint(endpoint_handle)?;
     validate_bounded_string("serviceName", &service_name, MAX_MDNS_SERVICE_NAME_LEN)
         .map_err(ffi_invalid_arg)?;
@@ -655,7 +663,7 @@ pub fn mdns_advertise(endpoint_handle: u32, service_name: String) -> napi::Resul
 
 #[napi]
 #[cfg(not(feature = "discovery"))]
-pub fn mdns_advertise(_endpoint_handle: u32, _service_name: String) -> napi::Result<u32> {
+pub async fn mdns_advertise(_endpoint_handle: u32, _service_name: String) -> napi::Result<u32> {
     Err(napi::Error::new(
         Status::GenericFailure,
         format_error_json("UNKNOWN", "discovery feature not enabled in this build"),

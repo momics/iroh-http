@@ -270,8 +270,16 @@ export declare function jsTryNextChunk(endpointHandle: number, handle: bigint): 
 /**
  * Start advertising this node on the local network via mDNS.
  * Returns an advertise handle.
+ *
+ * Declared `async` so napi runs it inside the global Tokio runtime. The mDNS
+ * address-lookup constructor calls `tokio::runtime::Handle::current()`, which
+ * panics outside a runtime context. A synchronous binding ran on the bare JS
+ * thread and could panic—aborting the process under `panic = "abort"`—when
+ * invoked from a late promise continuation during `--test-force-exit` teardown
+ * (issue #243). Running inside the runtime keeps the handle valid and lets
+ * post-shutdown calls reject gracefully instead of aborting.
  */
-export declare function mdnsAdvertise(endpointHandle: number, serviceName: string): number
+export declare function mdnsAdvertise(endpointHandle: number, serviceName: string): Promise<number>
 
 /** Stop advertising this node on the local network. */
 export declare function mdnsAdvertiseClose(advertiseHandle: number): void

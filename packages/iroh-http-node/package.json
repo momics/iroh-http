@@ -24,7 +24,7 @@
     "test:compliance": "node test/compliance.mjs"
   },
   "devDependencies": {
-    "@napi-rs/cli": "^3.7.0",
+    "@napi-rs/cli": "^3.7.2",
     "@types/node": "^25.6.0",
     "typescript": "^5"
   },
@@ -57,7 +57,7 @@
   "license": "(MIT OR Apache-2.0)",
   "repository": {
     "type": "git",
-    "url": "https://github.com/Momics/iroh-http"
+    "url": "https://github.com/momics/iroh-http"
   },
-  "homepage": "https://github.com/Momics/iroh-http"
+  "homepage": "https://github.com/momics/iroh-http"
 }
