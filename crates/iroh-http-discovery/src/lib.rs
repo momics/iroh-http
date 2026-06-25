@@ -12,9 +12,7 @@
 #![deny(unsafe_code)]
 
 #[cfg(feature = "mdns")]
-use iroh::address_lookup::{DiscoveryEvent, MdnsAddressLookup};
-#[cfg(feature = "mdns")]
-use std::sync::Arc;
+use iroh_mdns_address_lookup::{DiscoveryEvent, MdnsAddressLookup};
 
 // ── DiscoveryError ────────────────────────────────────────────────────────────
 
@@ -68,7 +66,7 @@ pub struct PeerDiscoveryEvent {
 #[cfg(feature = "mdns")]
 pub struct BrowseSession {
     rx: tokio::sync::mpsc::Receiver<DiscoveryEvent>,
-    _mdns: Arc<MdnsAddressLookup>,
+    _mdns: MdnsAddressLookup,
 }
 
 #[cfg(feature = "mdns")]
@@ -114,16 +112,14 @@ pub async fn start_browse(
     ep: &iroh::Endpoint,
     service_name: &str,
 ) -> Result<BrowseSession, DiscoveryError> {
-    let mdns = Arc::new(
-        MdnsAddressLookup::builder()
-            .advertise(false)
-            .service_name(service_name)
-            .build(ep.id())
-            .map_err(|e| DiscoveryError::Setup(e.to_string()))?,
-    );
+    let mdns = MdnsAddressLookup::builder()
+        .advertise(false)
+        .service_name(service_name)
+        .build(ep.id())
+        .map_err(|e| DiscoveryError::Setup(e.to_string()))?;
     ep.address_lookup()
         .map_err(|e| DiscoveryError::Setup(e.to_string()))?
-        .add(Arc::clone(&mdns));
+        .add(mdns.clone());
 
     // subscribe() returns impl Stream — we manually drive it into an mpsc channel
     // so BrowseSession has a concrete Receiver type.
@@ -149,7 +145,7 @@ pub async fn start_browse(
 /// registered on the endpoint (same caveat as [`BrowseSession`]).
 #[cfg(feature = "mdns")]
 pub struct AdvertiseSession {
-    _mdns: Arc<MdnsAddressLookup>,
+    _mdns: MdnsAddressLookup,
 }
 
 /// Start advertising this node on the local network via mDNS.
@@ -160,16 +156,14 @@ pub fn start_advertise(
     ep: &iroh::Endpoint,
     service_name: &str,
 ) -> Result<AdvertiseSession, DiscoveryError> {
-    let mdns = Arc::new(
-        MdnsAddressLookup::builder()
-            .advertise(true)
-            .service_name(service_name)
-            .build(ep.id())
-            .map_err(|e| DiscoveryError::Setup(e.to_string()))?,
-    );
+    let mdns = MdnsAddressLookup::builder()
+        .advertise(true)
+        .service_name(service_name)
+        .build(ep.id())
+        .map_err(|e| DiscoveryError::Setup(e.to_string()))?;
     ep.address_lookup()
         .map_err(|e| DiscoveryError::Setup(e.to_string()))?
-        .add(Arc::clone(&mdns));
+        .add(mdns.clone());
     Ok(AdvertiseSession { _mdns: mdns })
 }
 

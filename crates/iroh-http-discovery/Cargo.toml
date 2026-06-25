@@ -11,9 +11,10 @@ categories = ["network-programming"]
 
 [features]
 default = ["mdns"]
-mdns = ["iroh/address-lookup-mdns"]
+mdns = ["dep:iroh-mdns-address-lookup"]
 
 [dependencies]
 iroh = { workspace = true }
+iroh-mdns-address-lookup = { workspace = true, optional = true }
 tokio = { workspace = true }
 futures = { workspace = true }
