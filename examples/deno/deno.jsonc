@@ -5,7 +5,7 @@
     "client": "deno run --allow-ffi --allow-read --allow-env main.ts client"
   },
   "imports": {
-    "@momics/iroh-http-deno": "jsr:@momics/iroh-http-deno@^0.2.1",
+    "@momics/iroh-http-deno": "jsr:@momics/iroh-http-deno@^0.5.1",
     "@std/path": "jsr:@std/path@^1",
     "@std/fs": "jsr:@std/fs@^1"
   }
