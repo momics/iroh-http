@@ -5,7 +5,7 @@ edition = "2021"
 rust-version = "1.77.2"
 description = "Tauri plugin for iroh-http peer-to-peer HTTP"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/Momics/iroh-http"
+repository = "https://github.com/momics/iroh-http"
 readme = "README.md"
 links = "tauri-plugin-iroh-http"
 
