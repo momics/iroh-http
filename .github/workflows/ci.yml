@@ -243,13 +243,15 @@ jobs:
             if echo "$CHANGED" | grep -qE '(Cargo\.toml|package\.json|deno\.jsonc?)$'; then
               # Narrow to actual version-field changes: a dep bump or script
               # addition is not a version bump and should not be blocked.
-              # Match added lines (+) only — never context lines — that contain:
-              #   Cargo: `version = "X.Y.Z"`
-              #   JSON : `"version": "X.Y.Z"`
-              # Both alternatives are anchored with ^\+[^+] to exclude context
-              # and removal lines from the diff output (fixes false-positive where
-              # a dependency bump landed within context distance of the package
-              # "version" field in package.json).
+              # Match added lines (+) only — never context lines — where the
+              # package's OWN version field starts the line content:
+              #   Cargo: `version = "X.Y.Z"`   (bare key, no indentation)
+              #   JSON : `  "version": "X.Y.Z"` (indented object key)
+              # Anchoring the key to the start of the line (after the diff `+`
+              # and optional indentation) excludes Cargo dependency-table
+              # entries such as `tower-http = { version = "0.7" }`, whose inline
+              # `version = "…"` is a dependency requirement, not the package's
+              # own version. The trailing [0-9] requires a real version literal.
               # Use specific filenames (not globs) to exclude lock files like
               # package-lock.json and yarn.lock whose "version" entries are
               # dependency versions, not the package's own version.
@@ -258,7 +260,7 @@ jobs:
                 'package.json' '*/package.json' \
                 'deno.json' '*/deno.json' \
                 'deno.jsonc' '*/deno.jsonc' 2>/dev/null \
-                | grep -E '^\+[^+].*((^|\s)version = "|"version": ")' || true)
+                | grep -E '^\+(version = "|[[:space:]]*"version": ")[0-9]' || true)
               [[ -z "$VERSION_DIFF" ]] && continue
 
               SUBJECT=$(git log -1 --format=%s "$sha")
