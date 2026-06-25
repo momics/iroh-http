@@ -207,6 +207,27 @@ export class IrohNode extends EventTarget {
     };
   }
 
+  /**
+   * Discover peers on the local network via mDNS.
+   *
+   * Returns an async iterable that yields a {@link DiscoveredPeer} for each
+   * mDNS announcement received. Mirroring iroh's discovery semantics, events
+   * are **not** de-duplicated: an active peer re-announces periodically, so the
+   * same `nodeId` is yielded repeatedly with `isActive: true`. A peer that ages
+   * out is yielded once with `isActive: false`. The iterable ends when the node
+   * closes or `options.signal` is aborted.
+   *
+   * @param options.serviceName mDNS service name to browse. Defaults to `"iroh-http"`.
+   * @param options.signal Abort signal to stop browsing and end the iterable.
+   *
+   * ```ts
+   * const ac = new AbortController();
+   * for await (const peer of node.browse({ serviceName: "my-app", signal: ac.signal })) {
+   *   console.log(peer.isActive ? "discovered" : "expired", peer.nodeId, peer.addrs);
+   * }
+   * ac.abort(); // stop browsing
+   * ```
+   */
   browse(options?: BrowseOptions): AsyncIterable<DiscoveredPeer> {
     const adapter = this.#adapter;
     const handle = this.#endpointHandle;
@@ -273,6 +294,26 @@ export class IrohNode extends EventTarget {
     };
   }
 
+  /**
+   * Announce this node on the local network via mDNS so peers can discover it.
+   *
+   * Pass `options.signal` to control how long the node stays advertised: the
+   * returned promise stays pending until the signal is aborted, then advertising
+   * stops. Without a signal, the promise resolves immediately and the node
+   * remains advertised for the lifetime of the node.
+   *
+   * @param options.serviceName mDNS service name to advertise under. Defaults to `"iroh-http"`.
+   * @param options.signal Abort signal to stop advertising.
+   *
+   * ```ts
+   * const ac = new AbortController();
+   * // Resolves when `ac.abort()` is called (e.g. from a Ctrl+C handler).
+   * const advertising = node.advertise({ serviceName: "my-app", signal: ac.signal });
+   * // ... later, to stop advertising:
+   * ac.abort();
+   * await advertising;
+   * ```
+   */
   async advertise(options?: AdvertiseOptions): Promise<void> {
     const svcName = options?.serviceName ?? "iroh-http";
     const signal = options?.signal;
