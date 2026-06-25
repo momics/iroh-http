@@ -387,7 +387,7 @@ pub(crate) fn build_compression_layer(
             .unwrap_or(true)
     };
 
-    let predicate = SizeAbove::new(comp.min_body_bytes.min(u16::MAX as usize) as u16)
+    let predicate = SizeAbove::new(comp.min_body_bytes as u64)
         .and(NotForContentType::IMAGES)
         .and(NotForContentType::SSE)
         .and(NotForContentType::const_new("audio/"))
