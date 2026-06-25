@@ -787,16 +787,16 @@
           "markdownDescription": "Denies the wait_serve_stop command without any pre-configured scope."
         },
         {
-          "description": "Enables raw QUIC sessions — bidirectional streams and datagrams directly to a peer, outside of HTTP framing.",
+          "description": "Enables raw QUIC sessions — bidirectional streams and datagrams directly to a peer, outside of HTTP framing.\n#### This permission set includes:\n\n- `allow-session-connect`\n- `allow-session-accept`\n- `allow-session-close`\n- `allow-session-closed`\n- `allow-session-create-bidi-stream`\n- `allow-session-create-uni-stream`\n- `allow-session-next-bidi-stream`\n- `allow-session-next-uni-stream`\n- `allow-session-send-datagram`\n- `allow-session-recv-datagram`\n- `allow-session-max-datagram-size`",
           "type": "string",
           "const": "connect",
-          "markdownDescription": "Enables raw QUIC sessions — bidirectional streams and datagrams directly to a peer, outside of HTTP framing."
+          "markdownDescription": "Enables raw QUIC sessions — bidirectional streams and datagrams directly to a peer, outside of HTTP framing.\n#### This permission set includes:\n\n- `allow-session-connect`\n- `allow-session-accept`\n- `allow-session-close`\n- `allow-session-closed`\n- `allow-session-create-bidi-stream`\n- `allow-session-create-uni-stream`\n- `allow-session-next-bidi-stream`\n- `allow-session-next-uni-stream`\n- `allow-session-send-datagram`\n- `allow-session-recv-datagram`\n- `allow-session-max-datagram-size`"
         },
         {
-          "description": "Enables low-level key operations — generate keypairs, sign with a secret key, and verify public key signatures.",
+          "description": "Enables low-level key operations — generate keypairs, sign with a secret key, and verify public key signatures.\n#### This permission set includes:\n\n- `allow-generate-secret-key`\n- `allow-secret-key-sign`\n- `allow-public-key-verify`",
           "type": "string",
           "const": "crypto",
-          "markdownDescription": "Enables low-level key operations — generate keypairs, sign with a secret key, and verify public key signatures."
+          "markdownDescription": "Enables low-level key operations — generate keypairs, sign with a secret key, and verify public key signatures.\n#### This permission set includes:\n\n- `allow-generate-secret-key`\n- `allow-secret-key-sign`\n- `allow-public-key-verify`"
         },
         {
           "description": "Node lifecycle and introspection. Covers createNode() and close(). Add iroh-http:fetch and/or iroh-http:serve for HTTP capability.\n#### This default permission set includes:\n\n- `allow-create-endpoint`\n- `allow-close-endpoint`\n- `allow-wait-endpoint-closed`\n- `allow-ping`\n- `allow-node-addr`\n- `allow-node-ticket`\n- `allow-home-relay`\n- `allow-peer-info`\n- `allow-peer-stats`\n- `allow-endpoint-stats`",
@@ -811,16 +811,16 @@
           "markdownDescription": "Enables node.fetch() — send HTTP requests to remote peers. Includes all internal body-streaming primitives required for fetch to function."
         },
         {
-          "description": "Enables local peer discovery via mDNS — browse for peers on the local network and advertise this node.",
+          "description": "Enables local peer discovery via mDNS — browse for peers on the local network and advertise this node.\n#### This permission set includes:\n\n- `allow-mdns-browse`\n- `allow-mdns-browse-close`\n- `allow-mdns-next-event`\n- `allow-mdns-advertise`\n- `allow-mdns-advertise-close`",
           "type": "string",
           "const": "mdns",
-          "markdownDescription": "Enables local peer discovery via mDNS — browse for peers on the local network and advertise this node."
+          "markdownDescription": "Enables local peer discovery via mDNS — browse for peers on the local network and advertise this node.\n#### This permission set includes:\n\n- `allow-mdns-browse`\n- `allow-mdns-browse-close`\n- `allow-mdns-next-event`\n- `allow-mdns-advertise`\n- `allow-mdns-advertise-close`"
         },
         {
-          "description": "Enables node.serve() — accept incoming HTTP requests from remote peers. Includes all internal body-streaming primitives required for handlers to read and write bodies.",
+          "description": "Enables node.serve() — accept incoming HTTP requests from remote peers. Includes all internal body-streaming primitives required for handlers to read and write bodies.\n#### This permission set includes:\n\n- `allow-serve`\n- `allow-stop-serve`\n- `allow-wait-serve-stop`\n- `allow-respond-to-request`\n- `allow-next-chunk`\n- `allow-send-chunk`\n- `allow-finish-body`\n- `allow-create-body-writer`\n- `allow-cancel-request`",
           "type": "string",
           "const": "serve",
-          "markdownDescription": "Enables node.serve() — accept incoming HTTP requests from remote peers. Includes all internal body-streaming primitives required for handlers to read and write bodies."
+          "markdownDescription": "Enables node.serve() — accept incoming HTTP requests from remote peers. Includes all internal body-streaming primitives required for handlers to read and write bodies.\n#### This permission set includes:\n\n- `allow-serve`\n- `allow-stop-serve`\n- `allow-wait-serve-stop`\n- `allow-respond-to-request`\n- `allow-next-chunk`\n- `allow-send-chunk`\n- `allow-finish-body`\n- `allow-create-body-writer`\n- `allow-cancel-request`"
         }
       ]
     }
