@@ -1,15 +1,14 @@
 name: Benchmarks
 
 # Runs benchmarks for Rust (Criterion), Node.js (mitata), and Deno.
-# Results are published to gh-pages for visualisation — not as a hard gate.
+# Raw normalized results are archived as workflow artifacts and committed to the
+# long-lived `bench-results` branch (one folder per tag) for durable tracking.
+# No dashboard, no regression gating — benchmarks are recorded, not enforced.
+# Any visualisation can be regenerated on demand from the committed JSON.
 #
 # Triggers:
-#   - push to tags (v*.*.*): per-release snapshot → dev/bench/releases/<metric>
-#   - workflow_dispatch: manual main snapshot → dev/bench/main/<metric>
-#
-# Regression alerts are posted as comments but never fail the workflow.
-# This lets the chart show performance trends across releases without
-# blocking CI on variance between runs.
+#   - push to tags (v*.*.*): per-release snapshot → bench-results/data/<tag>
+#   - workflow_dispatch: manual snapshot → bench-results/data/main-<sha>
 
 on:
   push:
@@ -30,8 +29,13 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
-  contents: write
-  deployments: write
+  contents: read
+
+env:
+  # Pinned so the benchmark baseline stays comparable across releases. A floating
+  # `v2.x` silently changed the native loopback baseline between runs (delayed-ACK
+  # stall) and looked like a regression in our numbers. Bump deliberately.
+  DENO_VERSION: '2.8.3'
 
 jobs:
   bench-node:
@@ -57,36 +61,14 @@ jobs:
         run: node bench/node/bench.mjs
       - name: Emit normalized Node benchmark JSON
         run: |
+          mkdir -p bench/results
           node bench/node/report.mjs --json throughput > bench/results/node-throughput.json
           node bench/node/report.mjs --json latency > bench/results/node-latency.json
-      - uses: benchmark-action/github-action-benchmark@v1
-        with:
-          tool: customBiggerIsBetter
-          output-file-path: bench/results/node-throughput.json
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          alert-threshold: '120%'
-          comment-on-alert: true
-          fail-on-alert: false
-          gh-pages-branch: gh-pages
-          benchmark-data-dir-path: dev/bench/${{ github.event_name == 'push' && 'releases' || 'main' }}/node-throughput
-      - uses: benchmark-action/github-action-benchmark@v1
-        with:
-          tool: customSmallerIsBetter
-          output-file-path: bench/results/node-latency.json
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          alert-threshold: '120%'
-          comment-on-alert: true
-          fail-on-alert: false
-          gh-pages-branch: gh-pages
-          benchmark-data-dir-path: dev/bench/${{ github.event_name == 'push' && 'releases' || 'main' }}/node-latency
-          skip-fetch-gh-pages: true
-          auto-push: true
       - uses: actions/upload-artifact@v7
         with:
           name: node-bench-results
-          path: |
-            bench/results/node-throughput.json
-            bench/results/node-latency.json
+          path: bench/results/node-*.json
+          retention-days: 90
 
   bench-deno:
     name: Deno benchmarks
@@ -98,7 +80,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - uses: denoland/setup-deno@v2
         with:
-          deno-version: v2.x
+          deno-version: ${{ env.DENO_VERSION }}
       - name: Build deno native adapter
         run: |
           cargo build --release -p iroh-http-deno
@@ -118,36 +100,14 @@ jobs:
         run: deno bench --allow-net --allow-ffi --allow-env --allow-read --allow-write --allow-sys bench/deno/bench.ts
       - name: Emit normalized Deno benchmark JSON
         run: |
+          mkdir -p bench/results
           deno run --allow-net --allow-ffi --allow-env --allow-read --allow-write --allow-sys bench/deno/report.ts --json throughput > bench/results/deno-throughput.json
           deno run --allow-net --allow-ffi --allow-env --allow-read --allow-write --allow-sys bench/deno/report.ts --json latency > bench/results/deno-latency.json
-      - uses: benchmark-action/github-action-benchmark@v1
-        with:
-          tool: customBiggerIsBetter
-          output-file-path: bench/results/deno-throughput.json
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          alert-threshold: '120%'
-          comment-on-alert: true
-          fail-on-alert: false
-          gh-pages-branch: gh-pages
-          benchmark-data-dir-path: dev/bench/${{ github.event_name == 'push' && 'releases' || 'main' }}/deno-throughput
-      - uses: benchmark-action/github-action-benchmark@v1
-        with:
-          tool: customSmallerIsBetter
-          output-file-path: bench/results/deno-latency.json
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          alert-threshold: '120%'
-          comment-on-alert: true
-          fail-on-alert: false
-          gh-pages-branch: gh-pages
-          benchmark-data-dir-path: dev/bench/${{ github.event_name == 'push' && 'releases' || 'main' }}/deno-latency
-          skip-fetch-gh-pages: true
-          auto-push: true
       - uses: actions/upload-artifact@v7
         with:
           name: deno-bench-results
-          path: |
-            bench/results/deno-throughput.json
-            bench/results/deno-latency.json
+          path: bench/results/deno-*.json
+          retention-days: 90
 
   bench-rust:
     name: Rust Criterion benchmarks
@@ -165,32 +125,57 @@ jobs:
           cargo bench -p iroh-http-core --bench throughput
           cargo bench -p iroh-http-core --bench latency
       - name: Normalize Criterion output
-        run: node bench/scripts/normalize-criterion-json.mjs target/criterion bench/results/rust-throughput.json bench/results/rust-latency.json
-      - uses: benchmark-action/github-action-benchmark@v1
-        with:
-          tool: customBiggerIsBetter
-          output-file-path: bench/results/rust-throughput.json
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          alert-threshold: '120%'
-          comment-on-alert: true
-          fail-on-alert: false
-          gh-pages-branch: gh-pages
-          benchmark-data-dir-path: dev/bench/${{ github.event_name == 'push' && 'releases' || 'main' }}/rust-throughput
-      - uses: benchmark-action/github-action-benchmark@v1
-        with:
-          tool: customSmallerIsBetter
-          output-file-path: bench/results/rust-latency.json
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          alert-threshold: '120%'
-          comment-on-alert: true
-          fail-on-alert: false
-          gh-pages-branch: gh-pages
-          benchmark-data-dir-path: dev/bench/${{ github.event_name == 'push' && 'releases' || 'main' }}/rust-latency
-          skip-fetch-gh-pages: true
-          auto-push: true
+        run: |
+          mkdir -p bench/results
+          node bench/scripts/normalize-criterion-json.mjs target/criterion bench/results/rust-throughput.json bench/results/rust-latency.json
       - uses: actions/upload-artifact@v7
         with:
           name: rust-bench-results
-          path: |
-            bench/results/rust-throughput.json
-            bench/results/rust-latency.json
+          path: bench/results/rust-*.json
+          retention-days: 90
+
+  store:
+    name: Archive results to bench-results branch
+    needs: [bench-node, bench-deno, bench-rust]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all benchmark artifacts
+        uses: actions/download-artifact@v7
+        with:
+          path: incoming
+          merge-multiple: true
+      - name: Commit raw results to bench-results branch
+        env:
+          SNAPSHOT: ${{ github.ref_type == 'tag' && github.ref_name || format('main-{0}', github.sha) }}
+        run: |
+          set -euo pipefail
+          repo="https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git"
+          git clone --depth 1 "$repo" repo
+          cd repo
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git ls-remote --exit-code --heads origin bench-results >/dev/null 2>&1; then
+            git fetch --depth 1 origin bench-results
+            git checkout bench-results
+          else
+            git checkout --orphan bench-results
+            git rm -rf . >/dev/null 2>&1 || true
+          fi
+          dest="data/$SNAPSHOT"
+          mkdir -p "$dest"
+          cp ../incoming/*.json "$dest/"
+          cat > "$dest/meta.json" <<EOF
+          {
+            "snapshot": "$SNAPSHOT",
+            "commit": "${{ github.sha }}",
+            "ref": "${{ github.ref }}",
+            "recorded_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "deno_version": "${{ env.DENO_VERSION }}",
+            "runner_os": "${{ runner.os }}"
+          }
+          EOF
+          git add data
+          git commit -m "bench: record results for $SNAPSHOT" || { echo "No changes to record"; exit 0; }
+          git push origin bench-results
