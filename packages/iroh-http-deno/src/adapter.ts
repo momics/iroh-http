@@ -36,6 +36,7 @@ import {
   isEndpointGoneError,
   normaliseRelayMode,
 } from "@momics/iroh-http-shared";
+import { NATIVE_CHECKSUMS } from "./checksums.ts";
 
 // ── Platform library resolution ───────────────────────────────────────────────
 
@@ -71,16 +72,86 @@ function cacheDir(): string {
 
 const LIB_DIR = cacheDir();
 
+/** Lowercase hex SHA-256 of `bytes`. */
+async function sha256Hex(bytes: Uint8Array): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", bytes as BufferSource);
+  return Array.from(new Uint8Array(digest))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+/**
+ * Verify the native library at `libPath` against its embedded SHA-256 before it
+ * is ever made executable or `dlopen`-ed. Native FFI code runs outside Deno's
+ * permission sandbox, so a tampered binary is arbitrary code execution.
+ *
+ * Policy:
+ *   - Expected digest known → must match, else the file is removed and we throw.
+ *   - No expected digest:
+ *       - freshly `downloaded` → fail closed (never load unverified remote code);
+ *       - pre-existing local build → allowed with a warning (source builds have
+ *         no stable published digest).
+ */
+async function verifyLib(
+  libPath: string,
+  name: string,
+  downloaded: boolean,
+): Promise<void> {
+  const expected = NATIVE_CHECKSUMS[name]?.toLowerCase();
+  if (!expected) {
+    if (downloaded) {
+      try {
+        await Deno.remove(libPath);
+      } catch {
+        /* ignore */
+      }
+      throw new Error(
+        `[iroh-http] Refusing to load downloaded native library "${name}" ` +
+          `without an integrity checksum (none embedded for v${VERSION}). ` +
+          `This guards against tampered release assets. Build from source instead.`,
+      );
+    }
+    console.error(
+      `[iroh-http] WARNING: loading native library "${name}" without integrity ` +
+        `verification (no embedded checksum). Expected only for local source builds.`,
+    );
+    return;
+  }
+
+  const actual = await sha256Hex(await Deno.readFile(libPath));
+  if (actual !== expected) {
+    try {
+      await Deno.remove(libPath);
+    } catch {
+      /* ignore */
+    }
+    throw new Error(
+      `[iroh-http] Native library integrity check FAILED for "${name}".\n` +
+        `  expected SHA-256: ${expected}\n` +
+        `  actual   SHA-256: ${actual}\n` +
+        `  The file was removed. Refusing to load potentially tampered native code.`,
+    );
+  }
+}
+
 async function ensureLib(): Promise<string> {
   const name = libName();
   const libPath = resolve(LIB_DIR, name);
 
-  // Fast path: lib already exists locally (dev build or cached download).
-  try {
-    await Deno.stat(libPath);
-    return libPath;
-  } catch {
-    // Not found — download it.
+  // Fast path: lib already present (dev build or cached download). Verify the
+  // cached copy too — a corrupted or tampered cache must not be loaded.
+  const exists = await Deno.stat(libPath).then(() => true).catch(() => false);
+  if (exists) {
+    try {
+      await verifyLib(libPath, name, false);
+      return libPath;
+    } catch (e) {
+      // Cached copy failed verification: drop it and re-download a clean one.
+      console.error(
+        `[iroh-http] cached native library rejected, re-downloading: ` +
+          `${(e as Error).message}`,
+      );
+    }
   }
 
   const url = `${DOWNLOAD_BASE}/${name}`;
@@ -96,7 +167,7 @@ async function ensureLib(): Promise<string> {
   }
 
   await Deno.mkdir(LIB_DIR, { recursive: true });
-  const file = await Deno.open(libPath, { write: true, create: true });
+  const file = await Deno.open(libPath, { write: true, create: true, truncate: true });
   try {
     await resp.body.pipeTo(file.writable);
   } catch (e) {
@@ -108,6 +179,10 @@ async function ensureLib(): Promise<string> {
     }
     throw e;
   }
+
+  // Verify integrity BEFORE marking executable / loading. Throws (and removes
+  // the file) on mismatch or when no checksum is available for a download.
+  await verifyLib(libPath, name, true);
 
   // Mark executable on Unix.
   if (Deno.build.os !== "windows") {
