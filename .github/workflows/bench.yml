@@ -8,7 +8,10 @@ name: Benchmarks
 #
 # Triggers:
 #   - push to tags (v*.*.*): per-release snapshot → bench-results/data/<tag>
-#   - workflow_dispatch: manual snapshot → bench-results/data/main-<sha>
+#   - workflow_dispatch (no input): manual snapshot → bench-results/data/main-<sha>
+#   - workflow_dispatch (tag=vX.Y.Z): re-benchmark an existing release using THAT
+#       tag's own harness + library source, then overwrite bench-results/data/<tag>.
+#       Run it from the default branch so the current (fixed) archival step is used.
 
 on:
   push:
@@ -23,6 +26,11 @@ on:
       - 'CHANGELOG.md'
       - 'LICENSE*'
   workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to re-benchmark (e.g. v0.5.2). Blank = main snapshot.'
+        required: false
+        default: ''
 
 concurrency:
   group: bench-${{ github.workflow }}-${{ github.ref }}
@@ -44,6 +52,8 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.tag || github.ref }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - uses: actions/setup-node@v6
@@ -76,6 +86,8 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.tag || github.ref }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - uses: denoland/setup-deno@v2
@@ -113,8 +125,14 @@ jobs:
     name: Rust Criterion benchmarks
     runs-on: ${{ vars.BENCHMARK_RUNNER != '' && vars.BENCHMARK_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 30
+    outputs:
+      sha: ${{ steps.benchsha.outputs.sha }}
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - id: benchsha
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - uses: actions/setup-node@v6
@@ -148,7 +166,13 @@ jobs:
           merge-multiple: true
       - name: Commit raw results to bench-results branch
         env:
-          SNAPSHOT: ${{ github.ref_type == 'tag' && github.ref_name || format('main-{0}', github.sha) }}
+          # A dispatched `tag` input wins; otherwise fall back to the pushed tag,
+          # or a main-<sha> snapshot for a plain manual run.
+          SNAPSHOT: ${{ inputs.tag != '' && inputs.tag || (github.ref_type == 'tag' && github.ref_name || format('main-{0}', github.sha)) }}
+          # The commit actually benchmarked (the checked-out tag when re-benching),
+          # not the workflow's own github.sha which is the default branch.
+          COMMIT: ${{ needs.bench-rust.outputs.sha }}
+          REF: ${{ inputs.tag != '' && format('refs/tags/{0}', inputs.tag) || github.ref }}
         run: |
           set -euo pipefail
           repo="https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git"
@@ -172,8 +196,8 @@ jobs:
           cat > "$dest/meta.json" <<EOF
           {
             "snapshot": "$SNAPSHOT",
-            "commit": "${{ github.sha }}",
-            "ref": "${{ github.ref }}",
+            "commit": "$COMMIT",
+            "ref": "$REF",
             "recorded_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
             "deno_version": "${{ env.DENO_VERSION }}",
             "runner_os": "${{ runner.os }}"
