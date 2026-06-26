@@ -43,8 +43,13 @@ export function makeReadable(
 /**
  * Drain a `ReadableStream<Uint8Array>` into a `BodyWriter` handle.
  *
- * Calls `sendChunk` for each chunk, then `finishBody` when the stream ends.
- * Errors from either side are propagated to the returned `Promise`.
+ * Calls `sendChunk` for each chunk, then `finishBody` **only on a clean EOF**.
+ * If the source stream or a `sendChunk` fails mid-body, the writer is left
+ * unfinished and the error is propagated to the returned `Promise`: calling
+ * `finishBody` on failure would signal a complete body to the peer, silently
+ * truncating a signed upload / append-only entry into a "clean" close. The
+ * caller is responsible for resetting the underlying request stream (e.g. via
+ * `cancelFetch`) when this promise rejects.
  *
  * Large chunks are split into 64 KB pieces to keep each sync FFI call short.
  * This prevents blocking the JS thread when a ReadableStream enqueues an
@@ -66,6 +71,7 @@ export async function pipeToWriter(
   // channel push (O(1) when the channel has capacity).
   const MAX_CHUNK = 64 * 1024;
   const reader = stream.getReader();
+  let completed = false;
   try {
     while (true) {
       const { value, done } = await reader.read();
@@ -84,9 +90,16 @@ export async function pipeToWriter(
         }
       }
     }
+    completed = true;
   } finally {
     reader.releaseLock();
-    await adapter.finishBody(handle);
+    // Only signal a clean end-of-body when the source drained without error.
+    // On failure we deliberately skip finishBody so the peer never sees a
+    // truncated body as a successful one — the request stream is reset by the
+    // caller instead. (`finally` still re-throws the original error.)
+    if (completed) {
+      await adapter.finishBody(handle);
+    }
   }
 }
 

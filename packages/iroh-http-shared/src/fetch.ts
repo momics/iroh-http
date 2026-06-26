@@ -54,7 +54,12 @@ export function makeFetch(
     }
     const parsed = new URL(raw);
     nodeId = parsed.hostname;
-    url = raw;
+    // Strip the URL fragment before it crosses the FFI boundary. Fragments are
+    // client-local (RFC 3986 §3.5) and standard HTTP clients never transmit
+    // them; forwarding one would leak local-only data (tokens, UI state,
+    // deep-link secrets) to the remote peer. Drop everything from the first
+    // '#', which always delimits the fragment.
+    url = raw.replace(/#.*$/s, "");
 
     const method = init?.method ?? "GET";
     const signal = init?.signal ?? null;
@@ -93,12 +98,17 @@ export function makeFetch(
       reqBodyHandle = await adapter.allocBodyWriter(endpointHandle);
     }
 
-    // #126: Only allocate a fetch cancellation token when an AbortSignal is
+    // #126: Allocate a fetch cancellation token when an AbortSignal is
     // provided.  Without a signal the token is unused overhead — one FFI
     // round-trip saved on the hot path.  When skipped, rawFetch passes 0n
     // and the Rust dispatch allocates an internal token automatically.
+    //
+    // A token is also allocated whenever there is a request body so that a
+    // mid-stream body failure can RESET the request stream (see the body-pipe
+    // wiring below). Without a token the only way to release the body is a
+    // clean finish, which would truncate the body into a "successful" close.
     let fetchToken: bigint = 0n;
-    if (signal) {
+    if (signal || bodyStream) {
       fetchToken = await adapter.allocFetchToken(endpointHandle);
     }
 
@@ -147,6 +157,18 @@ export function makeFetch(
     // body reader will have a consumer by the time the channel fills up.
     if (bodyStream && reqBodyHandle !== null) {
       bodyPipePromise = pipeToWriter(adapter, bodyStream, reqBodyHandle);
+      // If the body source fails mid-stream, reset the request stream instead
+      // of letting it finish cleanly. A clean finish would present a truncated
+      // body to the peer as complete; resetting via cancelFetch makes the peer
+      // observe an aborted request. Attached at creation (not after the head)
+      // so the reset fires even when the failure precedes the response head.
+      bodyPipePromise.catch((err) => {
+        console.error(
+          "[iroh-http] request body pipe failed; aborting request:",
+          err,
+        );
+        if (fetchToken !== 0n) adapter.cancelFetch(fetchToken);
+      });
     }
 
     let rawRes: FfiResponse;
@@ -164,12 +186,6 @@ export function makeFetch(
         signal.removeEventListener("abort", cancelAbortListener);
         cancelAbortListener = null;
       }
-    }
-
-    if (bodyPipePromise) {
-      bodyPipePromise.catch((err) =>
-        console.error("[iroh-http] request body pipe error:", err)
-      );
     }
 
     // Core returns body_handle = 0 (the slotmap null sentinel) for null-body

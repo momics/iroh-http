@@ -167,6 +167,10 @@ fn fetch_error_to_core(e: FetchError) -> CoreError {
 /// Lives next to [`fetch`] because that is the sole caller — it constructs
 /// the request-target line for the outgoing HTTP/1.1 request.
 pub(crate) fn extract_path(url: &str) -> String {
+    // The fragment is client-local (RFC 3986 §3.5) and must never appear on
+    // the wire. Drop everything from the first '#' before extracting the path,
+    // as defense-in-depth in case a caller bypasses the JS-side stripping.
+    let url = url.split('#').next().unwrap_or(url);
     if let Some(rest) = url.strip_prefix("httpi://") {
         if let Some(slash) = rest.find('/') {
             return rest[slash..].to_string();
@@ -272,4 +276,27 @@ async fn package_response(
         body_handle,
         url: response_url,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::extract_path;
+
+    #[test]
+    fn extracts_path_and_query() {
+        assert_eq!(extract_path("httpi://node/a/b?c=1"), "/a/b?c=1");
+        assert_eq!(extract_path("httpi://node/"), "/");
+        assert_eq!(extract_path("httpi://node"), "/");
+    }
+
+    #[test]
+    fn strips_fragment_from_request_target() {
+        // Fragments are client-local (RFC 3986 §3.5) and must never reach the
+        // peer, even if a caller bypasses the JS-side stripping.
+        assert_eq!(extract_path("httpi://node/a?b=1#secret"), "/a?b=1");
+        assert_eq!(extract_path("httpi://node/a#frag"), "/a");
+        assert_eq!(extract_path("httpi://node/#frag"), "/");
+        assert_eq!(extract_path("httpi://node#frag"), "/");
+        assert_eq!(extract_path("/path?q=1#frag"), "/path?q=1");
+    }
 }
