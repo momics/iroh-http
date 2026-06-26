@@ -195,38 +195,50 @@ class TauriAdapter extends IrohAdapter {
       connChannel = new Channel<PeerConnectionEvent>();
     }
 
-    channel.onmessage = async (raw: TauriRequestPayload) => {
-      const payload: RequestPayload = {
-        reqHandle: BigInt(raw.reqHandle),
-        reqBodyHandle: BigInt(raw.reqBodyHandle),
-        resBodyHandle: BigInt(raw.resBodyHandle),
-        method: raw.method,
-        url: raw.url,
-        headers: raw.headers as [string, string][],
-        remoteNodeId: raw.remoteNodeId,
-      };
+    // Track in-flight handler tasks so shutdown drains them before resolving,
+    // matching the Node/Deno serve contract. The Rust dispatch callback is
+    // fire-and-forget (it only sends the request event onto the channel and
+    // returns), so `wait_serve_stop()` alone does not guarantee JS handler
+    // promises — and their follow-up `respond_to_request` IPC — have settled.
+    const pending = new Set<Promise<void>>();
 
-      try {
-        const head = await callback(payload);
-        await invoke(`${PLUGIN}|respond_to_request`, {
-          args: {
-            endpointHandle: Number(endpointHandle),
-            reqHandle: u64Handle(payload.reqHandle, "reqHandle"),
-            status: head.status,
-            headers: head.headers,
-          },
-        });
-      } catch (err) {
-        console.error("[iroh-http-tauri] handler error:", err);
-        await invoke(`${PLUGIN}|respond_to_request`, {
-          args: {
-            endpointHandle: Number(endpointHandle),
-            reqHandle: u64Handle(BigInt(raw.reqHandle), "reqHandle"),
-            status: 500,
-            headers: [],
-          },
-        }).catch(() => {});
-      }
+    channel.onmessage = (raw: TauriRequestPayload) => {
+      const task = (async () => {
+        const payload: RequestPayload = {
+          reqHandle: BigInt(raw.reqHandle),
+          reqBodyHandle: BigInt(raw.reqBodyHandle),
+          resBodyHandle: BigInt(raw.resBodyHandle),
+          method: raw.method,
+          url: raw.url,
+          headers: raw.headers as [string, string][],
+          remoteNodeId: raw.remoteNodeId,
+        };
+
+        try {
+          const head = await callback(payload);
+          await invoke(`${PLUGIN}|respond_to_request`, {
+            args: {
+              endpointHandle: Number(endpointHandle),
+              reqHandle: u64Handle(payload.reqHandle, "reqHandle"),
+              status: head.status,
+              headers: head.headers,
+            },
+          });
+        } catch (err) {
+          console.error("[iroh-http-tauri] handler error:", err);
+          await invoke(`${PLUGIN}|respond_to_request`, {
+            args: {
+              endpointHandle: Number(endpointHandle),
+              reqHandle: u64Handle(BigInt(raw.reqHandle), "reqHandle"),
+              status: 500,
+              headers: [],
+            },
+          }).catch(() => {});
+        }
+      })();
+
+      pending.add(task);
+      task.finally(() => pending.delete(task));
     };
 
     invoke(`${PLUGIN}|serve`, {
@@ -252,9 +264,12 @@ class TauriAdapter extends IrohAdapter {
       console.error("[iroh-http-tauri] serve error:", err)
     );
 
+    // Resolve only after the native serve loop has stopped AND all in-flight
+    // JS handler tasks have settled (responses written), so the serve/finished
+    // contract holds the same as Node and Deno.
     return invoke<void>(`${PLUGIN}|wait_serve_stop`, {
       endpointHandle: Number(endpointHandle),
-    });
+    }).then(() => Promise.allSettled([...pending])).then(() => {});
   }
 
   closeEndpoint(handle: number, force?: boolean): Promise<void> {
