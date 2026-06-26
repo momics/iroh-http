@@ -118,6 +118,19 @@ impl Session {
             .await
             .map_err(|e| CoreError::connection_failed(format!("accept session: {e}")))?;
 
+        // Enforce the negotiated ALPN: only accept connections that negotiated
+        // the duplex session protocol. A connection negotiated for plain HTTP
+        // must not be surfaced as a raw session (protocol confusion).
+        let alpn = conn.alpn();
+        if alpn != ALPN_DUPLEX {
+            let detail = format!(
+                "accept session: unexpected ALPN {:?}",
+                String::from_utf8_lossy(alpn)
+            );
+            conn.close(0u32.into(), b"unexpected ALPN");
+            return Err(CoreError::connection_failed(detail));
+        }
+
         let handle = endpoint.handles().insert_session(SessionEntry { conn })?;
 
         Ok(Some(Self { endpoint, handle }))

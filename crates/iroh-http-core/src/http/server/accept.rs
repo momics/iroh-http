@@ -19,7 +19,7 @@ use std::{
 use hyper_util::rt::TokioIo;
 use tower::{limit::ConcurrencyLimitLayer, Service, ServiceBuilder, ServiceExt};
 
-use crate::{base32_encode, http::transport::io::IrohStream, Body, IrohEndpoint};
+use crate::{base32_encode, http::transport::io::IrohStream, Body, IrohEndpoint, ALPN};
 
 use super::lifecycle::{ConnectionTracker, RequestTracker};
 use super::stack::{CompressionOptions, StackConfig};
@@ -115,6 +115,20 @@ pub(super) async fn accept_loop<S>(
 
         let remote_pk = conn.remote_id();
 
+        // Enforce the negotiated ALPN. This is the HTTP serve loop, so a
+        // connection that negotiated a different protocol (e.g. the duplex
+        // session ALPN) must not be handed to the HTTP service — doing so is
+        // protocol confusion. Reject it.
+        let alpn = conn.alpn();
+        if alpn != ALPN {
+            tracing::debug!(
+                "iroh-http: rejecting connection with non-HTTP ALPN {:?}",
+                String::from_utf8_lossy(alpn),
+            );
+            conn.close(0u32.into(), b"unexpected ALPN");
+            continue;
+        }
+
         // Enforce total connection limit.
         if let Some(max_total) = cfg.max_total_connections {
             let current = total_connections.load(Ordering::Relaxed);
@@ -186,6 +200,11 @@ pub(super) async fn accept_loop<S>(
         };
         let conn_stack = super::stack::build_stack(conn_svc, &stack_cfg);
 
+        // Bound the request-head read on each bistream (slowloris defence).
+        // Reuse the request timeout: headers must arrive within it. `None`
+        // means "no request timeout configured" → unbounded head read.
+        let header_read_timeout = stack_cfg.timeout;
+
         tokio::spawn(async move {
             // Owns the per-peer count, total-connection counter, and
             // connect/disconnect event firing for this connection's
@@ -221,7 +240,13 @@ pub(super) async fn accept_loop<S>(
                     // reaches zero. See `lifecycle.rs`.
                     let _req_tracker =
                         RequestTracker::new(req_counter, in_flight_req, drain_notify_req);
-                    super::pipeline::serve_bistream(io, svc, effective_header_limit).await;
+                    super::pipeline::serve_bistream(
+                        io,
+                        svc,
+                        effective_header_limit,
+                        header_read_timeout,
+                    )
+                    .await;
                 });
             }
         });
