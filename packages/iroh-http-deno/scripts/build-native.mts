@@ -7,10 +7,10 @@
  *   deno task build:debug    # debug (faster compile)
  */
 
-import { resolve, dirname, fromFileUrl } from "@std/path";
+import { dirname, fromFileUrl, resolve } from "@std/path";
 import { ensureDir } from "@std/fs";
 
-const ROOT    = resolve(dirname(fromFileUrl(import.meta.url)), "..");
+const ROOT = resolve(dirname(fromFileUrl(import.meta.url)), "..");
 const LIB_DIR = resolve(ROOT, "lib");
 const RELEASE = Deno.args.includes("--debug") ? false : true;
 
@@ -18,9 +18,12 @@ const RELEASE = Deno.args.includes("--debug") ? false : true;
 
 function ext(): string {
   switch (Deno.build.os) {
-    case "darwin":  return "dylib";
-    case "windows": return "dll";
-    default:        return "so";
+    case "darwin":
+      return "dylib";
+    case "windows":
+      return "dll";
+    default:
+      return "so";
   }
 }
 
@@ -41,7 +44,11 @@ function destName(): string {
 const cargoArgs = ["cargo", "build", "--package", "iroh-http-deno"];
 if (RELEASE) cargoArgs.push("--release");
 
-console.log(`Building (${RELEASE ? "release" : "debug"}) for ${Deno.build.os}-${Deno.build.arch}…`);
+console.log(
+  `Building (${
+    RELEASE ? "release" : "debug"
+  }) for ${Deno.build.os}-${Deno.build.arch}…`,
+);
 
 const status = await new Deno.Command(cargoArgs[0], {
   args: cargoArgs.slice(1),
@@ -60,8 +67,8 @@ if (!status.success) {
 
 await ensureDir(LIB_DIR);
 
-const profile  = RELEASE ? "release" : "debug";
-const srcPath  = resolve(ROOT, "../..", "target", profile, srcName());
+const profile = RELEASE ? "release" : "debug";
+const srcPath = resolve(ROOT, "../..", "target", profile, srcName());
 const destPath = resolve(LIB_DIR, destName());
 
 await Deno.copyFile(srcPath, destPath);

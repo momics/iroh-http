@@ -133,7 +133,6 @@ export interface ServeOptions {
    * @default true
    */
   decompress?: boolean;
-
 }
 
 /**
@@ -220,8 +219,9 @@ export function makeServe(
     // Peer connect/disconnect events are dispatched as CustomEvents on IrohNode.
     // The dispatcher is provided by IrohNode at construction time so events fire
     // on the node regardless of which serve() call is running.
-    const onConnectionEvent: ((event: PeerConnectionEvent) => void) | undefined =
-      onPeerEvent;
+    const onConnectionEvent:
+      | ((event: PeerConnectionEvent) => void)
+      | undefined = onPeerEvent;
 
     // #119: Track active body pipes so `finished` drains them before resolving.
     const activePipes = new Set<Promise<void>>();
@@ -347,11 +347,16 @@ export function makeServe(
     // stopServe was called explicitly), the race wins immediately.
     // #119: drain all in-flight body pipes before resolving so callers of
     // `await finished` see a true "all work done" guarantee.
-    const finished: Promise<void> = Promise.race([loopDone, onNodeClose.then(() => loopDone)])
+    const finished: Promise<void> = Promise.race([
+      loopDone,
+      onNodeClose.then(() => loopDone),
+    ])
       .then(() => Promise.allSettled([...activePipes]))
       .then(() => {});
     // Reset guard when the loop finishes so serve() can be called again.
-    finished.finally(() => { serveRunning = false; });
+    finished.finally(() => {
+      serveRunning = false;
+    });
 
     const doStop = (): void => {
       adapter.stopServe(endpointHandle);

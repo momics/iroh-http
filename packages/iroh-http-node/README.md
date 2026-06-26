@@ -4,7 +4,8 @@
 
 > Pre-v1.0. APIs may change between minor releases.
 
-Node.js adapter for [iroh-http](https://github.com/momics/iroh-http). Native addon via napi-rs. No child processes, no WASM.
+Node.js adapter for [iroh-http](https://github.com/momics/iroh-http). Native
+addon via napi-rs. No child processes, no WASM.
 
 ## Install
 
@@ -12,7 +13,8 @@ Node.js adapter for [iroh-http](https://github.com/momics/iroh-http). Native add
 npm install @momics/iroh-http-node
 ```
 
-Pre-built binaries are published for macOS (x64, ARM), Linux glibc (x64, ARM), and Windows (x64). Other platforms need a source build:
+Pre-built binaries are published for macOS (x64, ARM), Linux glibc (x64, ARM),
+and Windows (x64). Other platforms need a source build:
 
 ```sh
 npx napi build --platform --release
@@ -27,8 +29,9 @@ const node = await createNode();
 console.log("Node ID:", node.publicKey.toString());
 
 node.serve({}, (req) => {
-  if (req.headers.get("Peer-Id") !== ALLOWED_PEER)
+  if (req.headers.get("Peer-Id") !== ALLOWED_PEER) {
     return new Response("Forbidden", { status: 403 });
+  }
   return new Response("hello");
 });
 
@@ -39,19 +42,25 @@ await node.close();
 
 ## Full API
 
-The API is identical across Node.js, Deno, and Tauri: HTTP fetch/serve, QUIC sessions, mDNS discovery, and Ed25519 crypto. See the [API overview](../../docs/api-overview.md) for the complete reference.
+The API is identical across Node.js, Deno, and Tauri: HTTP fetch/serve, QUIC
+sessions, mDNS discovery, and Ed25519 crypto. See the
+[API overview](../../docs/api-overview.md) for the complete reference.
 
 ## Node.js specifics
 
-- Standalone crypto functions (`generateSecretKey`, `secretKeySign`, `publicKeyVerify`) are **synchronous**. They run in Rust on the calling thread without a Tokio round-trip.
-- The class API on a live node (`node.secretKey.sign()`, `node.publicKey.verify()`) is async.
-- Serve callbacks run on the Node.js event loop via napi-rs `ThreadsafeFunction`.
+- Standalone crypto functions (`generateSecretKey`, `secretKeySign`,
+  `publicKeyVerify`) are **synchronous**. They run in Rust on the calling thread
+  without a Tokio round-trip.
+- The class API on a live node (`node.secretKey.sign()`,
+  `node.publicKey.verify()`) is async.
+- Serve callbacks run on the Node.js event loop via napi-rs
+  `ThreadsafeFunction`.
 
 ## Other runtimes
 
-| Runtime | Package |
-|---------|---------|
-| Deno | [`@momics/iroh-http-deno`](https://jsr.io/@momics/iroh-http-deno) |
+| Runtime  | Package                                                                            |
+| -------- | ---------------------------------------------------------------------------------- |
+| Deno     | [`@momics/iroh-http-deno`](https://jsr.io/@momics/iroh-http-deno)                  |
 | Tauri v2 | [`@momics/iroh-http-tauri`](https://www.npmjs.com/package/@momics/iroh-http-tauri) |
 
 ## License

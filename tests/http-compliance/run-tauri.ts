@@ -106,7 +106,9 @@ interface TestCase {
   }>;
 }
 
-function buildBody(bodySpec: string | { fill: number } | null | undefined): string | Uint8Array | undefined {
+function buildBody(
+  bodySpec: string | { fill: number } | null | undefined,
+): string | Uint8Array | undefined {
   if (bodySpec === null || bodySpec === undefined) return undefined;
   if (typeof bodySpec === "string") return bodySpec;
   if (typeof bodySpec === "object" && "fill" in bodySpec) {
@@ -115,7 +117,9 @@ function buildBody(bodySpec: string | { fill: number } | null | undefined): stri
   return undefined;
 }
 
-function buildHeaders(headersSpec?: Record<string, string | { fill: number }>): Record<string, string> {
+function buildHeaders(
+  headersSpec?: Record<string, string | { fill: number }>,
+): Record<string, string> {
   const h: Record<string, string> = {};
   if (!headersSpec) return h;
   for (const [k, v] of Object.entries(headersSpec)) {
@@ -135,7 +139,10 @@ async function run() {
   let filtered = allCases;
   if (filterPattern) {
     filtered = allCases.filter((c) => c.id.includes(filterPattern));
-    log(`Filter: "${filterPattern}" → ${filtered.length}/${allCases.length} cases`, "info");
+    log(
+      `Filter: "${filterPattern}" → ${filtered.length}/${allCases.length} cases`,
+      "info",
+    );
   }
 
   setStatus("Creating nodes…");
@@ -194,12 +201,21 @@ async function run() {
         for (let j = 0; j < tc.requests.length; j++) {
           const sub = tc.requests[j];
           try {
-            const { res, bodyText, bodyLength } = await runSingleRequest(sub as TestCase["request"]);
-            const result = assertResponse({ response: sub.expect }, res, bodyText, bodyLength);
+            const { res, bodyText, bodyLength } = await runSingleRequest(
+              sub as TestCase["request"],
+            );
+            const result = assertResponse(
+              { response: sub.expect },
+              res,
+              bodyText,
+              bodyLength,
+            );
             if (!result.pass) {
               allPassed = false;
               log(`  ✗ ${label} [step ${j}]`, "fail");
-              result.failures.forEach((f: string) => log(`      ${f}`, "fail-detail"));
+              result.failures.forEach((f: string) =>
+                log(`      ${f}`, "fail-detail")
+              );
             }
           } catch (err: unknown) {
             allPassed = false;
@@ -226,12 +242,16 @@ async function run() {
       if (sequential > 0) {
         let allPassed = true;
         for (let j = 0; j < sequential; j++) {
-          const { res, bodyText, bodyLength } = await runSingleRequest(tc.request);
+          const { res, bodyText, bodyLength } = await runSingleRequest(
+            tc.request,
+          );
           const result = assertResponse(tc, res, bodyText, bodyLength);
           if (!result.pass) {
             allPassed = false;
             log(`  ✗ ${label} [iteration ${j}]`, "fail");
-            result.failures.forEach((f: string) => log(`      ${f}`, "fail-detail"));
+            result.failures.forEach((f: string) =>
+              log(`      ${f}`, "fail-detail")
+            );
             break;
           }
         }
@@ -248,8 +268,9 @@ async function run() {
 
       // ── Concurrent / repeated requests ────────────────────────────────
       if (concurrency > 1 || repeatCount > 1) {
-        const promises = Array.from({ length: totalRuns }, () =>
-          runSingleRequest(tc.request)
+        const promises = Array.from(
+          { length: totalRuns },
+          () => runSingleRequest(tc.request),
         );
         const results = await Promise.all(promises);
         let allPassed = true;
@@ -262,7 +283,9 @@ async function run() {
           if (!result.pass) {
             allPassed = false;
             log(`  ✗ ${label} [instance ${j}]`, "fail");
-            result.failures.forEach((f: string) => log(`      ${f}`, "fail-detail"));
+            result.failures.forEach((f: string) =>
+              log(`      ${f}`, "fail-detail")
+            );
           }
         }
 
@@ -296,7 +319,9 @@ async function run() {
         failed++;
         failedCases.push(tc.id);
         log(`  ✗ ${label}`, "fail");
-        result.failures.forEach((f: string) => log(`      ${f}`, "fail-detail"));
+        result.failures.forEach((f: string) =>
+          log(`      ${f}`, "fail-detail")
+        );
         if (bail) break;
       }
     } catch (err: unknown) {
@@ -314,7 +339,10 @@ async function run() {
   const elapsed = ((performance.now() - startTime) / 1000).toFixed(2);
   log("");
   log("─".repeat(60));
-  log(`Results: ${passed} passed, ${failed} failed (${elapsed}s)`, failed > 0 ? "fail" : "pass");
+  log(
+    `Results: ${passed} passed, ${failed} failed (${elapsed}s)`,
+    failed > 0 ? "fail" : "pass",
+  );
 
   if (failedCases.length > 0) {
     log("\nFailed cases:");
@@ -324,7 +352,7 @@ async function run() {
   setStatus(
     failed > 0
       ? `✗ ${failed} failed, ${passed} passed (${elapsed}s)`
-      : `✓ All ${passed} passed (${elapsed}s)`
+      : `✓ All ${passed} passed (${elapsed}s)`,
   );
   statusEl.className = failed > 0 ? "status-fail" : "status-pass";
 

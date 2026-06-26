@@ -4,7 +4,9 @@
 
 > Pre-v1.0. APIs may change between minor releases.
 
-Tauri v2 plugin for [iroh-http](https://github.com/momics/iroh-http). Runs as a Rust plugin with capability-based permissions. Your frontend JS only gets the network access you grant.
+Tauri v2 plugin for [iroh-http](https://github.com/momics/iroh-http). Runs as a
+Rust plugin with capability-based permissions. Your frontend JS only gets the
+network access you grant.
 
 ## Install
 
@@ -32,7 +34,8 @@ fn main() {
 }
 ```
 
-To enable native `httpi://` URL resolution in the webview (see [below](#httpi-scheme-handler)):
+To enable native `httpi://` URL resolution in the webview (see
+[below](#httpi-scheme-handler)):
 
 ```rust
 fn main() {
@@ -52,8 +55,9 @@ const node = await createNode();
 console.log("Node ID:", node.publicKey.toString());
 
 node.serve({}, (req) => {
-  if (req.headers.get("Peer-Id") !== ALLOWED_PEER)
+  if (req.headers.get("Peer-Id") !== ALLOWED_PEER) {
     return new Response("Forbidden", { status: 403 });
+  }
   return new Response("hello");
 });
 
@@ -63,20 +67,23 @@ console.log(await res.text());
 
 ## Full API
 
-The API is identical across Node.js, Deno, and Tauri: HTTP fetch/serve, QUIC sessions, mDNS discovery, and Ed25519 crypto. See the [API overview](../../docs/api-overview.md) for the complete reference.
+The API is identical across Node.js, Deno, and Tauri: HTTP fetch/serve, QUIC
+sessions, mDNS discovery, and Ed25519 crypto. See the
+[API overview](../../docs/api-overview.md) for the complete reference.
 
 ## Permissions
 
-Tauri's capability system controls what the frontend can access. Declare permissions in `capabilities/default.json`:
+Tauri's capability system controls what the frontend can access. Declare
+permissions in `capabilities/default.json`:
 
-| Permission | Covers |
-|---|---|
+| Permission          | Covers                                        |
+| ------------------- | --------------------------------------------- |
 | `iroh-http:default` | `createNode()`, `close()`, node introspection |
-| `iroh-http:fetch` | `node.fetch()` + body streaming |
-| `iroh-http:serve` | `node.serve()` + body streaming |
-| `iroh-http:connect` | Raw QUIC sessions (bidi streams, datagrams) |
-| `iroh-http:mdns` | mDNS peer discovery |
-| `iroh-http:crypto` | Key generation, signing, verification |
+| `iroh-http:fetch`   | `node.fetch()` + body streaming               |
+| `iroh-http:serve`   | `node.serve()` + body streaming               |
+| `iroh-http:connect` | Raw QUIC sessions (bidi streams, datagrams)   |
+| `iroh-http:mdns`    | mDNS peer discovery                           |
+| `iroh-http:crypto`  | Key generation, signing, verification         |
 
 A typical app using fetch and serve:
 
@@ -92,7 +99,10 @@ A typical app using fetch and serve:
 
 ## `httpi://` scheme handler
 
-Call `.with_scheme()` on the plugin builder to register `httpi://` as a native URI scheme in the webview. Once an endpoint is created, standard browser APIs resolve `httpi://` URLs directly through iroh-http-core — no JavaScript bridging required.
+Call `.with_scheme()` on the plugin builder to register `httpi://` as a native
+URI scheme in the webview. Once an endpoint is created, standard browser APIs
+resolve `httpi://` URLs directly through iroh-http-core — no JavaScript bridging
+required.
 
 ```ts
 // After createNode(), these all just work:
@@ -101,34 +111,43 @@ document.querySelector("img").src = "httpi://<peer-id>/photo.jpg";
 document.querySelector("audio").src = "httpi://<peer-id>/track.flac"; // seeking supported
 ```
 
-The handler auto-binds to the first endpoint created. There is nothing else to configure.\n\n> **GET only:** The scheme handler resolves GET requests. Non-GET callers receive `405 Method Not Allowed`. Use `node.fetch()` for POST, PUT, DELETE.\n
+The handler auto-binds to the first endpoint created. There is nothing else to
+configure.
 
-> **Platform note:** On macOS, Linux, and iOS the origin is `httpi://<nodeid>/path`. On Windows and Android, Tauri rewrites the origin to `http://httpi.localhost/path` — the handler accounts for this automatically.
+> **GET only:** The scheme handler resolves GET requests. Non-GET callers
+> receive `405 Method Not Allowed`. Use `node.fetch()` for POST, PUT, DELETE.
+
+> **Platform note:** On macOS, Linux, and iOS the origin is
+> `httpi://<nodeid>/path`. On Windows and Android, Tauri rewrites the origin to
+> `http://httpi.localhost/path` — the handler accounts for this automatically.
 
 ## Tauri specifics
 
-- Serve callbacks are delivered to the frontend via Tauri `Channel` events (push model).
-- All crypto functions are async (round-trip through the Rust plugin via Tauri invoke).
+- Serve callbacks are delivered to the frontend via Tauri `Channel` events (push
+  model).
+- All crypto functions are async (round-trip through the Rust plugin via Tauri
+  invoke).
 - QUIC sessions require the `iroh-http:connect` permission.
 - mDNS requires the `iroh-http:mdns` permission.
-- The `httpi://` scheme handler (opt-in via `.with_scheme()`) enables native URL resolution without IPC overhead.
+- The `httpi://` scheme handler (opt-in via `.with_scheme()`) enables native URL
+  resolution without IPC overhead.
 
 ## Supported platforms
 
-| Platform | Architecture | Status |
-|----------|:----------:|:------:|
-| macOS | x86_64 | ✅ |
-| macOS | aarch64 (Apple Silicon) | ✅ |
-| Linux | x86_64 | ✅ |
-| Linux | aarch64 | ✅ |
-| Windows | x86_64 | ✅ |
+| Platform |      Architecture       | Status |
+| -------- | :---------------------: | :----: |
+| macOS    |         x86_64          |   ✅   |
+| macOS    | aarch64 (Apple Silicon) |   ✅   |
+| Linux    |         x86_64          |   ✅   |
+| Linux    |         aarch64         |   ✅   |
+| Windows  |         x86_64          |   ✅   |
 
 ## Other runtimes
 
-| Runtime | Package |
-|---------|---------|
+| Runtime | Package                                                                          |
+| ------- | -------------------------------------------------------------------------------- |
 | Node.js | [`@momics/iroh-http-node`](https://www.npmjs.com/package/@momics/iroh-http-node) |
-| Deno | [`@momics/iroh-http-deno`](https://jsr.io/@momics/iroh-http-deno) |
+| Deno    | [`@momics/iroh-http-deno`](https://jsr.io/@momics/iroh-http-deno)                |
 
 ## License
 

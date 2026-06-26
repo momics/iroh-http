@@ -12,7 +12,7 @@
  */
 import { execSync } from "node:child_process";
 import { readdirSync } from "node:fs";
-import { resolve, dirname } from "node:path";
+import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -38,7 +38,8 @@ let failed = 0;
 for (const { target, zig } of TARGETS) {
   console.log(`\n── ${target} ──`);
   const zigFlag = zig ? " --zig" : "";
-  const cmd = `npx napi build --platform --release --target ${target}${zigFlag}`;
+  const cmd =
+    `npx napi build --platform --release --target ${target}${zigFlag}`;
   try {
     execSync(cmd, { cwd: PKG_DIR, stdio: "inherit", env });
     console.log(`  ✓ ${target}`);

@@ -7,11 +7,7 @@
  * ```
  */
 
-import type {
-  FfiResponse,
-  IrohAdapter,
-  IrohFetchInit,
-} from "./IrohAdapter.js";
+import type { FfiResponse, IrohAdapter, IrohFetchInit } from "./IrohAdapter.js";
 import { bodyInitToStream, makeReadable, pipeToWriter } from "./streams.js";
 import { classifyError } from "./errors.js";
 import { decodeBase64 } from "./utils.js";

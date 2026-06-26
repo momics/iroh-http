@@ -11,7 +11,7 @@
  *   - Ed25519 sign, verify, and key generation
  */
 import { createNode } from "@momics/iroh-http-tauri";
-import { SecretKey, PublicKey } from "@momics/iroh-http-shared";
+import { PublicKey, SecretKey } from "@momics/iroh-http-shared";
 import type { IrohSession } from "@momics/iroh-http-shared";
 
 // ── Utilities ──────────────────────────────────────────────────────────────────
@@ -24,7 +24,11 @@ function appendLog(el: HTMLElement, msg: string): void {
   el.scrollTop = el.scrollHeight;
 }
 
-function setStatus(el: HTMLElement, msg: string, kind: "ok" | "error" | "" = ""): void {
+function setStatus(
+  el: HTMLElement,
+  msg: string,
+  kind: "ok" | "error" | "" = "",
+): void {
   el.textContent = msg;
   el.className = kind ? `status ${kind}` : "status";
 }
@@ -71,20 +75,31 @@ persistKey(node.secretKey.toBytes());
 // ── Tab navigation ─────────────────────────────────────────────────────────────
 
 {
-  const btns = Array.from(document.querySelectorAll<HTMLButtonElement>("[data-tab]"));
-  const panels = Array.from(document.querySelectorAll<HTMLElement>("[data-panel]"));
+  const btns = Array.from(
+    document.querySelectorAll<HTMLButtonElement>("[data-tab]"),
+  );
+  const panels = Array.from(
+    document.querySelectorAll<HTMLElement>("[data-panel]"),
+  );
   btns.forEach((btn) => {
     btn.addEventListener("click", () => {
       const target = btn.dataset.tab!;
-      btns.forEach((b) => b.classList.toggle("active", b.dataset.tab === target));
-      panels.forEach((p) => p.classList.toggle("active", p.dataset.panel === target));
+      btns.forEach((b) =>
+        b.classList.toggle("active", b.dataset.tab === target)
+      );
+      panels.forEach((p) =>
+        p.classList.toggle("active", p.dataset.panel === target)
+      );
     });
   });
 }
 
 // ── Identity ───────────────────────────────────────────────────────────────────
 
-async function copyText(btn: HTMLButtonElement, getText: () => string | Promise<string>): Promise<void> {
+async function copyText(
+  btn: HTMLButtonElement,
+  getText: () => string | Promise<string>,
+): Promise<void> {
   const text = await getText();
   await navigator.clipboard.writeText(text);
   const prev = btn.textContent!;
@@ -95,26 +110,43 @@ async function copyText(btn: HTMLButtonElement, getText: () => string | Promise<
 const nodeIdEl = document.querySelector<HTMLElement>("#node-id")!;
 const copyIdBtn = document.querySelector<HTMLButtonElement>("#copy-id-btn")!;
 const ticketEl = document.querySelector<HTMLElement>("#node-ticket")!;
-const copyTicketBtn = document.querySelector<HTMLButtonElement>("#copy-ticket-btn")!;
+const copyTicketBtn = document.querySelector<HTMLButtonElement>(
+  "#copy-ticket-btn",
+)!;
 const relayEl = document.querySelector<HTMLElement>("#home-relay")!;
 const addrEl = document.querySelector<HTMLElement>("#node-addr")!;
 const keyStatusEl = document.querySelector<HTMLElement>("#key-status")!;
 
 nodeIdEl.textContent = node.publicKey.toString();
-copyIdBtn.addEventListener("click", () => copyText(copyIdBtn, () => node.publicKey.toString()));
-copyTicketBtn.addEventListener("click", () => copyText(copyTicketBtn, () => node.ticket()));
+copyIdBtn.addEventListener(
+  "click",
+  () => copyText(copyIdBtn, () => node.publicKey.toString()),
+);
+copyTicketBtn.addEventListener(
+  "click",
+  () => copyText(copyTicketBtn, () => node.ticket()),
+);
 
-setStatus(keyStatusEl, savedKey ? "Loaded saved key ✓" : "Generated new key (not yet saved)");
+setStatus(
+  keyStatusEl,
+  savedKey ? "Loaded saved key ✓" : "Generated new key (not yet saved)",
+);
 
-document.querySelector<HTMLButtonElement>("#save-key-btn")!.addEventListener("click", () => {
-  persistKey(node.secretKey.toBytes());
-  setStatus(keyStatusEl, "Key saved to localStorage ✓", "ok");
-});
+document.querySelector<HTMLButtonElement>("#save-key-btn")!.addEventListener(
+  "click",
+  () => {
+    persistKey(node.secretKey.toBytes());
+    setStatus(keyStatusEl, "Key saved to localStorage ✓", "ok");
+  },
+);
 
-document.querySelector<HTMLButtonElement>("#clear-key-btn")!.addEventListener("click", () => {
-  localStorage.removeItem(KEY_STORAGE);
-  setStatus(keyStatusEl, "Cleared — next launch generates a new identity");
-});
+document.querySelector<HTMLButtonElement>("#clear-key-btn")!.addEventListener(
+  "click",
+  () => {
+    localStorage.removeItem(KEY_STORAGE);
+    setStatus(keyStatusEl, "Cleared — next launch generates a new identity");
+  },
+);
 
 void (async () => {
   try {
@@ -152,11 +184,17 @@ serveBtn.addEventListener("click", () => {
   node.serve({ signal: serveAbort.signal }, async (req) => {
     // WebTransport bidi stream (from session.createBidirectionalStream on remote peer).
     const wt = (req as unknown as {
-      acceptWebTransport?: () => { readable: ReadableStream<Uint8Array>; writable: WritableStream<Uint8Array> } | null;
+      acceptWebTransport?: () => {
+        readable: ReadableStream<Uint8Array>;
+        writable: WritableStream<Uint8Array>;
+      } | null;
     }).acceptWebTransport?.();
     if (wt) {
       const peer = req.headers.get("peer-id") ?? "?";
-      appendLog(serverLog, `WebTransport from ${peer.slice(0, 20)}… (echo mode)`);
+      appendLog(
+        serverLog,
+        `WebTransport from ${peer.slice(0, 20)}… (echo mode)`,
+      );
       void (async () => {
         const reader = wt.readable.getReader();
         const writer = wt.writable.getWriter();
@@ -191,7 +229,9 @@ serveBtn.addEventListener("click", () => {
 const fetchForm = document.querySelector<HTMLFormElement>("#fetch-form")!;
 const peerInput = document.querySelector<HTMLInputElement>("#peer-input")!;
 const pathInput = document.querySelector<HTMLInputElement>("#path-input")!;
-const methodSelect = document.querySelector<HTMLSelectElement>("#method-select")!;
+const methodSelect = document.querySelector<HTMLSelectElement>(
+  "#method-select",
+)!;
 const responseStatus = document.querySelector<HTMLElement>("#response-status")!;
 const responseBody = document.querySelector<HTMLElement>("#response-body")!;
 
@@ -199,13 +239,18 @@ fetchForm.addEventListener("submit", async (e) => {
   e.preventDefault();
   const peer = peerInput.value.trim();
   const path = pathInput.value.trim() || "/";
-  if (!peer) { peerInput.focus(); return; }
+  if (!peer) {
+    peerInput.focus();
+    return;
+  }
 
   setStatus(responseStatus, "fetching…");
   responseBody.textContent = "";
 
   try {
-    const res = await node.fetch(`httpi://${peer}${path}`, { method: methodSelect.value });
+    const res = await node.fetch(`httpi://${peer}${path}`, {
+      method: methodSelect.value,
+    });
     setStatus(responseStatus, `HTTP ${res.status}`, res.ok ? "ok" : "error");
     responseBody.textContent = await res.text();
   } catch (e) {
@@ -216,46 +261,70 @@ fetchForm.addEventListener("submit", async (e) => {
 
 // ── Peer info & stats ──────────────────────────────────────────────────────────
 
-const peerLookupInput = document.querySelector<HTMLInputElement>("#peer-lookup-input")!;
-const peerInfoOutput = document.querySelector<HTMLElement>("#peer-info-output")!;
+const peerLookupInput = document.querySelector<HTMLInputElement>(
+  "#peer-lookup-input",
+)!;
+const peerInfoOutput = document.querySelector<HTMLElement>(
+  "#peer-info-output",
+)!;
 
-document.querySelector<HTMLButtonElement>("#peer-info-btn")!.addEventListener("click", async () => {
-  const peer = peerLookupInput.value.trim();
-  if (!peer) { peerLookupInput.focus(); return; }
-  peerInfoOutput.textContent = "loading…";
-  try {
-    const info = await node.peerInfo(peer);
-    peerInfoOutput.textContent = info
-      ? JSON.stringify(info, null, 2)
-      : "(peer not yet seen — connect to it first via HTTP or Sessions)";
-  } catch (e) {
-    peerInfoOutput.textContent = String(e);
-  }
-});
+document.querySelector<HTMLButtonElement>("#peer-info-btn")!.addEventListener(
+  "click",
+  async () => {
+    const peer = peerLookupInput.value.trim();
+    if (!peer) {
+      peerLookupInput.focus();
+      return;
+    }
+    peerInfoOutput.textContent = "loading…";
+    try {
+      const info = await node.peerInfo(peer);
+      peerInfoOutput.textContent = info
+        ? JSON.stringify(info, null, 2)
+        : "(peer not yet seen — connect to it first via HTTP or Sessions)";
+    } catch (e) {
+      peerInfoOutput.textContent = String(e);
+    }
+  },
+);
 
-document.querySelector<HTMLButtonElement>("#peer-stats-btn")!.addEventListener("click", async () => {
-  const peer = peerLookupInput.value.trim();
-  if (!peer) { peerLookupInput.focus(); return; }
-  peerInfoOutput.textContent = "loading…";
-  try {
-    const stats = await node.peerStats(peer);
-    peerInfoOutput.textContent = stats
-      ? JSON.stringify(stats, null, 2)
-      : "(no stats — establish a QUIC connection first)";
-  } catch (e) {
-    peerInfoOutput.textContent = String(e);
-  }
-});
+document.querySelector<HTMLButtonElement>("#peer-stats-btn")!.addEventListener(
+  "click",
+  async () => {
+    const peer = peerLookupInput.value.trim();
+    if (!peer) {
+      peerLookupInput.focus();
+      return;
+    }
+    peerInfoOutput.textContent = "loading…";
+    try {
+      const stats = await node.peerStats(peer);
+      peerInfoOutput.textContent = stats
+        ? JSON.stringify(stats, null, 2)
+        : "(no stats — establish a QUIC connection first)";
+    } catch (e) {
+      peerInfoOutput.textContent = String(e);
+    }
+  },
+);
 
 // ── Discovery (mDNS) ───────────────────────────────────────────────────────────
 
-const advertiseBtn = document.querySelector<HTMLButtonElement>("#advertise-btn")!;
-const advertiseStatus = document.querySelector<HTMLElement>("#advertise-status")!;
-const advertiseServiceInput = document.querySelector<HTMLInputElement>("#advertise-service")!;
+const advertiseBtn = document.querySelector<HTMLButtonElement>(
+  "#advertise-btn",
+)!;
+const advertiseStatus = document.querySelector<HTMLElement>(
+  "#advertise-status",
+)!;
+const advertiseServiceInput = document.querySelector<HTMLInputElement>(
+  "#advertise-service",
+)!;
 
 const browseBtn = document.querySelector<HTMLButtonElement>("#browse-btn")!;
 const browseLog = document.querySelector<HTMLElement>("#browse-log")!;
-const browseServiceInput = document.querySelector<HTMLInputElement>("#browse-service")!;
+const browseServiceInput = document.querySelector<HTMLInputElement>(
+  "#browse-service",
+)!;
 
 let advertiseAbort: AbortController | null = null;
 let browseAbort: AbortController | null = null;
@@ -297,9 +366,14 @@ browseBtn.addEventListener("click", async () => {
   browseLog.textContent = "";
 
   try {
-    for await (const ev of node.browse({ serviceName, signal: browseAbort.signal })) {
+    for await (
+      const ev of node.browse({ serviceName, signal: browseAbort.signal })
+    ) {
       const icon = ev.isActive ? "+" : "-";
-      appendLog(browseLog, `${icon} ${ev.nodeId.slice(0, 20)}… [${ev.addrs.join(", ")}]`);
+      appendLog(
+        browseLog,
+        `${icon} ${ev.nodeId.slice(0, 20)}… [${ev.addrs.join(", ")}]`,
+      );
     }
   } catch (e) {
     appendLog(browseLog, `Error: ${e}`);
@@ -311,20 +385,33 @@ browseBtn.addEventListener("click", async () => {
 
 // ── Sessions (QUIC) ────────────────────────────────────────────────────────────
 
-const sessionPeerInput = document.querySelector<HTMLInputElement>("#session-peer-input")!;
-const sessionConnectBtn = document.querySelector<HTMLButtonElement>("#session-connect-btn")!;
+const sessionPeerInput = document.querySelector<HTMLInputElement>(
+  "#session-peer-input",
+)!;
+const sessionConnectBtn = document.querySelector<HTMLButtonElement>(
+  "#session-connect-btn",
+)!;
 const sessionStatus = document.querySelector<HTMLElement>("#session-status")!;
 const sessionLog = document.querySelector<HTMLElement>("#session-log")!;
-const sessionControls = document.querySelector<HTMLElement>("#session-controls")!;
-const sessionMessageInput = document.querySelector<HTMLInputElement>("#session-message-input")!;
-const datagramInput = document.querySelector<HTMLInputElement>("#datagram-input")!;
+const sessionControls = document.querySelector<HTMLElement>(
+  "#session-controls",
+)!;
+const sessionMessageInput = document.querySelector<HTMLInputElement>(
+  "#session-message-input",
+)!;
+const datagramInput = document.querySelector<HTMLInputElement>(
+  "#datagram-input",
+)!;
 
 let activeSession: IrohSession | null = null;
 let bidiWriter: WritableStreamDefaultWriter<Uint8Array> | null = null;
 
 sessionConnectBtn.addEventListener("click", async () => {
   const peer = sessionPeerInput.value.trim();
-  if (!peer) { sessionPeerInput.focus(); return; }
+  if (!peer) {
+    sessionPeerInput.focus();
+    return;
+  }
 
   setStatus(sessionStatus, "Connecting…");
   sessionConnectBtn.disabled = true;
@@ -371,88 +458,114 @@ sessionConnectBtn.addEventListener("click", async () => {
   }
 });
 
-document.querySelector<HTMLButtonElement>("#session-send-btn")!.addEventListener("click", async () => {
-  const msg = sessionMessageInput.value.trim();
-  if (!msg || !bidiWriter) return;
-  try {
-    await bidiWriter.write(te.encode(msg));
-    appendLog(sessionLog, `→ bidi: "${msg}"`);
-    sessionMessageInput.value = "";
-  } catch (e) {
-    appendLog(sessionLog, `Send error: ${e}`);
-  }
-});
+document.querySelector<HTMLButtonElement>("#session-send-btn")!
+  .addEventListener("click", async () => {
+    const msg = sessionMessageInput.value.trim();
+    if (!msg || !bidiWriter) return;
+    try {
+      await bidiWriter.write(te.encode(msg));
+      appendLog(sessionLog, `→ bidi: "${msg}"`);
+      sessionMessageInput.value = "";
+    } catch (e) {
+      appendLog(sessionLog, `Send error: ${e}`);
+    }
+  });
 
-document.querySelector<HTMLButtonElement>("#datagram-send-btn")!.addEventListener("click", async () => {
-  const msg = datagramInput.value.trim();
-  if (!msg || !activeSession) return;
-  // Acquire and immediately release the lock for a one-shot write.
-  const writer = activeSession.datagrams.writable.getWriter();
-  try {
-    await writer.write(te.encode(msg));
-    appendLog(sessionLog, `→ datagram: "${msg}"`);
-    datagramInput.value = "";
-  } catch (e) {
-    appendLog(sessionLog, `Datagram error: ${e}`);
-  } finally {
-    writer.releaseLock();
-  }
-});
+document.querySelector<HTMLButtonElement>("#datagram-send-btn")!
+  .addEventListener("click", async () => {
+    const msg = datagramInput.value.trim();
+    if (!msg || !activeSession) return;
+    // Acquire and immediately release the lock for a one-shot write.
+    const writer = activeSession.datagrams.writable.getWriter();
+    try {
+      await writer.write(te.encode(msg));
+      appendLog(sessionLog, `→ datagram: "${msg}"`);
+      datagramInput.value = "";
+    } catch (e) {
+      appendLog(sessionLog, `Datagram error: ${e}`);
+    } finally {
+      writer.releaseLock();
+    }
+  });
 
-document.querySelector<HTMLButtonElement>("#session-close-btn")!.addEventListener("click", () => {
-  if (!activeSession) return;
-  activeSession.close({ closeCode: 0, reason: "user closed" });
-  activeSession = null;
-  bidiWriter = null;
-  sessionControls.classList.add("hidden");
-  sessionConnectBtn.textContent = "Connect";
-  sessionConnectBtn.disabled = false;
-  setStatus(sessionStatus, "Closed");
-  appendLog(sessionLog, "Session closed by user");
-});
+document.querySelector<HTMLButtonElement>("#session-close-btn")!
+  .addEventListener("click", () => {
+    if (!activeSession) return;
+    activeSession.close({ closeCode: 0, reason: "user closed" });
+    activeSession = null;
+    bidiWriter = null;
+    sessionControls.classList.add("hidden");
+    sessionConnectBtn.textContent = "Connect";
+    sessionConnectBtn.disabled = false;
+    setStatus(sessionStatus, "Closed");
+    appendLog(sessionLog, "Session closed by user");
+  });
 
 // ── Crypto ─────────────────────────────────────────────────────────────────────
 
-const signDataInput = document.querySelector<HTMLInputElement>("#sign-data-input")!;
-const signatureOutput = document.querySelector<HTMLElement>("#signature-output")!;
-const verifyKeyInput = document.querySelector<HTMLInputElement>("#verify-key-input")!;
-const verifyDataInput = document.querySelector<HTMLInputElement>("#verify-data-input")!;
-const verifySigInput = document.querySelector<HTMLInputElement>("#verify-sig-input")!;
+const signDataInput = document.querySelector<HTMLInputElement>(
+  "#sign-data-input",
+)!;
+const signatureOutput = document.querySelector<HTMLElement>(
+  "#signature-output",
+)!;
+const verifyKeyInput = document.querySelector<HTMLInputElement>(
+  "#verify-key-input",
+)!;
+const verifyDataInput = document.querySelector<HTMLInputElement>(
+  "#verify-data-input",
+)!;
+const verifySigInput = document.querySelector<HTMLInputElement>(
+  "#verify-sig-input",
+)!;
 const verifyResult = document.querySelector<HTMLElement>("#verify-result")!;
 const genKeyOutput = document.querySelector<HTMLElement>("#gen-key-output")!;
 
-document.querySelector<HTMLButtonElement>("#sign-btn")!.addEventListener("click", async () => {
-  const data = te.encode(signDataInput.value);
-  try {
-    const sig = await node.secretKey.sign(data);
-    const hex = toHex(sig);
-    signatureOutput.textContent = hex;
-    // Pre-fill verify fields for a quick round-trip check.
-    verifyKeyInput.value = node.publicKey.toString();
-    verifyDataInput.value = signDataInput.value;
-    verifySigInput.value = hex;
-  } catch (e) {
-    signatureOutput.textContent = String(e);
-  }
-});
+document.querySelector<HTMLButtonElement>("#sign-btn")!.addEventListener(
+  "click",
+  async () => {
+    const data = te.encode(signDataInput.value);
+    try {
+      const sig = await node.secretKey.sign(data);
+      const hex = toHex(sig);
+      signatureOutput.textContent = hex;
+      // Pre-fill verify fields for a quick round-trip check.
+      verifyKeyInput.value = node.publicKey.toString();
+      verifyDataInput.value = signDataInput.value;
+      verifySigInput.value = hex;
+    } catch (e) {
+      signatureOutput.textContent = String(e);
+    }
+  },
+);
 
-document.querySelector<HTMLButtonElement>("#verify-btn")!.addEventListener("click", async () => {
-  try {
-    const pk = PublicKey.fromString(verifyKeyInput.value.trim());
-    const data = te.encode(verifyDataInput.value);
-    const sig = fromHex(verifySigInput.value);
-    const valid = await pk.verify(data, sig);
-    setStatus(verifyResult, valid ? "✓ Valid signature" : "✗ Invalid signature", valid ? "ok" : "error");
-  } catch (e) {
-    setStatus(verifyResult, String(e), "error");
-  }
-});
+document.querySelector<HTMLButtonElement>("#verify-btn")!.addEventListener(
+  "click",
+  async () => {
+    try {
+      const pk = PublicKey.fromString(verifyKeyInput.value.trim());
+      const data = te.encode(verifyDataInput.value);
+      const sig = fromHex(verifySigInput.value);
+      const valid = await pk.verify(data, sig);
+      setStatus(
+        verifyResult,
+        valid ? "✓ Valid signature" : "✗ Invalid signature",
+        valid ? "ok" : "error",
+      );
+    } catch (e) {
+      setStatus(verifyResult, String(e), "error");
+    }
+  },
+);
 
-document.querySelector<HTMLButtonElement>("#gen-key-btn")!.addEventListener("click", () => {
-  const sk = SecretKey.generate();
-  genKeyOutput.textContent = [
-    `Secret key (hex):  ${toHex(sk.toBytes())}`,
-    ``,
-    `Usage: await createNode({ key: fromHex('<above hex>') })`,
-  ].join("\n");
-});
+document.querySelector<HTMLButtonElement>("#gen-key-btn")!.addEventListener(
+  "click",
+  () => {
+    const sk = SecretKey.generate();
+    genKeyOutput.textContent = [
+      `Secret key (hex):  ${toHex(sk.toBytes())}`,
+      ``,
+      `Usage: await createNode({ key: fromHex('<above hex>') })`,
+    ].join("\n");
+  },
+);

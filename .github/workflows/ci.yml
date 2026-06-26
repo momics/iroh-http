@@ -46,6 +46,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+
+      # ── Formatting (fail fast, before any heavy setup) ───────────────────────
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+      - name: deno fmt --check
+        run: deno fmt --check
+
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - uses: actions/setup-node@v6

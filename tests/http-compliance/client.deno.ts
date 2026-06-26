@@ -34,13 +34,19 @@ const cases = JSON.parse(await Deno.readTextFile(casesUrl));
 // ── Assertion helpers ─────────────────────────────────────────────────────────
 
 // deno-lint-ignore no-explicit-any
-async function assertResponse(resp: Response, expected: any): Promise<string | null> {
-  if (resp.status !== expected.status)
+async function assertResponse(
+  resp: Response,
+  expected: any,
+): Promise<string | null> {
+  if (resp.status !== expected.status) {
     return `status: got ${resp.status}, want ${expected.status}`;
+  }
   if (expected.bodyExact !== undefined) {
     const text = await resp.text();
     return text !== expected.bodyExact
-      ? `body: got ${JSON.stringify(text)}, want ${JSON.stringify(expected.bodyExact)}`
+      ? `body: got ${JSON.stringify(text)}, want ${
+        JSON.stringify(expected.bodyExact)
+      }`
       : null;
   }
   if (expected.bodyNot !== undefined) {
@@ -62,8 +68,11 @@ async function assertResponse(resp: Response, expected: any): Promise<string | n
   if (expected.headers) {
     for (const [k, v] of Object.entries(expected.headers)) {
       const actual = resp.headers.get(k as string);
-      if (actual !== v)
-        return `header ${k}: got ${JSON.stringify(actual)}, want ${JSON.stringify(v)}`;
+      if (actual !== v) {
+        return `header ${k}: got ${JSON.stringify(actual)}, want ${
+          JSON.stringify(v)
+        }`;
+      }
     }
     await resp.body?.cancel();
     return null;
@@ -89,7 +98,10 @@ let failed = 0;
 try {
   for (const c of cases) {
     if (!c.id) continue; // skip comment entries
-    if (c.skip) { console.log(`  skip  ${c.id}: ${c.skip}`); continue; }
+    if (c.skip) {
+      console.log(`  skip  ${c.id}: ${c.skip}`);
+      continue;
+    }
     if (c.requests || c.concurrent > 1 || c.repeat > 1) continue;
     let resp: Response;
     try {
@@ -100,7 +112,9 @@ try {
         directAddrs: serverAddrs,
       });
     } catch (e) {
-      const reason = `fetch threw: ${e instanceof Error ? e.message : String(e)}`;
+      const reason = `fetch threw: ${
+        e instanceof Error ? e.message : String(e)
+      }`;
       failed++;
       console.log(`  FAIL  ${c.id}: ${reason}`);
       continue;
