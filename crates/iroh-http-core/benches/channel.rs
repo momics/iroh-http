@@ -80,7 +80,7 @@ fn bench_handle_store_channel(c: &mut Criterion) {
                     ep.handles().finish_body(wh).unwrap();
 
                     // Drain all chunks (send_chunk splits at max_chunk_size=64KB)
-                    while let Some(_) = ep.handles().next_chunk(rh).await.unwrap() {}
+                    while ep.handles().next_chunk(rh).await.unwrap().is_some() {}
                 }
             });
         });
