@@ -248,6 +248,13 @@ function createYieldFn(): {
 // the -1 shutdown sentinel without a timing-dependent delay.
 const serveCancellers = new Map<number, () => void>();
 
+// #245: The `stopServe` FFI call is a non-blocking op (`iroh_http_call`).
+// If it is left floating it can still be in flight when a test's `sanitizeOps`
+// snapshot is taken, which Deno's leak sanitizer reports as a leaked op. This
+// map hands the in-flight promise to the serve loop so it can drain the op
+// before resolving `finished`. Entries self-clean once the op settles.
+const serveStopOps = new Map<number, Promise<unknown>>();
+
 // ── JSON dispatch helper ──────────────────────────────────────────────────────
 
 const enc = new TextEncoder();
@@ -783,6 +790,10 @@ export const rawServe: RawServeFn = (
         } finally {
           serveCancellers.delete(endpointHandle);
           yielder.close();
+          // #245: Drain the in-flight stopServe op (if any) before resolving
+          // so no non-blocking FFI op survives past `handle.finished`.
+          const stopOp = serveStopOps.get(endpointHandle);
+          if (stopOp) await stopOp;
         }
       })();
     },
@@ -806,6 +817,11 @@ export function makeAllocBodyWriter(endpointHandle: number): AllocBodyWriterFn {
 // Sends QUIC CONNECTION_CLOSE frames so peers observe a clean disconnect.
 function _closeAllSync(): void {
   lib.symbols.iroh_http_close_all();
+  // #245: close_all removes the request queues, but a serve loop parked in
+  // `await yielder.yield()` only re-polls when its MessageChannel turn lands.
+  // Wake every loop explicitly so it sees the -1 sentinel promptly instead of
+  // relying on MessageChannel timing under load.
+  for (const cancel of serveCancellers.values()) cancel();
 }
 Deno.addSignalListener("SIGTERM", _closeAllSync);
 // SIGINT is registered only on platforms that support it (non-Windows).
@@ -909,9 +925,15 @@ export function stopServe(handle: number): void {
   // #115: Cancel the yield immediately so the polling loop re-polls and
   // sees the -1 shutdown sentinel without waiting for the MessageChannel.
   serveCancellers.get(handle)?.();
-  call<Record<never, never>>("stopServe", { endpointHandle: handle }).catch(
-    () => {},
-  );
+  // #245: Register the in-flight op so the serve loop can await it before
+  // resolving `finished`; otherwise this non-blocking FFI op can outlive the
+  // test boundary and trip Deno's `sanitizeOps` leak detector under load.
+  const op = call<Record<never, never>>("stopServe", { endpointHandle: handle })
+    .catch(() => {});
+  serveStopOps.set(handle, op);
+  void op.finally(() => {
+    if (serveStopOps.get(handle) === op) serveStopOps.delete(handle);
+  });
 }
 
 /** Resolves when the endpoint has been fully closed (explicit or native). */
@@ -1313,11 +1335,9 @@ export class DenoAdapter extends IrohAdapter {
   }
 
   stopServe(handle: number): void {
-    // #115: Cancel the yield immediately so the polling loop re-polls.
-    serveCancellers.get(handle)?.();
-    call<Record<never, never>>("stopServe", { endpointHandle: handle }).catch(
-      () => {},
-    );
+    // Delegate to the module-level stopServe so the in-flight op is tracked
+    // and drained by the serve loop (#115/#245).
+    stopServe(handle);
   }
 
   waitEndpointClosed(handle: number): Promise<void> {
