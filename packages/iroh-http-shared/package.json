@@ -1,6 +1,6 @@
 {
   "name": "@momics/iroh-http-shared",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "description": "Shared TypeScript layer for iroh-http — no native dependencies",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",

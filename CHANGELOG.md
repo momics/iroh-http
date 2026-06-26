@@ -1,30 +1,379 @@
-## [unreleased]
+## [0.5.2] - 2026-06-26
 
-### � Breaking Changes
+### 🚀 Features
 
-- *(core)* Remove `raw_connect` from the public Rust surface and the `connect` Tauri command. The session API (`node.dial`/sessions) covers the same use case with a WebTransport-shaped surface; the JS adapters never wired the legacy upgrade entrypoint. Server-side `req.upgrade()` is unchanged.
-- *(core)* Rename pure-Rust serve entries: `serve_service` → `serve`, `serve_service_with_events` → `serve_with_events` (ADR-014 D5). The FFI entries are demoted: `serve` → `ffi_serve`, `serve_with_callback` → `ffi_serve_with_callback`. All platform adapters (Node, Deno, Tauri) are updated. Pure-Rust callers should replace `iroh_http_core::serve_service(…)` with `iroh_http_core::serve(…)` and `iroh_http_core::serve_with_callback(…)` with `iroh_http_core::ffi_serve_with_callback(…)`.
-### �🚀 Features
-
-- *(node)* Napi-rs platform package split
+- *(examples)* Add Deno mDNS advertise/browse example
 
 ### 🐛 Bug Fixes
 
-- *(bench)* Uint8Array type cast for Deno strict check, add --skipLibCheck for node tsc
-- *(ci)* Check no-default-features with compression kept on — tests discovery-off path only
-### 🚜 Refactor
+- *(examples)* Resolve @momics/iroh-http-shared/adapter in Tauri Vite config
+- *(tauri)* Declare permission sets with [[set]] not [[permission]] (#246)
+- *(tauri)* Make mdns_advertise async so it runs on the Tokio runtime (#247)
+- *(tauri)* Register session_accept, try_next_chunk, start_transport_events in ACL (#248)
+- *(examples)* Correct Tauri mDNS advertise/browse usage
 
-- *(core)* Replace hand-rolled `max_request_body_bytes` accounting in `FfiDispatcher::dispatch` with `tower_http::limit::RequestBodyLimitLayer`. Closes the last bespoke enforcement in the request path; per ADR-013, body-size enforcement now lives entirely in the standard tower-http stack. The layer rejects oversized requests with `413 Payload Too Large` (immediately for known `Content-Length`, or by erroring the wrapped `Limited` body mid-stream for chunked uploads).
+### 💼 Other
+
+- *(examples)* Update to iroh-http 0.5.1 and refresh lockfiles
+- *(ci)* Adopt deno fmt and enforce formatting in CI (#249)
+
 ### 📚 Documentation
 
-- *(readmes)* Fix Windows platform support, add cross-runtime links, fix SPDX license parens; ci: add Windows to Node build matrix
-- Professionalize READMEs and update roadmap
+- *(shared)* Document node.browse and node.advertise (#249)
+- *(api)* Document public TS API across node/deno/tauri (#249)
+- *(tauri)* Fix literal \\n in README; make tests/http-compliance fmt scope explicit (#249)
+
+### 🎨 Styling
+
+- Format TS code with deno fmt (#249)
+
+### 🧪 Testing
+
+- *(tauri)* Add ACL permission-set regression guard (#246)
+- *(tauri)* Guard command/permission-set parity (#248)
 
 ### ⚙️ Miscellaneous Tasks
 
-- Skip workflows on docs/markdown-only changes, scope bench to code paths
-- Fix Node version, napi artifacts, zig setup, crates ordering
-## [0.1.3] - 2026-04-20
+- *(tauri)* Regenerate ACL schema after permission-set fix (#246)
+- *(tauri)* Regenerate ACL artifacts for new commands (#248)
+## [0.5.1] - 2026-06-25
+
+### 🐛 Bug Fixes
+
+- *(release)* Lowercase GitHub org momics in package metadata (#242)
+- *(node)* Make mdns_advertise async to stop teardown SIGABRT (#243) (#244)
+
+### ⚙️ Miscellaneous Tasks
+
+- *(publish)* Use npm OIDC Trusted Publishing, regen node index.js to 0.5.0 (#241)
+- *(bench)* Archive raw results to bench-results branch; drop gh-pages dashboard (#240)
+- Release v0.5.1
+## [0.5.0] - 2026-06-25
+
+### 🚀 Features
+
+- *(tauri)* Register httpi:// as custom URI scheme
+- *(deps)* [**breaking**] Migrate to iroh 1.0 (#236)
+
+### 🐛 Bug Fixes
+
+- *(ci)* Update napi artifacts flags for @napi-rs/cli v3
+- Remove endpoint from registry after close, not before
+- *(node)* Add local u32-to-u64 handle indirection to preserve slotmap bits
+- *(node)* Suppress mDNS shutdown panic that fails Node test runner
+- *(core)* Prevent stop_serve race when abort fires before rawServe resolves
+- *(core)* Prevent close/closed race on session handle removal
+- *(node)* Tolerate missing endpoint in stop_serve and wait_serve_stop
+- *(ci)* Version-bump policy matched context lines in package.json diffs
+- *(tauri)* Remove needless Ok wrap in scheme 405 response
+- *(ci)* Version-bump policy matched package-lock.json entries
+- *(deps)* Clear undici & js-yaml npm audit advisories (#239)
+
+### 📚 Documentation
+
+- Rewrite READMEs for clarity and dedup shared API content
+
+### ⚙️ Miscellaneous Tasks
+
+- Fix Node.js extended tests hanging on open handles
+- Regen napi bindings and fix Deno shutdown races (#231)
+- Release v0.5.0
+## [0.4.0] - 2026-05-02
+
+### 🚀 Features
+
+- [**breaking**] Drop raw_connect from public surface
+- *(core)* Decompress inbound request bodies on serve path
+- *(api)* [**breaking**] Rename node.connect→dial, node.sessions→incoming, session_*→Session::*
+- *(api)* Node.dial() accepts httpi:// URLs (closes #166)
+- *(compression)* [**breaking**] Make zstd always-on, drop build-time feature flag
+- *(ffi)* Impl Sink<Bytes> for BodyWriter (#174)
+- *(ffi)* Pass StackConfig knobs through FFI — fetch timeout/decompress, serve decompress, per-call response limit (#189)
+- *(node)* [**breaking**] Migrate iroh-http-node from napi v2 to v3 (#146)
+
+### 🐛 Bug Fixes
+
+- *(core)* Align compression docs and implementation
+- *(core)* Replace slab with slotmap in endpoint registry
+- *(release)* Regenerate lockfile with all platform optional deps
+- *(tauri)* Drop "connect" from build.rs command list
+- *(deno)* Close_all signals serve queues so SIGINT exits cleanly
+- *(deno)* Widen FFI endpoint handle to u64 to preserve slotmap version bits
+- *(compression)* Align min_body_bytes default with docs (1 KiB) (closes #167)
+- *(server)* Box ServeService and collapse pipeline assembly into one chain
+- *(server)* Add max_request_body_decoded_bytes to guard against zstd bombs (#190)
+- *(tauri)* Rename max_request_body_bytes in ServeArgs and ServeOptions mapping (#190 follow-up)
+- *(server)* Poll_ready logs+Pending instead of swallowing; add clippy.toml disallowed-types
+- *(ffi)* Forward fetch knobs in Node/Deno adapters; add AC regression tests (#189)
+- *(ci)* Narrow version-bump-policy to actual version-field diffs (#196)
+- *(api)* Tidy stale references after #194 rename
+- *(shared)* Export FetchOptions from adapter barrel
+- *(deny)* Ignore hickory CVEs blocked on iroh upstream
+- *(audit)* Ignore hickory CVEs in cargo-audit config
+- *(bench)* Replace serve() with ffi_serve() in bench fixtures
+- *(shared)* Export FetchOptions from public index barrel
+- *(node)* Make start_transport_events async to satisfy tokio runtime
+- *(node)* Make raw_serve async to run inside tokio runtime
+- *(bench)* Clean up formatting in QUIC stream and HTTP benchmarks
+- *(core)* Resolve P3 issues #199, #200, #201, #202, #203
+- *(build)* Auto-repair bare lockfile stubs in check-lockfile.mjs
+
+### 🚜 Refactor
+
+- *(core)* Introduce unified Body newtype (slice 1 of #159)
+- *(core)* Make RequestService infallible (slice 2 of #159)
+- *(core)* Collapse serve-loop wiring with option_layer (slice 3 of #159)
+- *(core)* Split RequestService into FfiDispatcher + IrohHttpService (slice 4 of #159)
+- *(core)* Rename TowerErrorHandler → HandleLayerError + ADR-013 doc (slice 6 of #159)
+- *(core)* Use tower_http::RequestBodyLimitLayer for request-body size enforcement
+- *(core)* Unify response body via MapResponseBodyLayer + Body::new
+- *(core)* Extract config and stats types out of endpoint.rs
+- *(server)* Use tower-http NotForContentType for compression skip rules (closes #172)
+- *(server)* Extract per-bistream pipeline assembly into server_pipeline (closes #169)
+- *(stream)* Impl http_body::Body for BodyReader directly (refs #170)
+- *(endpoint)* Split EndpointInner into named subsystems (closes #171)
+- *(server)* IrohHttpService.remote_node_id is Arc<String>, not Option<String>
+- *(server_pipeline)* Extract build_stack so the guardrail tests the real chain
+- *(core)* [**breaking**] Slice A — introduce mod http / mod ffi split + architecture test
+- *(core)* Slice B — typed StackConfig + shared build_stack/build_client_stack (#184)
+- *(core)* Slice C.0 — boxed-per-layer stack composition (#185)
+- *(core)* Slice C.1+C.3 — pure-Rust serve(svc) + RemoteNodeId extension (#185)
+- *(core)* Move FfiDispatcher into mod ffi (Slice C.2 of #185)
+- *(core)* Delete dead duplex CONNECT/Upgrade branch (Slice C.5, closes #180)
+- *(core)* Typed ConnectionTracker / RequestTracker (Slice C.4, closes #178)
+- *(core)* Collapse src/ to endpoint.rs + http/ + ffi/ (#185)
+- *(server)* Split http/server/mod.rs to ≤200 LoC (Slice C.7 of #185)
+- *(core)* Pure-Rust http::fetch(addr, req, &cfg) -> Result<Response<Body>, FetchError> (Slice D, closes #186)
+- *(client)* Finish Slice D acceptance — pumps to ffi, drop hyper string match, wire timeout/decompress through ffi::fetch (#186 review)
+- *(ffi)* Slice E — move session under mod ffi, lock canonical layout (closes #187)
+- *(api)* Rename serve_service → serve; demote FFI serve to ffi_serve (#194)
+- *(endpoint)* Split endpoint.rs into endpoint/ subsystem modules (ADR-014 D1, #192)
+- *(endpoint)* Extract lifecycle.rs; update ADR-014 status note (#192 follow-up)
+
+### 📚 Documentation
+
+- *(spec)* Add missing public types and Rust API coverage
+- *(adr)* Draft ADR-014 runtime architecture
+- *(adr)* Add ADR-013 lean on the ecosystem
+- *(internals)* Add core-assessment-2026-04
+- *(core)* Warn FFI adapters not to truncate slotmap handles to u32
+- *(compression)* Document zstd-only policy and runtime support (closes #173)
+- *(lib,session)* Regroup Session re-export under FFI banner; doc rationale (#187 review MAINT-1, INFO-1, TEST-2)
+- *(adr-014)* Record D4 perf-vs-elegance split after Slice E
+- *(adr-014,ffi)* Record D4 resolution; backlink pumps to #174
+- *(adr-014,epic-182)* Recalibrate D1 LoC targets; record subsystem split gap (#195)
+- *(guidelines)* Document FFI payload field naming convention; add handle doc comments (#143)
+
+### ⚡ Performance
+
+- *(build)* Add .cargo/config.toml, prefer cargo nextest, document linker and sccache (closes #168)
+- *(node)* Use zero-copy buffer transfers in napi bridge
+
+### 🎨 Styling
+
+- *(core)* Rustfmt fixes after Slice C.2/C.5
+- Move allow attr out of doc-comment block; drop trailing blank lines
+- Rustfmt + napi v3 generated bindings
+
+### 🧪 Testing
+
+- *(core)* Regression test for #161 u32-handle truncation
+- *(server_pipeline)* Adding a no-op layer is one append (closes #175)
+- *(core)* Add layered channel and QUIC micro-benchmarks
+- *(node)* Add FFI bridge isolation benchmark
+
+### ⚙️ Miscellaneous Tasks
+
+- Gate publish on extended tests passing
+- *(core)* Cargo fmt
+- Remove reviews/ — findings filed as issues #190-#195
+- *(docs)* Remove stale Slice E comment, fix fetch intra-doc links, delete dead apply_handle_layer_error
+- *(release)* Gate version bumps to chore-release commits; guard version.sh against dirty trees (#196)
+- Update deno.lock
+- Release v0.4.0
+
+### ◀️ Revert
+
+- *(release)* Roll workspace back to 0.3.4 to unbreak CI
+## [0.3.4] - 2026-04-29
+
+### 🚀 Features
+
+- *(shared)* [**breaking**] Remove legacy two-argument fetch(peer, path) overload
+- *(core)* Validate ALPN capabilities at bind() time
+- *(core)* Expose BodyReader cancellation contract
+
+### 🐛 Bug Fixes
+
+- *(bench)* Exclude close() from cold-connect measurement
+- *(tauri)* Wrap serve params in ServeArgs struct
+- Update fetch URLs to use dynamic serverId for bench tests
+- Update fetch URLs to use dynamic serverId in benchmark scripts
+- *(ci)* Align local and github checks
+- *(deno)* Re-add ignore flag to regression #115 test
+- *(deno)* Cancellable yield for serve loop shutdown (#115)
+- *(deno)* Keep serve registry entry alive until close_endpoint (#149)
+- *(deno)* Remove x-503-source debug header from production responses
+
+### 💼 Other
+
+- Upgrade iroh to 0.98.1
+- *(deps)* Bump napi-build from 1.2.1 to 2.3.1
+- *(deps)* Bump criterion from 0.5.1 to 0.8.2
+- *(deps)* Bump rand from 0.9.4 to 0.10.1
+
+### 🚜 Refactor
+
+- *(core)* [**breaking**] Mechanical cleanup — units, naming, type consistency
+- [**breaking**] Move serve config from NodeOptions to ServeOptions
+- Restructure JsNodeOptions and introduce JsServeOptions for improved server configuration
+
+### 📚 Documentation
+
+- Promote httpi:// URL form as primary fetch() input
+- Correct ServeOptions default values
+
+### ⚡ Performance
+
+- Redesign benchmark suite with 9 consistent scenarios
+- *(deno)* Reduce FFI overhead from ~40x to ~1.2x native (#126)
+- *(node,tauri)* Add try_next_chunk sync fast path for body streaming
+- *(tauri)* Use binary IPC for body chunks instead of base64
+- *(shared)* Profile and optimize shared TypeScript fetch layer
+- *(deno)* Benchmark JSON vs MessagePack for FFI boundary
+
+### 🧪 Testing
+
+- *(tauri)* Add Rust and guest-JS test coverage
+- Assert response status in 32-stream regression test (#149)
+- *(deno)* Separate concerns in regression tests and add #149 coverage
+- Modularize and unify test suite naming and structure
+
+### ⚙️ Miscellaneous Tasks
+
+- Restrict extended tests to tags and manual dispatch
+- *(bench)* Fix benchmark workflow — rename groups and create gh-pages
+- *(bench)* Fix gh-pages push — add auto-push and skip-fetch
+- *(bench)* Split release/main data paths and disable fail-on-alert
+- Release v0.3.4
+## [0.3.3] - 2026-04-25
+
+### 🐛 Bug Fixes
+
+- *(build)* Regenerate Tauri Cargo.lock during version bump
+- *(ci)* Revert upload-artifact to v7 (v8 does not exist)
+- *(ci)* Match cargo "already exists" in publish idempotency check
+
+### ⚙️ Miscellaneous Tasks
+
+- Release v0.3.3
+- Skip verify for tauri-plugin-iroh-http publish
+- Harden release pipeline
+## [0.3.2] - 2026-04-25
+
+### 🐛 Bug Fixes
+
+- *(build)* Add version to all internal path deps for cargo publish
+
+### ⚙️ Miscellaneous Tasks
+
+- Release v0.3.2
+## [0.3.1] - 2026-04-25
+
+### 🐛 Bug Fixes
+
+- *(deno)* Signal shutdown and drain queue before removing serve registry
+- *(shared)* Await body pipe before respond on handler failure
+- *(build)* Version script now updates all iroh-http dep versions in Tauri Cargo.toml
+- *(build)* Regenerate lockfile to fix npm ci crash on versionless optional deps
+
+### 📚 Documentation
+
+- Rename explorations/ to adr/ and add ADRs 009-012
+- *(tauri)* Update Cargo dependency version to 0.3 in README
+
+### ⚙️ Miscellaneous Tasks
+
+- *(cargo)* Migrate workspace members to version.workspace inheritance
+- *(scripts)* Replace release/ folder with interactive release.sh
+- Fail publish on real errors, only skip on already-published
+- Release v0.3.1
+## [0.3.0] - 2026-04-25
+
+### 🚀 Features
+
+- *(shared)* [**breaking**] Restructure NodeOptions and simplify ServeOptions (#108 #109 #111 #112)
+- *(shared)* [**breaking**] EventSource abstraction — peerconnect/peerdisconnect/pathchange/diagnostics events (#116)
+- *(shared)* [**breaking**] Remove duplex upgrade; expose node.sessions() (#117)
+- *(node)* Add sessionAccept napi binding + node.sessions() e2e test
+- *(tauri)* Add session_accept command + wire node.sessions()
+- *(shared)* Add PublicKey.fromPeerId() and PublicKey.toURL()
+
+### 🐛 Bug Fixes
+
+- Update package dependencies to use versioned imports for examples
+- Add version requirements to path deps in adapter and tauri crates
+- *(shared)* Guard against double serve() on the same node (#114)
+- *(shared)* Await loopDone before resolving finished (#115)
+- *(dependencies)* Add @momics/iroh-http-deno@~0.2.1 to examples/deno dependencies
+- *(shared)* Preserve RelayMode literal autocomplete via (string & {}) (#110)
+- *(deno,node,shared)* Resolve #119 stale-handle race; document #122 deno-specific timeout
+- *(deno)* Sync-poll nextRequest to avoid spawn_blocking deadlock (#122)
+
+### 🚜 Refactor
+
+- *(tauri)* Rename commands and restructure permissions into named sets
+- *(shared)* Split keys.ts into PublicKey, SecretKey, base32 modules
+
+### 📚 Documentation
+
+- Enhance README with clearer explanation of iroh-http functionality
+- Fix tauri package README and Cargo metadata
+- Update observability and roadmap documentation for clarity and accuracy
+- Add regression-first skill
+- *(shared)* Add JSDoc to NodeOptions, RelayMode, and IrohFetchInit (#110)
+- Update README files for clarity and consistency across packages
+
+### 🧪 Testing
+
+- *(core)* Fix response_header_bomb_rejected missing bind_addrs
+- *(deno)* Add regression test for serve loop pending ops bug (#115)
+- *(deno)* Add regression tests for double-serve guard (#114)
+- *(node)* [**breaking**] Update e2e transport tests to diagnostics API
+- Expand test suite with lifecycle, error handling, and stress tests (#121)
+
+### ⚙️ Miscellaneous Tasks
+
+- Upgrade actions to latest majors, slim verify, add publish target selector
+- Pre-push cleanup — remove rawConnect dead code
+- Update .gitignore to include .agents and skills-lock.json; modify VSCode settings for agent skills locations
+- Release v0.3.0
+## [0.2.1] - 2026-04-22
+
+### 🐛 Bug Fixes
+
+- Correct release process, remove Zig dep, fix bench registry leak
+- Regenerate deno.lock for v0.2.0; version.sh now updates it too
+- Version.sh trailing message points to release:tag instead of manual commit
+- *(node)* Correct napi config field names (name/triples) and regenerate index.js
+- *(ci)* Install Tauri GTK system deps in verify-release job
+- *(release)* Add NPM_TOKEN for first-publish and publish shared to JSR
+- *(release)* Use subshell for tsc so CWD stays at repo root
+- Regenerate lockfile with root version field (npm 11 / Node 24)
+- Resolve npm Invalid Version by omitting optional platform packages
+- Add --omit=optional to remaining npm ci calls (bench, publish)
+
+### ⚙️ Miscellaneous Tasks
+
+- Update Cargo.lock for v0.2.0
+- Release v0.2.1
+- *(ci)* Disable tag-triggered bench workflow (hangs)
+- Use OIDC Trusted Publisher for npm, bump Node to 24, fix crates idempotency
+- *(release)* Add job timeouts and fix apt-get hanging on aarch64 cross-compile
+- Split release (build) and publish into separate workflows
+- Rename release.yml → build.yml, update workflow_run reference
+- Fix build.yml name field to Build
+## [0.2.0] - 2026-04-22
 
 ### 🚀 Features
 
@@ -89,6 +438,10 @@
 - *(#49)* Add benchmark infrastructure
 - *(shared)* Enforce incoming peer verification via verifyNodeId (#76)
 - *(#49)* Extend benchmark infrastructure — latency benches, CI regression workflow (#75)
+- *(node)* Napi-rs platform package split
+- *(core)* [**breaking**] Remove trailer header support
+- *(streaming)* Add sweep_interval_ms tuning option and sweep_now()
+- Add structured evaluation prompt for iroh-http library
 
 ### 🐛 Bug Fixes
 
@@ -194,6 +547,40 @@
 - *(stream,core)* Resolve #82, #83, #84 — trailer leak, compression default, stream quality
 - *(#79,#80,#46,#81)* Tauri leak, pool docs, CI targets, Tower layers
 - *(issue-templates)* Update acceptance criteria descriptions for bug and feature templates
+- *(bench)* Uint8Array type cast for Deno strict check, add --skipLibCheck for node tsc
+- *(ci)* Check no-default-features with compression kept on — tests discovery-off path only
+- *(ci)* Resolve three CI failures on v0.1.4 main push
+- Resolve strict lint and adapter type regressions
+- Update mdns dispatch functions to use parameterized input and improve error handling
+- *(tauri)* Resolve clippy errors blocking CI
+- *(bench)* Update mitata v1 API and enter tokio runtime in criterion benches
+- *(bench)* Fix bench regressions and add smoke-test gate
+- *(core)* Skip body channel allocation for null-body status codes
+- *(deno)* Pass endpointHandle in all session FFI calls; reduce concurrent stress test
+- *(test)* Add missing routes to cross-runtime Deno server
+- *(deno)* Add sanitizeOps: false to SecretKey toBytes round-trip test
+- *(shared)* Await nativeClosed in close() to drain waitEndpointClosed FFI op
+- *(test)* Strip NODE_OPTIONS for deno processes; grant all perms in deno tasks
+- *(deno,core)* Eliminate null-ptr UB and global concurrency bypass
+- *(core)* Raise DEFAULT_CONCURRENCY from 64 to 1024
+- *(tests)* Parse --pairs flag correctly and guard against zero pairs
+- *(core)* Clean up fetch cancel-token on early error; fix flaky pool test
+- *(tauri)* Respond 503 on channel send failure in serve callback
+- *(deno)* Distinguish stream error from EOF in nextChunk
+- *(shared)* Track dist/ in git and add drift-check to check.sh
+- *(tauri)* Make bridge, allocBodyWriter, and session fns endpoint-scoped
+- *(tauri)* Only close endpoints when the last window is destroyed
+- *(client)* Classify hyper header-overflow errors as HeaderTooLarge
+- *(client)* Drain body frames after overflow so QUIC stream closes cleanly
+- *(ci)* Initialise FAILURES=() to avoid unbound variable under bash set -u
+- *(tauri)* Publish pk/relay TXT records in mobile mDNS advertise
+- *(tauri)* Publish pk/relay TXT records in mobile mDNS advertise (#88)
+- *(core)* Set 16 MiB default for max_request_body_bytes and bound response body to 256 MiB
+- *(node,deno,tauri)* Wire maxTotalConnections; add graceful shutdown hooks; harden adapters
+- *(ci)* Correct deny.toml schema and remove unresolvable Tauri deny step
+- *(deno)* Restore missing `} as const);` closing Deno.dlopen call
+- *(deno)* Migrate to IrohAdapter and IrohNode._create
+- *(ci)* Bump rustls-webpki to 0.103.13 (RUSTSEC-2026-0104); harden check.sh
 
 ### 💼 Other
 
@@ -208,6 +595,8 @@
 - CI — add Python job, Node compliance, cross-runtime gate
 - Regression test policy — template + copilot instructions
 - *(discovery)* Replace n0-future with workspace futures crate
+- Add tauri clippy step to check.sh
+- Delegate ci steps to npm scripts, remove duplication
 
 ### 🚜 Refactor
 
@@ -227,6 +616,9 @@
 - *(shared)* Replace buildNode() positional args with config object
 - *(core)* Macro-generate handle_to_*_key and enum-based InsertGuard
 - *(#42)* Group NodeOptions fields into semantic sub-structs
+- *(shared)* [**breaking**] Remove verifyNodeId, use Peer-Id for access control
+- *(shared)* Align TypeScript layer with WHATWG class model
+- Replace long-polling transport events with push-based delivery
 
 ### 📚 Documentation
 
@@ -247,6 +639,13 @@
 - *(scripts)* Update prereqs with LLVM, PATH note, and modular publish commands
 - Update roadmap with pre-open-source checklist items
 - Handle lifecycle (#41), stale connections (#53), troubleshooting and tuning guides (#55)
+- *(readmes)* Fix Windows platform support, add cross-runtime links, fix SPDX license parens; ci: add Windows to Node build matrix
+- Professionalize READMEs and update roadmap
+- *(security)* Document secret_key_bytes() sensitivity and key-persistence workflow
+- *(security)* Surface open-endpoint risk in serve() docs and quick-start examples
+- *(security)* Add peer-id check to package README Usage examples
+- Add threat model and document key revocation limitation
+- Fix maxConcurrency default from 64 to 1024 and clarify option semantics
 
 ### ⚡ Performance
 
@@ -256,6 +655,10 @@
 - *(core)* Deduplicate base32_encode call in server accept loop
 - *(core)* Eliminate per-read allocation in pump_duplex
 - *(#38)* Optimize Deno FFI hot path — binary sendChunk + dispatch macro
+
+### 🎨 Styling
+
+- Cargo fmt integration test formatting
 
 ### 🧪 Testing
 
@@ -320,3 +723,26 @@
 - *(.gitignore)* Enhance environment and secrets protection by adding additional patterns
 - *(release)* Switch to OIDC trusted publishing — no tokens needed
 - *(release)* Add CARGO_REGISTRY_TOKEN env to publish-crates job
+- Skip workflows on docs/markdown-only changes, scope bench to code paths
+- Fix Node version, napi artifacts, zig setup, crates ordering
+- Bump version to 0.1.4
+- Pre-commit hook for cargo fmt, faster audit tooling, leaner job matrix
+- Update CI workflows and add pre-push check script
+- Replace macos-13 runners with macos-latest cross-compilation
+- Bump version to 0.1.5
+- Fix two release workflow failures
+- Bump version to 0.1.6
+- Fix cargo-audit missing and deno bench hanging
+- Update lock files after bench fixes
+- Update deno.lock
+- *(node)* Regenerate napi bindings after trailer removal
+- Add fix-issues skill for systematic issue resolution workflow
+- Add single npm run ci command and unify check.sh coverage
+- Fix tag glob patterns, npm install, and add cargo-deny
+- *(release)* Add verify-release gate and remove --no-verify
+- Bump actions/checkout and actions/setup-node to v5
+- Tighten deny.toml advisory policy and add Tauri to CI matrix
+- *(check)* Add cargo deny step to check.sh
+- Bump actions/cache, upload-artifact, and download-artifact off Node 20
+- *(deny)* Suppress known iroh-internal duplicate-version warnings
+- Release v0.2.0

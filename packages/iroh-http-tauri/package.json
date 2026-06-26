@@ -1,6 +1,6 @@
 {
   "name": "@momics/iroh-http-tauri",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "description": "Tauri plugin for iroh-http peer-to-peer HTTP",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",

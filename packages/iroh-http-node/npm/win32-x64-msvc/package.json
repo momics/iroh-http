@@ -1,6 +1,6 @@
 {
   "name": "@momics/iroh-http-node-win32-x64-msvc",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "description": "iroh-http Node.js native addon — Windows x64",
   "os": ["win32"],
   "cpu": ["x64"],

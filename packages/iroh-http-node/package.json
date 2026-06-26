@@ -1,6 +1,6 @@
 {
   "name": "@momics/iroh-http-node",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "description": "Node.js native addon for iroh-http (napi-rs)",
   "main": "./lib.js",
   "types": "./lib.d.ts",
@@ -32,11 +32,11 @@
     "@momics/iroh-http-shared": "^0.5"
   },
   "optionalDependencies": {
-    "@momics/iroh-http-node-darwin-arm64": "0.5.1",
-    "@momics/iroh-http-node-darwin-x64": "0.5.1",
-    "@momics/iroh-http-node-linux-arm64-gnu": "0.5.1",
-    "@momics/iroh-http-node-linux-x64-gnu": "0.5.1",
-    "@momics/iroh-http-node-win32-x64-msvc": "0.5.1"
+    "@momics/iroh-http-node-darwin-arm64": "0.5.2",
+    "@momics/iroh-http-node-darwin-x64": "0.5.2",
+    "@momics/iroh-http-node-linux-arm64-gnu": "0.5.2",
+    "@momics/iroh-http-node-linux-x64-gnu": "0.5.2",
+    "@momics/iroh-http-node-win32-x64-msvc": "0.5.2"
   },
   "files": [
     "*.js",

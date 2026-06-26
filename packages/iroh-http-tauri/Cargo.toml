@@ -1,6 +1,6 @@
 [package]
 name = "tauri-plugin-iroh-http"
-version = "0.5.1"
+version = "0.5.2"
 edition = "2021"
 rust-version = "1.77.2"
 description = "Tauri plugin for iroh-http peer-to-peer HTTP"
@@ -20,8 +20,8 @@ default = ["discovery"]
 discovery = ["iroh-http-discovery/mdns"]
 
 [dependencies]
-iroh-http-core = { path = "../../crates/iroh-http-core", version = "0.5.1" }
-iroh-http-adapter = { path = "../../crates/iroh-http-adapter", version = "0.5.1" }
+iroh-http-core = { path = "../../crates/iroh-http-core", version = "0.5.2" }
+iroh-http-adapter = { path = "../../crates/iroh-http-adapter", version = "0.5.2" }
 slab = "0.4"
 bytes = "1"
 base64 = "0.22"
@@ -34,7 +34,7 @@ tracing = "0.1"
 # Desktop only: mDNS via Rust mdns-sd. On mobile (iOS/Android) mDNS is handled
 # by the native platform layer (NWBrowser / NsdManager) via the mobile bridge.
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
-iroh-http-discovery = { path = "../../crates/iroh-http-discovery", version = "0.5.1", optional = true }
+iroh-http-discovery = { path = "../../crates/iroh-http-discovery", version = "0.5.2", optional = true }
 
 [dev-dependencies]
 tauri = { version = "2", features = ["test"] }

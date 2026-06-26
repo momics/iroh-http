@@ -2,9 +2,11 @@
   "version": "5",
   "specifiers": {
     "jsr:@std/bytes@^1.0.5": "1.0.6",
+    "jsr:@std/fs@1": "1.0.22",
     "jsr:@std/internal@^1.0.12": "1.0.13",
     "jsr:@std/msgpack@1": "1.0.3",
     "jsr:@std/path@1": "1.1.4",
+    "jsr:@std/path@^1.1.4": "1.1.4",
     "npm:@napi-rs/cli@^3.7.2": "3.7.2_@emnapi+runtime@1.11.1_@emnapi+core@1.11.1_@types+node@25.6.0",
     "npm:@tauri-apps/api@^2.11.1": "2.11.1",
     "npm:@types/node@^25.6.0": "25.6.0",
@@ -16,6 +18,13 @@
   "jsr": {
     "@std/bytes@1.0.6": {
       "integrity": "f6ac6adbd8ccd99314045f5703e23af0a68d7f7e58364b47d2c7f408aeb5820a"
+    },
+    "@std/fs@1.0.22": {
+      "integrity": "de0f277a58a867147a8a01bc1b181d0dfa80bfddba8c9cf2bacd6747bcec9308",
+      "dependencies": [
+        "jsr:@std/internal",
+        "jsr:@std/path@^1.1.4"
+      ]
     },
     "@std/internal@1.0.13": {
       "integrity": "2f9546691d4ac2d32859c82dff284aaeac980ddeca38430d07941e7e288725c0"

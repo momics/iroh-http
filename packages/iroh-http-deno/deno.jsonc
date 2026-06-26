@@ -1,6 +1,6 @@
 {
   "name": "@momics/iroh-http-deno",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "exports": "./mod.ts",
   "license": "MIT",
   "tasks": {

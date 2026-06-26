@@ -1,6 +1,6 @@
 {
   "name": "@momics/iroh-http-node-darwin-x64",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "description": "iroh-http Node.js native addon — macOS x64",
   "os": ["darwin"],
   "cpu": ["x64"],
