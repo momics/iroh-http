@@ -158,7 +158,10 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           if git ls-remote --exit-code --heads origin bench-results >/dev/null 2>&1; then
             git fetch --depth 1 origin bench-results
-            git checkout bench-results
+            # `git fetch` only updates FETCH_HEAD; the shallow clone of the
+            # default branch has no local `bench-results` ref to check out.
+            # Create/reset the branch from the fetched commit explicitly.
+            git checkout -B bench-results FETCH_HEAD
           else
             git checkout --orphan bench-results
             git rm -rf . >/dev/null 2>&1 || true
