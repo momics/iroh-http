@@ -11,9 +11,38 @@
  * Run:  deno test -A test/adapter.test.ts
  */
 
-import { assert, assertEquals, assertInstanceOf } from "jsr:@std/assert@^1";
+import {
+  assert,
+  assertEquals,
+  assertInstanceOf,
+  assertThrows,
+} from "jsr:@std/assert@^1";
 import { createNode } from "../mod.ts";
 import { generateSecretKey, publicKeyVerify, secretKeySign } from "../mod.ts";
+import { bigintToSafeNumber } from "../src/adapter.ts";
+
+// ── bigintToSafeNumber handle guard (regression #252) ────────────────────────
+
+Deno.test("bigintToSafeNumber — passes through in-range handles", () => {
+  assertEquals(bigintToSafeNumber(0n), 0);
+  assertEquals(bigintToSafeNumber(42n), 42);
+  assertEquals(
+    bigintToSafeNumber(BigInt(Number.MAX_SAFE_INTEGER)),
+    Number.MAX_SAFE_INTEGER,
+  );
+});
+
+Deno.test("bigintToSafeNumber — rejects out-of-range u64 handles instead of truncating", () => {
+  // A slotmap u64 key whose generation bits push it past 2^53 must throw,
+  // not silently round to a different (wrong) resource identity.
+  const unsafe = BigInt(Number.MAX_SAFE_INTEGER) + 1n;
+  assertThrows(
+    () => bigintToSafeNumber(unsafe, "reqBodyHandle"),
+    RangeError,
+    "reqBodyHandle",
+  );
+  assertThrows(() => bigintToSafeNumber(-1n), RangeError);
+});
 
 // ── generateSecretKey (FFI-only) ─────────────────────────────────────────────
 

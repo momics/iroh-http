@@ -289,25 +289,29 @@ const METHOD_BUFS: Record<string, Uint8Array> = Object.fromEntries(
   ].map((m) => [m, enc.encode(m)]),
 );
 
+// ISS-032 / #252: bigint handles are slotmap u64 keys (32-bit slot + 32-bit
+// version); practical values are well within Number.MAX_SAFE_INTEGER. Convert
+// to a JS number only after asserting the safe range, throwing early rather
+// than silently corrupting resource identity. Shared by the generic `call()`
+// path and the `rawFetch` fast-path so both fail loudly and identically.
+export function bigintToSafeNumber(value: bigint, field = "handle"): number {
+  if (value < 0n || value > BigInt(Number.MAX_SAFE_INTEGER)) {
+    throw new RangeError(
+      `[iroh-http] ${field} value ${value} exceeds safe integer range and cannot be safely serialised`,
+    );
+  }
+  return Number(value);
+}
+
 /** Reusable buffer hint for estimating output size of `call()` responses. */ async function call<
   T,
 >(method: string, payload: unknown): Promise<T> {
   const methodBuf = METHOD_BUFS[method] ?? enc.encode(method);
-  // ISS-032: bigint handles are slotmap u64 keys (32-bit slot + 32-bit version);
-  // practical values are well within Number.MAX_SAFE_INTEGER. Throw early if a
-  // handle ever exceeds the safe range rather than silently corrupting identity.
   const payloadBuf = enc.encode(
-    JSON.stringify(payload, (_k, v) => {
-      if (typeof v === "bigint") {
-        if (v > BigInt(Number.MAX_SAFE_INTEGER)) {
-          throw new RangeError(
-            `[iroh-http] handle value ${v} exceeds safe integer range and cannot be safely serialised`,
-          );
-        }
-        return Number(v);
-      }
-      return v;
-    }),
+    JSON.stringify(
+      payload,
+      (_k, v) => typeof v === "bigint" ? bigintToSafeNumber(v) : v,
+    ),
   );
   // Deno's FFI types require Uint8Array<ArrayBuffer>; TextEncoder returns
   // Uint8Array<ArrayBufferLike>. The backing store is always a plain ArrayBuffer
@@ -530,14 +534,18 @@ export const rawFetch: RawFetchFn = async (
       url,
       method,
       headers,
-      reqBodyHandle: reqBodyHandle != null ? Number(reqBodyHandle) : null,
-      fetchToken: fetchToken !== 0n ? Number(fetchToken) : null,
+      reqBodyHandle: reqBodyHandle != null
+        ? bigintToSafeNumber(reqBodyHandle, "reqBodyHandle")
+        : null,
+      fetchToken: fetchToken !== 0n
+        ? bigintToSafeNumber(fetchToken, "fetchToken")
+        : null,
       directAddrs: directAddrs ?? null,
       timeout_ms: fetchOptions?.timeoutMs ?? null,
       decompress: fetchOptions?.decompress ?? null,
       max_response_body_bytes: fetchOptions?.maxResponseBodyBytes ?? null,
     },
-    (_k, v) => (typeof v === "bigint" ? Number(v) : v),
+    (_k, v) => (typeof v === "bigint" ? bigintToSafeNumber(v) : v),
   );
   const payloadBuf = enc.encode(payloadStr) as Uint8Array<ArrayBuffer>;
 
