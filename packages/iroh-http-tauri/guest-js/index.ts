@@ -41,6 +41,21 @@ interface TauriRequestPayload {
   remoteNodeId: string;
 }
 
+/**
+ * Convert an opaque u64 resource handle (slotmap key: 32-bit slot + 32-bit
+ * generation) to a JS number for IPC, rejecting values outside the safe
+ * integer range rather than silently rounding and addressing the wrong
+ * resource. Mirrors the Deno adapter's `bigintToSafeNumber` guard (#252).
+ */
+function u64Handle(value: bigint, field = "handle"): number {
+  if (value < 0n || value > BigInt(Number.MAX_SAFE_INTEGER)) {
+    throw new RangeError(
+      `[iroh-http-tauri] ${field} value ${value} exceeds safe integer range and cannot be safely serialised`,
+    );
+  }
+  return Number(value);
+}
+
 // ── TauriAdapter ──────────────────────────────────────────────────────────────
 
 class TauriAdapter extends IrohAdapter {
@@ -56,9 +71,10 @@ class TauriAdapter extends IrohAdapter {
   nextChunk(handle: bigint): Promise<Uint8Array | null> {
     // Sync fast path: if data is already buffered, skip async IPC overhead.
     // Protocol: first byte is 0x01 (data follows) or 0x00 (EOF).
+    const safeHandle = u64Handle(handle);
     return invoke<ArrayBuffer>(`${PLUGIN}|try_next_chunk`, {
       endpointHandle: this.#epHandle,
-      handle: Number(handle),
+      handle: safeHandle,
     }).then(
       (buf) => {
         const v = new Uint8Array(buf);
@@ -68,7 +84,7 @@ class TauriAdapter extends IrohAdapter {
       () =>
         invoke<ArrayBuffer>(`${PLUGIN}|next_chunk`, {
           endpointHandle: this.#epHandle,
-          handle: Number(handle),
+          handle: safeHandle,
         }).then((buf) => {
           const v = new Uint8Array(buf);
           return v.length > 0 && v[0] !== 0 ? v.subarray(1) : null;
@@ -80,7 +96,7 @@ class TauriAdapter extends IrohAdapter {
     return invoke(`${PLUGIN}|send_chunk`, chunk, {
       headers: {
         "iroh-ep": String(this.#epHandle),
-        "iroh-handle": String(Number(handle)),
+        "iroh-handle": String(u64Handle(handle)),
       },
     });
   }
@@ -88,14 +104,14 @@ class TauriAdapter extends IrohAdapter {
   finishBody(handle: bigint): Promise<void> {
     return invoke(`${PLUGIN}|finish_body`, {
       endpointHandle: this.#epHandle,
-      handle: Number(handle),
+      handle: u64Handle(handle),
     });
   }
 
   cancelRequest(handle: bigint): Promise<void> {
     return invoke(`${PLUGIN}|cancel_request`, {
       endpointHandle: this.#epHandle,
-      handle: Number(handle),
+      handle: u64Handle(handle),
     });
   }
 
@@ -107,7 +123,7 @@ class TauriAdapter extends IrohAdapter {
   cancelFetch(token: bigint): void {
     void invoke(`${PLUGIN}|cancel_in_flight`, {
       endpointHandle: this.#epHandle,
-      token: Number(token),
+      token: u64Handle(token, "token"),
     });
   }
 
@@ -140,8 +156,12 @@ class TauriAdapter extends IrohAdapter {
         url,
         method,
         headers,
-        reqBodyHandle: reqBodyHandle != null ? Number(reqBodyHandle) : null,
-        fetchToken: fetchToken != null ? Number(fetchToken) : null,
+        reqBodyHandle: reqBodyHandle != null
+          ? u64Handle(reqBodyHandle, "reqBodyHandle")
+          : null,
+        fetchToken: fetchToken != null
+          ? u64Handle(fetchToken, "fetchToken")
+          : null,
         directAddrs: directAddrs ?? null,
         timeoutMs: fetchOptions?.timeoutMs ?? null,
         decompress: fetchOptions?.decompress ?? null,
@@ -191,7 +211,7 @@ class TauriAdapter extends IrohAdapter {
         await invoke(`${PLUGIN}|respond_to_request`, {
           args: {
             endpointHandle: Number(endpointHandle),
-            reqHandle: Number(payload.reqHandle),
+            reqHandle: u64Handle(payload.reqHandle, "reqHandle"),
             status: head.status,
             headers: head.headers,
           },
@@ -201,7 +221,7 @@ class TauriAdapter extends IrohAdapter {
         await invoke(`${PLUGIN}|respond_to_request`, {
           args: {
             endpointHandle: Number(endpointHandle),
-            reqHandle: Number(raw.reqHandle),
+            reqHandle: u64Handle(BigInt(raw.reqHandle), "reqHandle"),
             status: 500,
             headers: [],
           },
