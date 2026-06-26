@@ -48,8 +48,17 @@ const te = new TextEncoder();
 const td = new TextDecoder();
 
 // ── Key persistence ────────────────────────────────────────────────────────────
+//
+// DEMO ONLY — INSECURE AT REST. localStorage is plaintext, readable by any code
+// running in the webview and by anyone with disk access. A real app MUST store
+// the node secret key in OS-backed secure storage (e.g. tauri-plugin-stronghold
+// or the OS keychain). See SECURITY.md for the key-at-rest guidance.
 
 const KEY_STORAGE = "iroh-http-demo-key-v1";
+
+// Access-control allowlist for the demo server. Add authenticated peer node IDs
+// here to restrict who may be served; empty = serve anyone (demo only).
+const ALLOWED_PEERS = new Set<string>();
 
 function loadSavedKey(): Uint8Array | undefined {
   const stored = localStorage.getItem(KEY_STORAGE);
@@ -136,7 +145,7 @@ document.querySelector<HTMLButtonElement>("#save-key-btn")!.addEventListener(
   "click",
   () => {
     persistKey(node.secretKey.toBytes());
-    setStatus(keyStatusEl, "Key saved to localStorage ✓", "ok");
+    setStatus(keyStatusEl, "Key saved to localStorage (insecure — demo only) ⚠", "ok");
   },
 );
 
@@ -182,6 +191,15 @@ serveBtn.addEventListener("click", () => {
 
   serveAbort = new AbortController();
   node.serve({ signal: serveAbort.signal }, async (req) => {
+    // Access control: only peers in ALLOWED_PEERS may be served. The `peer-id`
+    // header is the authenticated QUIC identity set by the library, not
+    // client-controlled. Empty by default = serves anyone (demo only — never
+    // ship a real app open like this).
+    const peerId = req.headers.get("peer-id") ?? "";
+    if (ALLOWED_PEERS.size > 0 && !ALLOWED_PEERS.has(peerId)) {
+      appendLog(serverLog, `Rejected non-allowlisted peer ${peerId.slice(0, 20)}…`);
+      return new Response("Forbidden", { status: 403 });
+    }
     // WebTransport bidi stream (from session.createBidirectionalStream on remote peer).
     const wt = (req as unknown as {
       acceptWebTransport?: () => {
