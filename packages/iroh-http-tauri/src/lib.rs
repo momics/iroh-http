@@ -165,6 +165,13 @@ mod scheme {
     use tauri::http::{Response, StatusCode};
     use tauri::{Manager, Runtime};
 
+    /// Upper bound on a `httpi://` response buffered for the webview. The scheme
+    /// handler accumulates the whole body into a `Vec<u8>` before handing it to
+    /// the webview, so without a cap a large or hostile peer response could
+    /// exhaust app memory. Far below the core 256 MiB default since this path is
+    /// for in-page assets (images / audio / video / documents).
+    const MAX_SCHEME_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
+
     /// Handle a single `httpi://` request from the webview engine.
     ///
     /// Resolves the active endpoint from [`crate::state::SchemeState`], parses
@@ -261,7 +268,7 @@ mod scheme {
             None,  // no extra direct addrs
             None,  // use endpoint default timeout
             true,  // decompress
-            None,  // no response body size cap
+            Some(MAX_SCHEME_RESPONSE_BYTES),  // bound buffered response size
         )
         .await
         .map_err(|e| e.to_string())?;
@@ -271,7 +278,19 @@ mod scheme {
         if res.body_handle != 0 {
             loop {
                 match ep.handles().next_chunk(res.body_handle).await {
-                    Ok(Some(chunk)) => body_bytes.extend_from_slice(&chunk),
+                    Ok(Some(chunk)) => {
+                        // Defence in depth: the core cap above already bounds the
+                        // response, but never let the buffer grow past the limit.
+                        if body_bytes.len().saturating_add(chunk.len())
+                            > MAX_SCHEME_RESPONSE_BYTES
+                        {
+                            ep.handles().cancel_reader(res.body_handle);
+                            return Err(format!(
+                                "httpi:// response exceeds {MAX_SCHEME_RESPONSE_BYTES} byte cap"
+                            ));
+                        }
+                        body_bytes.extend_from_slice(&chunk);
+                    }
                     Ok(None) => break, // EOF — handle cleaned up automatically
                     Err(e) => {
                         // Cancel the reader to release the slot immediately
