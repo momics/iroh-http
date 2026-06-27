@@ -345,3 +345,141 @@ where
 {
     ffi_serve_with_callback(endpoint, options, on_request, None)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ffi::handles::{HandleStore, StoreConfig};
+    use crate::{NetworkingOptions, NodeOptions};
+    use http::HeaderValue;
+    use std::sync::Mutex;
+
+    // ── respond(): validation + head delivery ────────────────────────────
+
+    #[tokio::test]
+    async fn respond_rejects_invalid_status() {
+        let store = HandleStore::new(StoreConfig::default());
+        // 9999 is outside the valid 100..=999 status range.
+        let err = respond(&store, 0, 9999, vec![]).unwrap_err();
+        assert_eq!(err.code, crate::ErrorCode::InvalidInput);
+    }
+
+    #[tokio::test]
+    async fn respond_rejects_invalid_header_name() {
+        let store = HandleStore::new(StoreConfig::default());
+        let err = respond(&store, 0, 200, vec![("bad name".into(), "v".into())]).unwrap_err();
+        assert_eq!(err.code, crate::ErrorCode::InvalidInput);
+    }
+
+    #[tokio::test]
+    async fn respond_rejects_invalid_header_value() {
+        let store = HandleStore::new(StoreConfig::default());
+        // A newline in a header value is rejected (header injection guard).
+        let err = respond(&store, 0, 200, vec![("x".into(), "bad\nvalue".into())]).unwrap_err();
+        assert_eq!(err.code, crate::ErrorCode::InvalidInput);
+    }
+
+    #[tokio::test]
+    async fn respond_unknown_handle_errors() {
+        let store = HandleStore::new(StoreConfig::default());
+        // Status and headers are valid, but no such request handle exists.
+        let err = respond(&store, 4242, 200, vec![("x".into(), "y".into())]).unwrap_err();
+        assert_eq!(err.code, crate::ErrorCode::InvalidInput);
+        assert!(err.message.contains("4242"));
+    }
+
+    #[tokio::test]
+    async fn respond_delivers_head_to_receiver() {
+        let store = HandleStore::new(StoreConfig::default());
+        let (tx, rx) = tokio::sync::oneshot::channel::<ResponseHeadEntry>();
+        let handle = store.allocate_req_handle(tx).unwrap();
+
+        respond(&store, handle, 201, vec![("x-test".into(), "yes".into())]).unwrap();
+
+        let head = rx.await.unwrap();
+        assert_eq!(head.status, 201);
+        assert_eq!(
+            head.headers,
+            vec![("x-test".to_string(), "yes".to_string())]
+        );
+        // The sender is consumed: a second respond on the same handle fails.
+        let err = respond(&store, handle, 200, vec![]).unwrap_err();
+        assert_eq!(err.code, crate::ErrorCode::InvalidInput);
+    }
+
+    // ── dispatch(): malformed-request rejection (ISS-011 / ISS-003) ───────
+
+    async fn local_endpoint() -> IrohEndpoint {
+        IrohEndpoint::bind(NodeOptions {
+            networking: NetworkingOptions {
+                disabled: true,
+                bind_addrs: vec!["127.0.0.1:0".into()],
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .await
+        .unwrap()
+    }
+
+    fn make_dispatcher(
+        endpoint: IrohEndpoint,
+        max_header_size: Option<usize>,
+        sink: Arc<Mutex<Vec<RequestPayload>>>,
+    ) -> Arc<FfiDispatcher> {
+        let own_node_id = Arc::new(endpoint.node_id().to_string());
+        Arc::new(FfiDispatcher {
+            on_request: Arc::new(move |p| sink.lock().unwrap().push(p)),
+            endpoint,
+            own_node_id,
+            max_header_size,
+        })
+    }
+
+    /// ISS-011: a non-UTF8 header value must be rejected with 400, not
+    /// silently coerced, and the JS callback must never fire.
+    #[tokio::test]
+    async fn dispatch_rejects_non_utf8_header_value() {
+        let endpoint = local_endpoint().await;
+        let sink = Arc::new(Mutex::new(Vec::new()));
+        let dispatcher = make_dispatcher(endpoint, None, sink.clone());
+
+        let mut req = hyper::Request::builder()
+            .method("GET")
+            .uri("/")
+            .body(Body::empty())
+            .unwrap();
+        req.headers_mut()
+            .insert("x-bad", HeaderValue::from_bytes(&[0xff, 0xfe]).unwrap());
+
+        let resp = dispatcher.dispatch(req, Arc::new(String::new())).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert!(
+            sink.lock().unwrap().is_empty(),
+            "callback must not fire on a rejected request",
+        );
+    }
+
+    /// ISS-003: request headers exceeding `max_header_size` are rejected with
+    /// 431 before any handle is allocated or the callback fires.
+    #[tokio::test]
+    async fn dispatch_rejects_oversized_headers() {
+        let endpoint = local_endpoint().await;
+        let sink = Arc::new(Mutex::new(Vec::new()));
+        let dispatcher = make_dispatcher(endpoint, Some(50), sink.clone());
+
+        let req = hyper::Request::builder()
+            .method("GET")
+            .uri("/")
+            .header("x-big", "a".repeat(200))
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = dispatcher.dispatch(req, Arc::new(String::new())).await;
+        assert_eq!(resp.status(), StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE);
+        assert!(
+            sink.lock().unwrap().is_empty(),
+            "callback must not fire on a rejected request",
+        );
+    }
+}
