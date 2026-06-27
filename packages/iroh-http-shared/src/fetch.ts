@@ -156,7 +156,12 @@ export function makeFetch(
     // NOW start the body pipe — rawFetch has been dispatched to Rust, so the
     // body reader will have a consumer by the time the channel fills up.
     if (bodyStream && reqBodyHandle !== null) {
-      bodyPipePromise = pipeToWriter(adapter, bodyStream, reqBodyHandle);
+      // skipFinishOnError: on a mid-stream failure, do NOT call finishBody — a
+      // clean finish would present a truncated body to the peer as complete.
+      // The catch below resets the request stream via cancelFetch instead.
+      bodyPipePromise = pipeToWriter(adapter, bodyStream, reqBodyHandle, {
+        skipFinishOnError: true,
+      });
       // If the body source fails mid-stream, reset the request stream instead
       // of letting it finish cleanly. A clean finish would present a truncated
       // body to the peer as complete; resetting via cancelFetch makes the peer
