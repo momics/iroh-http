@@ -9,13 +9,14 @@
 //!   seam (ADR-014 D2 / #175),
 //! * the per-bistream `tracing` site for hyper connection errors.
 
-use hyper_util::rt::TokioIo;
+use hyper_util::rt::{TokioIo, TokioTimer};
 use hyper_util::service::TowerToHyperService;
 use tower::ServiceBuilder;
 
 pub(crate) use super::stack::ServeService;
 use crate::http::transport::io::IrohStream;
 use crate::Body;
+use std::time::Duration;
 
 /// Drive a single hyper HTTP/1.1 connection over `io` with a pre-built
 /// tower stack.
@@ -33,15 +34,26 @@ use crate::Body;
 /// `effective_header_limit` configures the hyper `http1::Builder`'s
 /// `max_buf_size`; it is **not** part of [`super::stack::StackConfig`]
 /// because it is a hyper framing knob, not a tower layer.
+///
+/// `header_read_timeout` bounds how long hyper will wait for a complete
+/// request head on a freshly-accepted bistream. The tower `Timeout` layer
+/// only starts once hyper has parsed a request and called the service, so
+/// without this a peer can open a bistream and trickle (or withhold) header
+/// bytes indefinitely (slowloris). `None` leaves the head read unbounded.
 pub(crate) async fn serve_bistream(
     io: TokioIo<IrohStream>,
     stack: ServeService,
     effective_header_limit: usize,
+    header_read_timeout: Option<Duration>,
 ) {
     let mut builder = hyper::server::conn::http1::Builder::new();
     builder
+        .timer(TokioTimer::new())
         .max_buf_size(effective_header_limit)
         .max_headers(128);
+    if let Some(timeout) = header_read_timeout {
+        builder.header_read_timeout(timeout);
+    }
 
     // ADR-014 D2 / #175 — body normalisation at the hyper seam.
     //

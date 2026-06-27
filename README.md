@@ -61,6 +61,8 @@ Override any of these via `ServeOptions` and `NodeOptions`. See [docs/tuning.md]
 
 iroh-http provides transport and reliability. It does not include routing, authentication schemes, session management, or application-level middleware. Use whatever you'd use with `fetch`-based servers: Hono, itty-router, or plain `if` statements.
 
+The library deliberately avoids imposing policy you should own. The one place it ships a default *limit* is the Tauri `httpi://` scheme handler: because Tauri's custom-protocol responder takes a complete body (not a stream), the handler must buffer each response in memory before handing it to the webview, so it caps a single buffered response at **64 MiB** by default to prevent a hostile peer from exhausting app memory. This is per-response, not per-file — media streams via small `Range` requests regardless of total size — and is overridable with `.max_response_bytes(...)` on the plugin builder. See [iroh-http-tauri](packages/iroh-http-tauri/README.md#response-size-limit).
+
 ## Beyond HTTP
 
 ### QUIC sessions

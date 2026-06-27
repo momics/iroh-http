@@ -28,28 +28,71 @@ on:
 
 permissions:
   contents: read
+  actions: read    # resolve the head SHA of the Build run + poll extended-tests
   id-token: write   # npm --provenance (Trusted Publishers) + JSR OIDC
 
 jobs:
 
+  # ── 0a. Resolve ref ───────────────────────────────────────────────────────────
+  # Determine the EXACT commit whose artifacts we are about to publish, so the
+  # source we check out matches the native binaries built from that run. On a
+  # manual dispatch `github.sha` is the workflow's own ref (e.g. main@HEAD), NOT
+  # the commit behind `run_id` — publishing those together would ship source and
+  # binaries from different commits. Resolve the Build run's head SHA via the API
+  # and fail closed if that run did not succeed.
+
+  resolve-ref:
+    name: Resolve publish ref
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    outputs:
+      sha: ${{ steps.resolve.outputs.sha }}
+    steps:
+      - name: Resolve exact commit SHA to publish
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            RUN_ID="${{ inputs.run_id }}"
+            echo "Resolving head SHA for Build run $RUN_ID"
+            RUN_JSON=$(gh api "repos/${{ github.repository }}/actions/runs/$RUN_ID")
+            SHA=$(echo "$RUN_JSON" | jq -r '.head_sha')
+            CONCLUSION=$(echo "$RUN_JSON" | jq -r '.conclusion')
+            if [ "$CONCLUSION" != "success" ]; then
+              echo "::error::Build run $RUN_ID did not succeed (conclusion=$CONCLUSION) — refusing to publish"
+              exit 1
+            fi
+          else
+            SHA="${{ github.event.workflow_run.head_sha }}"
+          fi
+          if [ -z "$SHA" ] || [ "$SHA" = "null" ]; then
+            echo "::error::Could not resolve a commit SHA to publish"
+            exit 1
+          fi
+          echo "Publishing from commit $SHA"
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+
   # ── 0. Verify ─────────────────────────────────────────────────────────────────
-  # Skip automatically if triggered by a failed Release run.
+  # Skip automatically if triggered by a failed Release run. The extended-tests
+  # gate runs for the resolved SHA in both trigger modes — a manual re-publish
+  # must still prove the published commit passed extended tests.
 
   verify:
     name: Verify before publish
     runs-on: ubuntu-latest
-    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    needs: resolve-ref
     steps:
       - uses: actions/checkout@v6
         with:
-          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          ref: ${{ needs.resolve-ref.outputs.sha }}
 
       - name: Verify extended tests passed
-        if: github.event_name != 'workflow_dispatch'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          SHA="${{ github.event.workflow_run.head_sha }}"
+          SHA="${{ needs.resolve-ref.outputs.sha }}"
           echo "Checking Extended tests status for $SHA"
           # Poll for up to 30 minutes (extended tests can take a while)
           for i in $(seq 1 60); do
@@ -94,12 +137,12 @@ jobs:
   publish-crates:
     name: Publish Rust crates
     runs-on: ubuntu-latest
-    needs: verify
+    needs: [resolve-ref, verify]
     if: inputs.target == null || inputs.target == 'all' || inputs.target == 'crates'
     steps:
       - uses: actions/checkout@v6
         with:
-          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          ref: ${{ needs.resolve-ref.outputs.sha }}
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -164,12 +207,12 @@ jobs:
   publish-npm:
     name: Publish npm packages
     runs-on: ubuntu-latest
-    needs: verify
+    needs: [resolve-ref, verify]
     if: inputs.target == null || inputs.target == 'all' || inputs.target == 'npm'
     steps:
       - uses: actions/checkout@v6
         with:
-          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          ref: ${{ needs.resolve-ref.outputs.sha }}
 
       # NOTE: deliberately no `registry-url` here. setup-node's registry-url
       # writes an .npmrc with an empty `_authToken=${NODE_AUTH_TOKEN}`, which
@@ -250,12 +293,12 @@ jobs:
   publish-jsr:
     name: Publish JSR packages
     runs-on: ubuntu-latest
-    needs: verify
+    needs: [resolve-ref, verify]
     if: inputs.target == null || inputs.target == 'all' || inputs.target == 'jsr'
     steps:
       - uses: actions/checkout@v6
         with:
-          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          ref: ${{ needs.resolve-ref.outputs.sha }}
 
       - uses: denoland/setup-deno@v2
         with:
@@ -272,10 +315,29 @@ jobs:
             exit 1
           fi
 
+      # Populate src/checksums.ts from the exact native binaries built by this
+      # run, so published consumers verify the downloaded library's SHA-256
+      # before Deno.dlopen(). Without this the integrity map ships empty and
+      # downloads are refused (fail-closed) at runtime.
+      - name: Download Deno native artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: deno-native-*
+          path: packages/iroh-http-deno/lib/
+          merge-multiple: true
+          run-id: ${{ github.event.workflow_run.id || inputs.run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate native checksums
+        working-directory: packages/iroh-http-deno
+        run: deno run --allow-read --allow-write=src/checksums.ts scripts/gen-checksums.mts lib
+
       - name: Publish iroh-http-deno to JSR
         working-directory: packages/iroh-http-deno
         run: |
-          output=$(deno publish 2>&1) && exit 0
+          # --allow-dirty: src/checksums.ts was just regenerated from the
+          # release artifacts and is intentionally not committed.
+          output=$(deno publish --allow-dirty 2>&1) && exit 0
           if echo "$output" | grep -qi 'already exists\|already published'; then
             echo "Already published, skipping"
           else

@@ -19,6 +19,20 @@ import { createNode } from "@momics/iroh-http-deno";
 /** Default mDNS service name shared by `advertise` and `browse`. */
 const DEFAULT_SERVICE = "iroh-http-example";
 
+/** Read an env var without throwing when `--allow-env` was not granted. */
+function envVar(name: string): string | undefined {
+  try {
+    return Deno.env.get(name);
+  } catch {
+    return undefined;
+  }
+}
+
+/** Parse a comma-separated list of allowed peer IDs into a set. */
+function parseAllowlist(raw: string | undefined): Set<string> {
+  return new Set((raw ?? "").split(",").map((s) => s.trim()).filter(Boolean));
+}
+
 const [mode, arg] = Deno.args;
 
 const node = await createNode();
@@ -26,7 +40,23 @@ console.log("Node ID:", node.publicKey.toString());
 
 switch (mode) {
   case "server": {
+    // Only peers in IROH_HTTP_ALLOWED_PEERS (comma-separated node IDs) may be
+    // served. The `peer-id` header is the authenticated QUIC identity set by
+    // the library. With no allowlist this demo serves anyone — never do that in
+    // a real app.
+    const allowed = parseAllowlist(envVar("IROH_HTTP_ALLOWED_PEERS"));
+    if (allowed.size === 0) {
+      console.warn(
+        "[example] IROH_HTTP_ALLOWED_PEERS not set — serving ANY peer. " +
+          "Set it to a comma-separated list of node IDs to restrict access.",
+      );
+    }
     node.serve({}, (req) => {
+      const peer = req.headers.get("peer-id") ?? "";
+      if (allowed.size > 0 && !allowed.has(peer)) {
+        console.warn("Rejected request from non-allowlisted peer:", peer);
+        return new Response("Forbidden", { status: 403 });
+      }
       const path = new URL(req.url).pathname;
       console.log("Incoming:", req.method, path);
       return new Response(`Hello from Deno iroh-http! Path: ${path}`);

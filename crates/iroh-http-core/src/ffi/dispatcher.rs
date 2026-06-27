@@ -160,9 +160,12 @@ impl FfiDispatcher {
             .unwrap_or("/")
             .to_string();
 
+        // Log the path only, never the query string: query parameters commonly
+        // carry tokens or sensitive identifiers that must not leak into logs.
+        let path_only = req.uri().path();
         tracing::debug!(
             method = %method,
-            path = %path_and_query,
+            path = %path_only,
             peer = %remote_node_id,
             "iroh-http: incoming request",
         );

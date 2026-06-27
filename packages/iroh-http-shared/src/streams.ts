@@ -40,11 +40,33 @@ export function makeReadable(
   });
 }
 
+/** Options for {@link pipeToWriter}. */
+export interface PipeToWriterOptions {
+  /**
+   * When `true`, skip `finishBody` if the source stream fails mid-body so the
+   * caller can RESET the underlying stream (used for request uploads). When
+   * `false` (default), `finishBody` is still called on error \u2014 appropriate for
+   * call sites without a reset mechanism (e.g. response bodies). See
+   * {@link pipeToWriter} for the full rationale.
+   */
+  skipFinishOnError?: boolean;
+}
+
 /**
  * Drain a `ReadableStream<Uint8Array>` into a `BodyWriter` handle.
  *
- * Calls `sendChunk` for each chunk, then `finishBody` when the stream ends.
- * Errors from either side are propagated to the returned `Promise`.
+ * Calls `sendChunk` for each chunk, then `finishBody` on a clean EOF. The error
+ * propagates to the returned `Promise` regardless of how the body terminated.
+ *
+ * Mid-stream failure handling depends on {@link PipeToWriterOptions.skipFinishOnError}:
+ * - **default (`false`)** — `finishBody` is still called on error. Use this for
+ *   call sites with **no** reset mechanism (e.g. response bodies in `serve`),
+ *   where leaving the writer unfinished would stall the peer waiting for EOF and
+ *   leak the handle in the registry until the TTL sweep.
+ * - **`true`** — `finishBody` is skipped on error so the caller can RESET the
+ *   underlying stream instead. Use this for **request** uploads, where a clean
+ *   finish would present a truncated (e.g. signed) body to the peer as complete;
+ *   the caller (`fetch`) resets via `cancelFetch` when this promise rejects.
  *
  * Large chunks are split into 64 KB pieces to keep each sync FFI call short.
  * This prevents blocking the JS thread when a ReadableStream enqueues an
@@ -55,17 +77,21 @@ export function makeReadable(
  * @param adapter  Platform adapter implementation.
  * @param stream   The `ReadableStream` to consume.
  * @param handle   Slab handle for the `BodyWriter` to write to.
+ * @param options  See {@link PipeToWriterOptions}.
  * @returns Resolves when the entire stream has been piped and finished.
  */
 export async function pipeToWriter(
   adapter: IrohAdapter,
   stream: ReadableStream<Uint8Array>,
   handle: bigint,
+  options?: PipeToWriterOptions,
 ): Promise<void> {
+  const skipFinishOnError = options?.skipFinishOnError ?? false;
   // Match the Rust-side max chunk size so each sendChunk is a single
   // channel push (O(1) when the channel has capacity).
   const MAX_CHUNK = 64 * 1024;
   const reader = stream.getReader();
+  let completed = false;
   try {
     while (true) {
       const { value, done } = await reader.read();
@@ -84,9 +110,26 @@ export async function pipeToWriter(
         }
       }
     }
+    completed = true;
   } finally {
     reader.releaseLock();
-    await adapter.finishBody(handle);
+    if (completed) {
+      // Clean end-of-body: the source drained without error.
+      await adapter.finishBody(handle);
+    } else if (!skipFinishOnError) {
+      // Errored, but this call site has no reset mechanism (e.g. response
+      // bodies). Best-effort finish so the peer isn't left waiting for EOF and
+      // the handle doesn't leak until the TTL sweep. Swallow any finishBody
+      // error so it can't mask the original failure that `finally` re-throws.
+      try {
+        await adapter.finishBody(handle);
+      } catch {
+        // ignore — the original error propagates
+      }
+    }
+    // When skipFinishOnError is set we deliberately leave the writer unfinished
+    // so the caller can RESET the stream; the peer then observes an aborted
+    // request instead of a truncated body presented as complete.
   }
 }
 

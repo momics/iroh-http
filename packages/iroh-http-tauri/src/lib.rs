@@ -35,15 +35,31 @@ pub fn builder<R: Runtime>() -> PluginBuilder<R> {
     PluginBuilder::new()
 }
 
+/// Default cap on a single `httpi://` response buffered for the webview.
+///
+/// The scheme handler must accumulate a whole response into memory before
+/// handing it to the webview — Tauri's custom-protocol responder takes a
+/// complete body, not a stream — so a large or hostile peer response could
+/// otherwise exhaust app memory. 64 MiB sits well below the core 256 MiB
+/// default because this path serves in-page assets (images / audio / video /
+/// documents) that the webview pulls in small `Range` slices. Override with
+/// [`PluginBuilder::max_response_bytes`].
+pub const DEFAULT_SCHEME_MAX_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
+
 /// Fluent builder for the iroh-http Tauri plugin.
 pub struct PluginBuilder<R: Runtime> {
     scheme: bool,
+    scheme_max_response_bytes: usize,
     _runtime: std::marker::PhantomData<R>,
 }
 
 impl<R: Runtime> PluginBuilder<R> {
     fn new() -> Self {
-        Self { scheme: false, _runtime: std::marker::PhantomData }
+        Self {
+            scheme: false,
+            scheme_max_response_bytes: DEFAULT_SCHEME_MAX_RESPONSE_BYTES,
+            _runtime: std::marker::PhantomData,
+        }
     }
 
     /// Register `httpi://` as a native webview URI scheme protocol.
@@ -56,6 +72,24 @@ impl<R: Runtime> PluginBuilder<R> {
     /// `createEndpoint()`. There is nothing else to configure.
     pub fn with_scheme(mut self) -> Self {
         self.scheme = true;
+        self
+    }
+
+    /// Override the maximum size of a single `httpi://` response that the scheme
+    /// handler will buffer for the webview.
+    ///
+    /// Defaults to [`DEFAULT_SCHEME_MAX_RESPONSE_BYTES`] (64 MiB). The handler
+    /// buffers each response fully before handing it to the webview (Tauri's
+    /// responder is not streaming), so this bounds peak memory per in-page asset
+    /// request. Media plays back through many small `Range` requests, each well
+    /// under this cap; the limit only rejects a single *non-ranged* response
+    /// larger than `bytes`. Raise it if you intentionally serve large non-ranged
+    /// assets to the webview.
+    ///
+    /// This affects **only** the `httpi://` scheme handler. The `node.fetch()`
+    /// IPC path streams and is bounded by the calling code, not by this value.
+    pub fn max_response_bytes(mut self, bytes: usize) -> Self {
+        self.scheme_max_response_bytes = bytes;
         self
     }
 
@@ -110,16 +144,19 @@ impl<R: Runtime> PluginBuilder<R> {
         // Register the `httpi://` scheme protocol before `.build()` — Tauri
         // requires schemes to be declared at builder time.
         if self.scheme {
-            plugin_builder = plugin_builder
-                .register_asynchronous_uri_scheme_protocol("httpi", |ctx, request, responder| {
+            let max_response_bytes = self.scheme_max_response_bytes;
+            plugin_builder = plugin_builder.register_asynchronous_uri_scheme_protocol(
+                "httpi",
+                move |ctx, request, responder| {
                     let app = ctx.app_handle().clone();
                     // Hand off to the existing tokio runtime; never block the
                     // protocol callback thread.
                     tauri::async_runtime::spawn(async move {
-                        let response = scheme::handle(&app, request).await;
+                        let response = scheme::handle(&app, request, max_response_bytes).await;
                         responder.respond(response);
                     });
-                });
+                },
+            );
         }
 
         plugin_builder
@@ -170,11 +207,22 @@ mod scheme {
     /// Resolves the active endpoint from [`crate::state::SchemeState`], parses
     /// the peer node ID from the URI host, forwards any `Range` header, and
     /// drains the iroh-http-core body into the response bytes.
+    ///
+    /// `max_response_bytes` caps the buffered response size. The handler must
+    /// accumulate the whole body into a `Vec<u8>` before handing it to the
+    /// webview — Tauri's custom-protocol responder takes a complete body, not a
+    /// stream — so without this bound a large or hostile peer response could
+    /// exhaust app memory. The value comes from
+    /// [`crate::PluginBuilder::max_response_bytes`] (default
+    /// [`crate::DEFAULT_SCHEME_MAX_RESPONSE_BYTES`], 64 MiB). Media is fetched as
+    /// many small `Range` slices, each far below the cap; the limit only rejects
+    /// a single non-ranged response larger than `max_response_bytes`.
     pub async fn handle<R: Runtime>(
         app: &tauri::AppHandle<R>,
         request: tauri::http::Request<Vec<u8>>,
+        max_response_bytes: usize,
     ) -> tauri::http::Response<Vec<u8>> {
-        match fetch(app, request).await {
+        match fetch(app, request, max_response_bytes).await {
             Ok(r) => r,
             Err(msg) => error_response(StatusCode::BAD_GATEWAY, &msg),
         }
@@ -183,6 +231,7 @@ mod scheme {
     async fn fetch<R: Runtime>(
         app: &tauri::AppHandle<R>,
         request: tauri::http::Request<Vec<u8>>,
+        max_response_bytes: usize,
     ) -> Result<Response<Vec<u8>>, String> {
         // ── 0. Gate on GET only ──────────────────────────────────────────────
         // <img>, <audio>, <video> are always GET. Non-GET callers should use
@@ -261,7 +310,7 @@ mod scheme {
             None,  // no extra direct addrs
             None,  // use endpoint default timeout
             true,  // decompress
-            None,  // no response body size cap
+            Some(max_response_bytes),  // bound buffered response size
         )
         .await
         .map_err(|e| e.to_string())?;
@@ -271,7 +320,19 @@ mod scheme {
         if res.body_handle != 0 {
             loop {
                 match ep.handles().next_chunk(res.body_handle).await {
-                    Ok(Some(chunk)) => body_bytes.extend_from_slice(&chunk),
+                    Ok(Some(chunk)) => {
+                        // Defence in depth: the core cap above already bounds the
+                        // response, but never let the buffer grow past the limit.
+                        if body_bytes.len().saturating_add(chunk.len())
+                            > max_response_bytes
+                        {
+                            ep.handles().cancel_reader(res.body_handle);
+                            return Err(format!(
+                                "httpi:// response exceeds {max_response_bytes} byte cap"
+                            ));
+                        }
+                        body_bytes.extend_from_slice(&chunk);
+                    }
                     Ok(None) => break, // EOF — handle cleaned up automatically
                     Err(e) => {
                         // Cancel the reader to release the slot immediately
