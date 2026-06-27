@@ -15,6 +15,7 @@
     "include": ["mod.ts", "src/", "README.md"]
   },
   "imports": {
+    "@denosaurs/plug": "jsr:@denosaurs/plug@^1",
     "@std/path": "jsr:@std/path@^1",
     "@std/fs": "jsr:@std/fs@^1",
     "@momics/iroh-http-shared": "jsr:@momics/iroh-http-shared@^0.5"

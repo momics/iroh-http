@@ -36,6 +36,7 @@ import {
   isEndpointGoneError,
   normaliseRelayMode,
 } from "@momics/iroh-http-shared";
+import { download } from "@denosaurs/plug";
 import { NATIVE_CHECKSUMS } from "./checksums.ts";
 
 // ── Platform library resolution ───────────────────────────────────────────────
@@ -60,17 +61,24 @@ const VERSION = "0.5.2";
 const DOWNLOAD_BASE =
   `https://github.com/momics/iroh-http/releases/download/v${VERSION}`;
 
-function cacheDir(): string {
-  // Local dev: import.meta.url is file://, use lib/ next to src/.
-  if (import.meta.url.startsWith("file://")) {
-    return resolve(dirname(fromFileUrl(import.meta.url)), "..", "lib");
+/** True if `path` exists and is a regular file. */
+async function isFile(path: string): Promise<boolean> {
+  try {
+    return (await Deno.stat(path)).isFile;
+  } catch {
+    return false;
   }
-  // JSR / remote: use a platform-appropriate cache directory.
-  const home = Deno.env.get("HOME") ?? Deno.env.get("USERPROFILE") ?? "/tmp";
-  return resolve(home, ".cache", "iroh-http-deno", VERSION);
 }
 
-const LIB_DIR = cacheDir();
+/**
+ * Path to a locally built native library, if running from a source checkout.
+ * Returns `undefined` for published (remote) consumers, who always download a
+ * release asset instead.
+ */
+function localLibPath(): string | undefined {
+  if (!import.meta.url.startsWith("file://")) return undefined;
+  return resolve(dirname(fromFileUrl(import.meta.url)), "..", "lib", libName());
+}
 
 /** Lowercase hex SHA-256 of `bytes`. */
 async function sha256Hex(bytes: Uint8Array): Promise<string> {
@@ -120,75 +128,54 @@ async function verifyLib(
 
   const actual = await sha256Hex(await Deno.readFile(libPath));
   if (actual !== expected) {
-    try {
-      await Deno.remove(libPath);
-    } catch {
-      /* ignore */
+    // Only a downloaded/cached copy is removed on mismatch; never delete a
+    // user's locally built library.
+    if (downloaded) {
+      try {
+        await Deno.remove(libPath);
+      } catch {
+        /* ignore */
+      }
     }
     throw new Error(
       `[iroh-http] Native library integrity check FAILED for "${name}".\n` +
         `  expected SHA-256: ${expected}\n` +
         `  actual   SHA-256: ${actual}\n` +
-        `  The file was removed. Refusing to load potentially tampered native code.`,
+        `  Refusing to load potentially tampered native code.`,
     );
   }
 }
 
 async function ensureLib(): Promise<string> {
   const name = libName();
-  const libPath = resolve(LIB_DIR, name);
 
-  // Fast path: lib already present (dev build or cached download). Verify the
-  // cached copy too — a corrupted or tampered cache must not be loaded.
-  const exists = await Deno.stat(libPath).then(() => true).catch(() => false);
-  if (exists) {
-    try {
-      await verifyLib(libPath, name, false);
-      return libPath;
-    } catch (e) {
-      // Cached copy failed verification: drop it and re-download a clean one.
-      console.error(
-        `[iroh-http] cached native library rejected, re-downloading: ` +
-          `${(e as Error).message}`,
-      );
-    }
+  // 1. Source checkout (dev / CI): use the locally built library directly.
+  //    Local builds have no published digest, so verifyLib warns rather than
+  //    enforcing when no checksum is embedded.
+  const local = localLibPath();
+  if (local && (await isFile(local))) {
+    await verifyLib(local, name, false);
+    return local;
   }
 
+  // 2. Published consumer: let @denosaurs/plug fetch + cache the release asset
+  //    (download, cross-platform paths, atomic writes, cache-dir resolution),
+  //    then verify its SHA-256 before we hand it to dlopen. plug performs no
+  //    integrity check of its own — that gap is exactly what we close here.
   const url = `${DOWNLOAD_BASE}/${name}`;
-  console.error(`[iroh-http] Downloading native library from ${url} …`);
-
-  const resp = await fetch(url);
-  if (!resp.ok || !resp.body) {
-    throw new Error(
-      `[iroh-http] Failed to download native library: ${resp.status} ${resp.statusText}\n` +
-        `  URL: ${url}\n` +
-        `  Ensure a GitHub release exists for v${VERSION} with the binary attached.`,
-    );
-  }
-
-  await Deno.mkdir(LIB_DIR, { recursive: true });
-  const file = await Deno.open(libPath, { write: true, create: true, truncate: true });
+  let libPath = await download({ url });
   try {
-    await resp.body.pipeTo(file.writable);
+    await verifyLib(libPath, name, true);
   } catch (e) {
-    // Clean up partial download.
-    try {
-      await Deno.remove(libPath);
-    } catch {
-      /* ignore */
-    }
-    throw e;
+    // A cached copy failed verification (e.g. a poisoned cache) — force one
+    // clean re-download, then re-verify. A second failure propagates.
+    console.error(
+      `[iroh-http] cached native library rejected, reloading: ` +
+        `${(e as Error).message}`,
+    );
+    libPath = await download({ url, cache: "reloadAll" });
+    await verifyLib(libPath, name, true);
   }
-
-  // Verify integrity BEFORE marking executable / loading. Throws (and removes
-  // the file) on mismatch or when no checksum is available for a download.
-  await verifyLib(libPath, name, true);
-
-  // Mark executable on Unix.
-  if (Deno.build.os !== "windows") {
-    await Deno.chmod(libPath, 0o755);
-  }
-
   return libPath;
 }
 
