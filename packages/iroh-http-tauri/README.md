@@ -123,16 +123,17 @@ configure.
 
 ### Response size limit
 
-Tauri's custom-protocol responder takes a **complete body, not a stream**, so the
-scheme handler must buffer each `httpi://` response fully in memory before handing
-it to the webview. To stop a large or hostile peer from exhausting app memory, the
-handler caps a single buffered response at **64 MiB by default**
+Tauri's custom-protocol responder takes a **complete body, not a stream**, so
+the scheme handler must buffer each `httpi://` response fully in memory before
+handing it to the webview. To stop a large or hostile peer from exhausting app
+memory, the handler caps a single buffered response at **64 MiB by default**
 (`DEFAULT_SCHEME_MAX_RESPONSE_BYTES`).
 
-This cap is intentionally **per response, not per file**: media plays back through
-many small `Range` requests, each well under the cap, so videos and audio of any
-size stream fine as long as the serving peer supports `Range` (it does by default).
-The limit only rejects a single *non-ranged* response larger than the cap.
+This cap is intentionally **per response, not per file**: media plays back
+through many small `Range` requests, each well under the cap, so videos and
+audio of any size stream fine as long as the serving peer supports `Range` (it
+does by default). The limit only rejects a single _non-ranged_ response larger
+than the cap.
 
 Override it on the builder when you knowingly serve large non-ranged assets:
 
@@ -146,8 +147,9 @@ tauri::Builder::default()
     );
 ```
 
-The cap applies **only** to the `httpi://` scheme handler. The `node.fetch()` IPC
-path streams the body and is bounded by your own consuming code, not by this value.
+The cap applies **only** to the `httpi://` scheme handler. The `node.fetch()`
+IPC path streams the body and is bounded by your own consuming code, not by this
+value.
 
 ## Tauri specifics
 

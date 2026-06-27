@@ -145,7 +145,11 @@ document.querySelector<HTMLButtonElement>("#save-key-btn")!.addEventListener(
   "click",
   () => {
     persistKey(node.secretKey.toBytes());
-    setStatus(keyStatusEl, "Key saved to localStorage (insecure — demo only) ⚠", "ok");
+    setStatus(
+      keyStatusEl,
+      "Key saved to localStorage (insecure — demo only) ⚠",
+      "ok",
+    );
   },
 );
 
@@ -197,7 +201,10 @@ serveBtn.addEventListener("click", () => {
     // ship a real app open like this).
     const peerId = req.headers.get("peer-id") ?? "";
     if (ALLOWED_PEERS.size > 0 && !ALLOWED_PEERS.has(peerId)) {
-      appendLog(serverLog, `Rejected non-allowlisted peer ${peerId.slice(0, 20)}…`);
+      appendLog(
+        serverLog,
+        `Rejected non-allowlisted peer ${peerId.slice(0, 20)}…`,
+      );
       return new Response("Forbidden", { status: 403 });
     }
     // WebTransport bidi stream (from session.createBidirectionalStream on remote peer).
