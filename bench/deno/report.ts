@@ -3,7 +3,7 @@
  *
  * Runs the same scenarios as bench.ts but with manual timing so we can produce:
  *   - Terminal comparison table (overhead)
- *   - JSON output for benchmark-action (regression tracking on gh-pages)
+ *   - JSON output archived to the bench-results branch (one folder per tag)
  *
  * Usage:
  *   deno run --allow-net --allow-ffi --allow-env --allow-read --allow-write --allow-sys bench/deno/report.ts

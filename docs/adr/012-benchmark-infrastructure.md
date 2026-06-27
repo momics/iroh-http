@@ -12,8 +12,9 @@ tags: [benchmarks, performance, deno, node, rust, criterion, ci]
 ## Context
 
 Performance benchmarks exist for all three layers (Rust/Criterion,
-Node/Mitata, Deno/`Deno.bench`) and a CI workflow (`bench.yml`) publishes
-results to GitHub Pages. The benchmarks serve two purposes:
+Node/Mitata, Deno/`Deno.bench`) and a CI workflow (`bench.yml`) archives
+results to the long-lived `bench-results` branch (one folder per tag). The
+benchmarks serve two purposes:
 
 1. **Regression tracking** — per-release tag runs detect >20% regressions.
 2. **Overhead comparison** — side-by-side iroh vs native HTTP numbers show
@@ -68,13 +69,21 @@ iroh-http benchmark results (vX.Y.Z, Deno 2.7.12, aarch64)
   ...
 ```
 
-JSON output (for benchmark-action): `[{name, unit, value}]` with names like
+JSON output: `[{name, unit, value}]` with names like
 `deno/iroh/warm-request`, `node/native/throughput-1mb`.
 
 ### CI triggers
 
-- `push` to `v*.*.*` tags — per-release snapshot published to gh-pages
-- `workflow_dispatch` — manual run at any time
+- `push` to `v*.*.*` tags — per-release snapshot committed to
+  `bench-results/data/<tag>`
+- `workflow_dispatch` (no input) — manual snapshot committed to
+  `bench-results/data/main-<sha>`
+- `workflow_dispatch` (tag=`vX.Y.Z`) — re-benchmark an existing release using
+  that tag's own harness and overwrite `bench-results/data/<tag>`
+
+Results are recorded, not gated: there is no dashboard and no regression
+enforcement. Any visualisation can be regenerated on demand from the
+committed JSON.
 
 ### Rust Criterion additions
 
@@ -86,6 +95,8 @@ JSON output (for benchmark-action): `[{name, unit, value}]` with names like
 
 - Deno benchmarks now run cleanly (FFI bridge issues from #009 resolved).
 - All three jobs (Rust, Node, Deno) are active in `bench.yml`.
+- Raw results live on the `bench-results` branch; GitHub Pages is not used
+  (the gh-pages dashboard was dropped in #240).
 - Self-hosted runner (`vars.BENCHMARK_RUNNER`) falls back to `ubuntu-latest`.
 - Alert threshold is 120% (>20% regression fails the job and comments).
 
@@ -94,6 +105,6 @@ JSON output (for benchmark-action): `[{name, unit, value}]` with names like
 - [ ] Verify the self-hosted benchmark runner is operational. If not, decide
       whether to use `ubuntu-latest` with statistical smoothing or defer
       until the runner is available.
-- [ ] Consider publishing overhead comparison tables to the README or a
-      dedicated gh-pages benchmark dashboard.
+- [ ] Consider publishing overhead comparison tables to the README, generated
+      on demand from the committed `bench-results` JSON.
 - [ ] Add raw session benchmarks once WebTransport API stabilises.
