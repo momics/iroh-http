@@ -4,8 +4,7 @@
 //! webview.  Tests cover endpoint lifecycle, body handle management, the
 //! binary prefix-byte protocol for chunks, and Ed25519 key operations.
 
-#[cfg(test)]
-mod tests {
+mod command_tests {
     use crate::commands::*;
     use crate::state;
     use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
