@@ -1,13 +1,15 @@
 {
   "version": "0.1.0",
   "tasks": {
-    "server": "deno run --allow-ffi --allow-read --allow-env main.ts server",
-    "client": "deno run --allow-ffi --allow-read --allow-env main.ts client",
-    "advertise": "deno run --allow-ffi --allow-read --allow-env main.ts advertise",
-    "browse": "deno run --allow-ffi --allow-read --allow-env main.ts browse"
+    "server": "deno run --allow-ffi --allow-read --allow-env --allow-sys=inspector main.ts server",
+    "host": "deno run --allow-ffi --allow-read --allow-env --allow-sys=inspector main.ts host",
+    "client": "deno run --allow-ffi --allow-read --allow-env --allow-sys=inspector main.ts client",
+    "advertise": "deno run --allow-ffi --allow-read --allow-env --allow-sys=inspector main.ts advertise",
+    "browse": "deno run --allow-ffi --allow-read --allow-env --allow-sys=inspector main.ts browse"
   },
   "imports": {
     "@momics/iroh-http-deno": "jsr:@momics/iroh-http-deno@^0.5.1",
+    "@std/http": "jsr:@std/http@^1",
     "@std/path": "jsr:@std/path@^1",
     "@std/fs": "jsr:@std/fs@^1"
   }

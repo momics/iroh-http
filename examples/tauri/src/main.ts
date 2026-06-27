@@ -240,6 +240,7 @@ serveBtn.addEventListener("click", () => {
     const path = new URL(req.url).pathname;
     const peer = req.headers.get("peer-id") ?? "?";
     appendLog(serverLog, `${req.method} ${path} ← ${peer.slice(0, 20)}…`);
+
     return new Response(`Hello from iroh-http! (${req.method} ${path})`, {
       headers: { "content-type": "text/plain" },
     });
@@ -282,6 +283,77 @@ fetchForm.addEventListener("submit", async (e) => {
     setStatus(responseStatus, "error", "error");
     responseBody.textContent = String(e);
   }
+});
+
+// ── Stream files (httpi:// scheme) ───────────────────────────────────────────────
+
+const filesHostInput = document.querySelector<HTMLInputElement>(
+  "#files-host-input",
+)!;
+const filesStatus = document.querySelector<HTMLElement>("#files-status")!;
+const filesAudioPath = document.querySelector<HTMLInputElement>(
+  "#files-audio-path",
+)!;
+const filesAudio = document.querySelector<HTMLAudioElement>("#files-audio")!;
+const filesImagePath = document.querySelector<HTMLInputElement>(
+  "#files-image-path",
+)!;
+const filesImage = document.querySelector<HTMLImageElement>("#files-image")!;
+
+/** Build an `httpi://<host><path>` URL from the host input and a path field. */
+function filesUrl(rawPath: string, fallback: string): string | null {
+  const host = filesHostInput.value.trim();
+  if (!host) {
+    filesHostInput.focus();
+    return null;
+  }
+  const p = rawPath.trim() || fallback;
+  return `httpi://${host}${p.startsWith("/") ? p : `/${p}`}`;
+}
+
+document.querySelector<HTMLButtonElement>("#files-audio-btn")!.addEventListener(
+  "click",
+  () => {
+    const src = filesUrl(filesAudioPath.value, "/audio.wav");
+    if (!src) return;
+    // Point the native <audio> element straight at the host. The httpi:// scheme
+    // handler resolves the request through iroh-http-core over QUIC — no IPC, no
+    // base64, and the webview can issue Range requests to seek.
+    setStatus(filesStatus, `loading ${src}`);
+    filesAudio.src = src;
+    filesAudio.play().then(
+      () => setStatus(filesStatus, "playing audio ▶", "ok"),
+      (e) => setStatus(filesStatus, `playback blocked: ${e}`, "error"),
+    );
+  },
+);
+
+document.querySelector<HTMLButtonElement>("#files-image-btn")!.addEventListener(
+  "click",
+  () => {
+    const src = filesUrl(filesImagePath.value, "/image.png");
+    if (!src) return;
+    setStatus(filesStatus, `loading ${src}`);
+    filesImage.src = src;
+  },
+);
+
+filesAudio.addEventListener("error", () => {
+  const err = filesAudio.error;
+  setStatus(
+    filesStatus,
+    `audio error${err ? ` (code ${err.code})` : ""} — is the host running and reachable?`,
+    "error",
+  );
+});
+filesAudio.addEventListener("ended", () => setStatus(filesStatus, "audio ended"));
+filesImage.addEventListener("load", () => {
+  filesImage.style.display = "block";
+  setStatus(filesStatus, "image loaded ✓", "ok");
+});
+filesImage.addEventListener("error", () => {
+  filesImage.style.display = "none";
+  setStatus(filesStatus, "image error — is the host running and reachable?", "error");
 });
 
 // ── Peer info & stats ──────────────────────────────────────────────────────────
