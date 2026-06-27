@@ -112,6 +112,15 @@ async function run() {
     for (const f of failures) console.error(`  - ${f}`);
   }
 
+  // Publish the result on `window` so an external WebDriver harness (see
+  // tests/tauri-app) can observe the outcome without relying on process exit.
+  (globalThis as unknown as { __irohTestSummary?: unknown }).__irohTestSummary = {
+    passed,
+    failed,
+    total: queue.length,
+    failures,
+  };
+
   if (ciMode) {
     try {
       await invoke("exit_with_code", { code: failed > 0 ? 1 : 0 });
