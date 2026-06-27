@@ -189,3 +189,35 @@ async fn session_close_with_code_and_reason() {
     assert_eq!(info.close_code, 42);
     assert_eq!(info.reason, "done");
 }
+
+// -- Idempotent close ---------------------------------------------------------
+
+#[tokio::test]
+async fn session_double_close_is_idempotent() {
+    let (a_ep, b_ep) = make_pair().await;
+    let b_id = node_id(&b_ep);
+    let b_addrs = direct_addrs(&b_ep);
+
+    let b_ep_spawn = b_ep.clone();
+    let b_handle = tokio::spawn(async move {
+        let session_b = Session::accept(b_ep_spawn).await.unwrap().unwrap();
+        session_b.closed().await.unwrap();
+    });
+
+    let session_a = Session::connect(a_ep.clone(), &b_id, Some(&b_addrs))
+        .await
+        .unwrap();
+
+    // Closing twice must not error — the second close is a no-op.
+    session_a.close(0, "first").unwrap();
+    session_a.close(0, "second").unwrap();
+
+    // closed() is also idempotent: the first call removes the registry entry,
+    // the second returns a default CloseInfo instead of erroring.
+    let _first = session_a.closed().await.unwrap();
+    let second = session_a.closed().await.unwrap();
+    assert_eq!(second.close_code, 0);
+    assert_eq!(second.reason, "");
+
+    b_handle.await.unwrap();
+}
