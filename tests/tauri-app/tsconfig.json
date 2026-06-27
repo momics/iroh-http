@@ -1,0 +1,31 @@
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "useDefineForClassFields": true,
+    "module": "ESNext",
+    "lib": ["ES2020", "DOM", "DOM.Iterable"],
+    "skipLibCheck": true,
+
+    /* Bundler mode */
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "noEmit": true,
+
+    /* Linting */
+    "strict": true,
+    "noFallthroughCasesInSwitch": true,
+
+    /* Monorepo path aliases (resolved by Vite at build time) */
+    "paths": {
+      "@momics/iroh-http-tauri": [
+        "../../packages/iroh-http-tauri/guest-js/index.ts"
+      ],
+      "@momics/iroh-http-shared": [
+        "../../packages/iroh-http-shared/src/index.ts"
+      ]
+    }
+  },
+  "include": ["src", "vite.config.ts"]
+}

@@ -1,0 +1,10 @@
+# Tauri / Rust build output
+src-tauri/target/
+src-tauri/gen/
+
+# Vite build output
+dist/
+
+# Node
+node_modules/
+package-lock.json
