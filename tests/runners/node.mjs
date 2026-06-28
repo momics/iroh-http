@@ -19,6 +19,7 @@ import { eventTests } from "../suites/events.mjs";
 import { sessionTests } from "../suites/sessions.mjs";
 import { keyTests } from "../suites/keys.mjs";
 import { discoveryTests } from "../suites/discovery.mjs";
+import { selfFetchTests } from "../suites/self-fetch.mjs";
 
 /** Adapter from shared test API → node:test + node:assert */
 const ctx = {
@@ -54,3 +55,4 @@ eventTests(ctx);
 sessionTests(ctx);
 keyTests(ctx);
 discoveryTests(ctx);
+selfFetchTests(ctx);
