@@ -2,9 +2,15 @@
  * iroh-http Deno example.
  *
  *   deno task server                  # serve HTTP over iroh
+ *   deno task host                    # host the ./public directory over httpi://
  *   deno task client <peer-id>        # fetch from a server
  *   deno task advertise [service]     # announce this node on the LAN via mDNS
  *   deno task browse    [service]     # discover nodes on the LAN via mDNS
+ *
+ * The `host` task wires Deno's standard-library file server (`serveDir`) onto an
+ * httpi:// endpoint, so any peer can stream the files in ./public (audio.wav,
+ * image.png) directly — e.g. from the Tauri example's "Stream files" tab. Those
+ * assets are procedurally generated and in the public domain.
  *
  * To test mDNS, open two terminals on the same network:
  *   Terminal A:  deno task advertise
@@ -15,6 +21,8 @@
  */
 
 import { createNode } from "@momics/iroh-http-deno";
+import { serveDir } from "@std/http/file-server";
+import { fromFileUrl } from "@std/path";
 
 /** Default mDNS service name shared by `advertise` and `browse`. */
 const DEFAULT_SERVICE = "iroh-http-example";
@@ -65,6 +73,40 @@ switch (mode) {
     break;
   }
 
+  case "host": {
+    // Host the ./public directory over httpi:// using Deno's vanilla std file
+    // server. `serveDir` handles content types, ETags, and Range requests (so
+    // audio/video seek), and our serve handler simply forwards each request to
+    // it. Same access-control note as `server` applies.
+    const allowed = parseAllowlist(envVar("IROH_HTTP_ALLOWED_PEERS"));
+    if (allowed.size === 0) {
+      console.warn(
+        "[example] IROH_HTTP_ALLOWED_PEERS not set — serving ANY peer. " +
+          "Set it to a comma-separated list of node IDs to restrict access.",
+      );
+    }
+    const fsRoot = fromFileUrl(new URL("./public", import.meta.url));
+    node.serve({}, (req) => {
+      const peer = req.headers.get("peer-id") ?? "";
+      if (allowed.size > 0 && !allowed.has(peer)) {
+        console.warn("Rejected request from non-allowlisted peer:", peer);
+        return new Response("Forbidden", { status: 403 });
+      }
+      console.log(
+        "Incoming:",
+        req.method,
+        new URL(req.url).pathname,
+        "←",
+        peer.slice(0, 16),
+      );
+      return serveDir(req, { fsRoot, quiet: true });
+    });
+    console.log(`Hosting ${fsRoot} over httpi://.`);
+    console.log("Available files: /audio.wav, /image.png");
+    console.log("Share your node ID with the client (e.g. the Tauri example).");
+    break;
+  }
+
   case "client": {
     if (!arg) {
       console.error("Usage: deno task client <peer-id>");
@@ -105,7 +147,7 @@ switch (mode) {
 
   default:
     console.error(
-      "Usage: deno task server | client <peer-id> | advertise [service] | browse [service]",
+      "Usage: deno task server | host | client <peer-id> | advertise [service] | browse [service]",
     );
     Deno.exit(1);
 }
