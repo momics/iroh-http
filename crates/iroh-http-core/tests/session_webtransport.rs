@@ -208,7 +208,7 @@ async fn session_double_close_is_idempotent() {
         .await
         .unwrap();
 
-    // Closing twice must not error — the second close is a no-op.
+    // Closing twice must not error — `close` is safe to call repeatedly.
     session_a.close(0, "first").unwrap();
     session_a.close(0, "second").unwrap();
 

@@ -6,7 +6,7 @@
 //! bidirectional session. This is a regression guard for the ALPN check in
 //! `ffi::session::Session::accept`.
 
-use iroh_http_core::{IrohEndpoint, NetworkingOptions, NodeOptions, Session, ALPN};
+use iroh_http_core::{ErrorCode, IrohEndpoint, NetworkingOptions, NodeOptions, Session, ALPN};
 
 /// Two locally-connected endpoints (relay disabled, loopback only). Both
 /// advertise the duplex and plain-HTTP ALPNs by default.
@@ -52,6 +52,8 @@ async fn accept_rejects_non_duplex_alpn() {
         .unwrap()
         .err()
         .expect("accept must reject a non-duplex ALPN");
+    // Assert the machine-readable code first; the message is an extra guard.
+    assert_eq!(err.code, ErrorCode::ConnectionFailed);
     assert!(
         err.message.contains("unexpected ALPN"),
         "unexpected error: {}",
