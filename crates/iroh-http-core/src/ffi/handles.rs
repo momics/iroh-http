@@ -1052,4 +1052,89 @@ mod tests {
         let result = recv_with_cancel(rx, cancel).await;
         assert!(result.is_none());
     }
+
+    // ── #204: concurrency, TTL sweep, and slot reuse ───────────────────
+
+    /// Many tasks inserting and freeing reader/writer handles concurrently must
+    /// not panic or leak: every slot is released by the end.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_alloc_dealloc_leaves_no_leak() {
+        let store = Arc::new(test_store());
+        let mut tasks = Vec::new();
+        for _ in 0..16 {
+            let s = store.clone();
+            tasks.push(tokio::spawn(async move {
+                for _ in 0..100 {
+                    let (writer, reader) = s.make_body_channel();
+                    let reader_handle = s.insert_reader(reader).unwrap();
+                    let writer_handle = s.insert_writer(writer).unwrap();
+                    s.cancel_reader(reader_handle);
+                    s.finish_body(writer_handle).unwrap();
+                }
+            }));
+        }
+        for t in tasks {
+            t.await.unwrap();
+        }
+
+        let (readers, writers, _sessions, total) = store.count_handles();
+        assert_eq!(readers, 0, "all reader slots should be freed");
+        assert_eq!(writers, 0, "all writer slots should be freed");
+        assert_eq!(total, 0, "no handles should leak");
+    }
+
+    /// A TTL sweep removes entries older than the TTL but keeps fresh ones, and
+    /// the swept handle becomes invalid.
+    #[tokio::test]
+    async fn sweep_removes_expired_keeps_fresh() {
+        let store = test_store();
+        // Old reader: will age past the sweep TTL.
+        let (_old_writer, old_reader) = make_body_channel();
+        let old_handle = store.insert_reader(old_reader).unwrap();
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        // Fresh reader: inserted right before the sweep.
+        let (_new_writer, new_reader) = make_body_channel();
+        store.insert_reader(new_reader).unwrap();
+
+        // TTL 30ms: the 60ms-old entry expires, the fresh one survives.
+        store.sweep(Duration::from_millis(30));
+
+        let (readers, _, _, _) = store.count_handles();
+        assert_eq!(readers, 1, "only the fresh reader should remain");
+        assert!(
+            store.next_chunk(old_handle).await.is_err(),
+            "the swept handle must be invalid",
+        );
+    }
+
+    /// After a handle is freed, the old handle is invalid and the underlying
+    /// slot can be reused for a new, distinct handle.
+    #[tokio::test]
+    async fn freed_handle_is_invalid_and_slot_reusable() {
+        let store = test_store();
+        let (_writer_a, reader_a) = make_body_channel();
+        let handle_a = store.insert_reader(reader_a).unwrap();
+        store.cancel_reader(handle_a); // frees the slot
+
+        assert!(
+            store.next_chunk(handle_a).await.is_err(),
+            "freed handle must be invalid",
+        );
+
+        // A new reader reuses the freed slot but gets a distinct versioned handle.
+        let (writer_b, reader_b) = store.make_body_channel();
+        let handle_b = store.insert_reader(reader_b).unwrap();
+        assert_ne!(
+            handle_a, handle_b,
+            "reused slot must yield a new versioned handle",
+        );
+
+        // The new handle is fully functional.
+        writer_b.send_chunk(Bytes::from("ok")).await.unwrap();
+        drop(writer_b);
+        assert_eq!(
+            store.next_chunk(handle_b).await.unwrap(),
+            Some(Bytes::from("ok")),
+        );
+    }
 }

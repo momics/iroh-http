@@ -167,3 +167,160 @@ pub(crate) async fn pump_hyper_body_to_channel_limited<B>(
 
     drop(writer);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::handles::make_body_channel;
+    use super::*;
+    use http_body::Frame;
+    use http_body_util::StreamBody;
+    use std::convert::Infallible;
+    use std::time::Duration;
+    use tokio::sync::oneshot;
+
+    /// A 50-byte chunk used to exercise the byte-limit boundary.
+    const FIFTY: &[u8] = &[b'x'; 50];
+
+    /// Build a body that yields each slice as one DATA frame, then EOF.
+    fn body_from_chunks(
+        chunks: Vec<&'static [u8]>,
+    ) -> impl http_body::Body<Data = Bytes, Error = Infallible> {
+        let frames = chunks
+            .into_iter()
+            .map(|c| Ok::<_, Infallible>(Frame::data(Bytes::from_static(c))));
+        StreamBody::new(futures::stream::iter(frames))
+    }
+
+    /// Round-trip: every frame the body yields reaches the reader, in order.
+    #[tokio::test]
+    async fn pump_round_trip_forwards_all_chunks() {
+        let (writer, reader) = make_body_channel();
+        let body = body_from_chunks(vec![b"foo", b"bar", b"baz"]);
+        let pump = tokio::spawn(pump_hyper_body_to_channel_limited(
+            body,
+            writer,
+            None,
+            Duration::from_secs(5),
+            None,
+        ));
+
+        let mut collected = Vec::new();
+        while let Some(chunk) = reader.next_chunk().await {
+            collected.extend_from_slice(&chunk);
+        }
+        pump.await.unwrap();
+
+        assert_eq!(collected, b"foobarbaz");
+    }
+
+    /// Regression (hardening batch / ISS-004): a body over `max_bytes` fires the
+    /// overflow signal exactly once, forwards only the frames within the limit,
+    /// and keeps draining the rest so the pump terminates (peer not stalled).
+    #[tokio::test]
+    async fn pump_over_limit_fires_overflow_and_drains_rest() {
+        let (writer, reader) = make_body_channel();
+        let (overflow_tx, overflow_rx) = oneshot::channel();
+        // 4 × 50 = 200 bytes total, limit 100: frames 1–2 pass, 3 overflows, 4 drains.
+        let body = body_from_chunks(vec![FIFTY, FIFTY, FIFTY, FIFTY]);
+        let pump = tokio::spawn(pump_hyper_body_to_channel_limited(
+            body,
+            writer,
+            Some(100),
+            Duration::from_secs(5),
+            Some(overflow_tx),
+        ));
+
+        let mut total = 0usize;
+        while let Some(chunk) = reader.next_chunk().await {
+            total += chunk.len();
+        }
+        pump.await.unwrap();
+
+        // Only the two frames within the 100-byte limit reached the reader.
+        assert_eq!(total, 100);
+        // Overflow was signalled (sender not dropped without sending).
+        assert!(
+            overflow_rx.await.is_ok(),
+            "overflow signal should fire once"
+        );
+    }
+
+    /// Regression (hardening batch): a body that stalls mid-stream is cut off
+    /// after `frame_timeout` instead of hanging the pump forever (slowloris).
+    #[tokio::test]
+    async fn pump_breaks_when_frame_read_times_out() {
+        let (writer, reader) = make_body_channel();
+        // One frame, then the body never yields again.
+        use futures::StreamExt;
+        let frames = futures::stream::iter(vec![Ok::<_, Infallible>(Frame::data(
+            Bytes::from_static(b"first"),
+        ))])
+        .chain(futures::stream::pending());
+        let body = StreamBody::new(frames);
+
+        let start = std::time::Instant::now();
+        let pump = tokio::spawn(pump_hyper_body_to_channel_limited(
+            body,
+            writer,
+            None,
+            Duration::from_millis(50),
+            None,
+        ));
+
+        let mut collected = Vec::new();
+        while let Some(chunk) = reader.next_chunk().await {
+            collected.extend_from_slice(&chunk);
+        }
+        pump.await.unwrap();
+
+        assert_eq!(collected, b"first");
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "pump should cut off the stalled body promptly",
+        );
+    }
+
+    /// Backpressure: with more frames than the channel capacity (32) and a slow
+    /// reader, every frame is still delivered without loss.
+    #[tokio::test]
+    async fn pump_delivers_all_frames_under_slow_reader() {
+        let (writer, reader) = make_body_channel();
+        let body = body_from_chunks(vec![b"x".as_slice(); 50]);
+        let pump = tokio::spawn(pump_hyper_body_to_channel_limited(
+            body,
+            writer,
+            None,
+            Duration::from_secs(5),
+            None,
+        ));
+
+        let mut count = 0usize;
+        while let Some(chunk) = reader.next_chunk().await {
+            count += chunk.len();
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        pump.await.unwrap();
+
+        assert_eq!(count, 50);
+    }
+
+    /// Cancellation: once the reader is dropped, the pump stops promptly instead
+    /// of blocking on a full channel.
+    #[tokio::test]
+    async fn pump_stops_when_reader_dropped() {
+        let (writer, reader) = make_body_channel();
+        drop(reader);
+        let body = body_from_chunks(vec![b"a", b"b", b"c"]);
+
+        let res = tokio::time::timeout(
+            Duration::from_secs(2),
+            pump_hyper_body_to_channel_limited(body, writer, None, Duration::from_secs(5), None),
+        )
+        .await;
+
+        assert!(
+            res.is_ok(),
+            "pump should terminate after the reader is dropped"
+        );
+    }
+}
