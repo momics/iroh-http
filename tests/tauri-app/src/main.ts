@@ -4,7 +4,7 @@
  * Importing the shared runner kicks off all compliance suites inside the
  * webview (the runner self-executes on import). When it finishes it publishes
  * `window.__irohTestSummary`; we mirror that onto the DOM so a human — and the
- * WebdriverIO spec in `e2e/specs/compliance.e2e.ts` — can observe the outcome.
+ * WebdriverIO spec in `e2e/specs/compliance.e2e.js` — can observe the outcome.
  */
 
 import "../../runners/tauri.ts";

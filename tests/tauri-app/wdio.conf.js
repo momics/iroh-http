@@ -1,4 +1,3 @@
-import os from "os";
 import path from "path";
 import { spawn, spawnSync } from "child_process";
 import { fileURLToPath } from "url";
@@ -61,13 +60,13 @@ export const config = {
   },
 
   // Start `tauri-driver` so it can proxy WebDriver requests to the native
-  // WebKitWebDriver server on Linux.
+  // WebKitWebDriver server on Linux. Resolve it from PATH (cargo install puts
+  // it on PATH, and `tests/run-all.sh --tauri` checks for it the same way), so
+  // a non-default CARGO_HOME or a PATH-provided binary still works.
   beforeSession: () => {
-    tauriDriver = spawn(
-      path.resolve(os.homedir(), ".cargo", "bin", "tauri-driver"),
-      [],
-      { stdio: [null, process.stdout, process.stderr] },
-    );
+    tauriDriver = spawn("tauri-driver", [], {
+      stdio: [null, process.stdout, process.stderr],
+    });
 
     tauriDriver.on("error", (error) => {
       console.error("tauri-driver error:", error);
@@ -92,18 +91,32 @@ function closeTauriDriver() {
 }
 
 function onShutdown(fn) {
-  const cleanup = () => {
-    try {
-      fn();
-    } finally {
-      process.exit();
-    }
+  let ran = false;
+  const runOnce = () => {
+    if (ran) return;
+    ran = true;
+    fn();
   };
-  process.on("exit", cleanup);
-  process.on("SIGINT", cleanup);
-  process.on("SIGTERM", cleanup);
-  process.on("SIGHUP", cleanup);
-  process.on("SIGBREAK", cleanup);
+
+  // On normal exit just clean up synchronously. Do NOT call process.exit() here:
+  // it would recurse into this handler and reset the process's real exit code to
+  // 0, masking a failing/flaky run.
+  process.on("exit", runOnce);
+
+  // On a terminating signal, clean up then re-exit with the conventional
+  // 128 + signal-number code so the failure status is preserved.
+  const signalExitCodes = {
+    SIGINT: 130,
+    SIGTERM: 143,
+    SIGHUP: 129,
+    SIGBREAK: 149,
+  };
+  for (const [signal, code] of Object.entries(signalExitCodes)) {
+    process.on(signal, () => {
+      runOnce();
+      process.exit(code);
+    });
+  }
 }
 
 onShutdown(() => closeTauriDriver());
