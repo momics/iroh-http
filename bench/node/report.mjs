@@ -3,7 +3,7 @@
  *
  * Runs the same scenarios as bench.mjs but with manual timing so we can produce:
  *   - Terminal comparison table (overhead)
- *   - JSON output for benchmark-action (regression tracking on gh-pages)
+ *   - JSON output archived to the bench-results branch (one folder per tag)
  *
  * Usage:
  *   node bench/node/report.mjs              # terminal table
