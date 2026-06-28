@@ -68,7 +68,7 @@ Tests behavior under load:
 
 ```
 tests/
-├── run-all.sh                   # Run all suites for Node + Deno
+├── run-all.sh                   # Run all suites for Node + Deno (+ --tauri)
 ├── README.md
 │
 ├── suites/                      # Shared cross-runtime test suites
@@ -84,6 +84,13 @@ tests/
 │   ├── node.mjs                 # Binds suites to node:test + node:assert
 │   ├── deno.ts                  # Binds suites to Deno.test + @std/assert
 │   └── tauri.ts                 # Binds suites to Tauri webview
+│
+├── tauri-app/                   # Tauri host app that runs the shared suites
+│   ├── index.html               #   inside a real WebKit webview, driven by
+│   ├── src/main.ts              #   WebdriverIO + tauri-driver on Linux CI.
+│   ├── wdio.conf.js             # WebdriverIO config (builds app, spawns driver)
+│   ├── e2e/specs/               # WebDriver spec asserting zero failures
+│   └── src-tauri/               # Minimal Tauri shell (+ exit_with_code command)
 │
 └── http-compliance/             # Data-driven HTTP tests
     ├── cases.json               # 102 test cases (RFC 9110)
@@ -123,6 +130,7 @@ tests/
 ```bash
 ./tests/run-all.sh --node       # Node only
 ./tests/run-all.sh --deno       # Deno only
+./tests/run-all.sh --tauri      # Tauri webview (requires tauri-driver)
 ```
 
 ### Run individual test scripts
@@ -151,6 +159,19 @@ bash tests/http-compliance/run.sh
 ```
 
 ### Tauri (in webview)
+
+The shared suites also run inside a real Tauri webview via WebdriverIO +
+`tauri-driver`. This is exercised automatically by the `test-tauri` job in
+`.github/workflows/extended-tests.yml` and can be run locally on Linux:
+
+```bash
+# Prerequisites (Linux):
+#   cargo install tauri-driver --locked
+#   sudo apt-get install -y libwebkit2gtk-4.1-dev webkit2gtk-driver xvfb
+./tests/run-all.sh --tauri
+```
+
+The legacy HTTP-compliance webview entry is still available for manual runs:
 
 ```bash
 cd tauri && npm install
