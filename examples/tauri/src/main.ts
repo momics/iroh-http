@@ -342,18 +342,27 @@ filesAudio.addEventListener("error", () => {
   const err = filesAudio.error;
   setStatus(
     filesStatus,
-    `audio error${err ? ` (code ${err.code})` : ""} — is the host running and reachable?`,
+    `audio error${
+      err ? ` (code ${err.code})` : ""
+    } — is the host running and reachable?`,
     "error",
   );
 });
-filesAudio.addEventListener("ended", () => setStatus(filesStatus, "audio ended"));
+filesAudio.addEventListener(
+  "ended",
+  () => setStatus(filesStatus, "audio ended"),
+);
 filesImage.addEventListener("load", () => {
   filesImage.style.display = "block";
   setStatus(filesStatus, "image loaded ✓", "ok");
 });
 filesImage.addEventListener("error", () => {
   filesImage.style.display = "none";
-  setStatus(filesStatus, "image error — is the host running and reachable?", "error");
+  setStatus(
+    filesStatus,
+    "image error — is the host running and reachable?",
+    "error",
+  );
 });
 
 // ── Peer info & stats ──────────────────────────────────────────────────────────
