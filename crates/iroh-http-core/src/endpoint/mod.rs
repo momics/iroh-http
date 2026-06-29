@@ -100,6 +100,43 @@ impl IrohEndpoint {
         }
     }
 
+    // ── Local serve service (self-request loopback) ──────────────────────────
+
+    /// Register the locally-running serve service so a self-request
+    /// (`fetch()` to this node's own id) can be dispatched in-process.
+    /// Called when `serve()` starts; see ADR-015.
+    pub(crate) fn set_local_service(&self, svc: crate::ffi::dispatcher::IrohHttpService) {
+        *self
+            .inner
+            .ffi
+            .local_service
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(svc);
+    }
+
+    /// Clear the registered serve service. Called on serve stop / close so a
+    /// self-request after teardown fails cleanly instead of dispatching to a
+    /// dead handler, and to break the endpoint↔service reference cycle.
+    pub(crate) fn clear_local_service(&self) {
+        *self
+            .inner
+            .ffi
+            .local_service
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
+    }
+
+    /// A clone of the locally-running serve service, if `serve()` is active.
+    /// Used by [`crate::ffi::fetch`] to route self-requests in-process.
+    pub(crate) fn local_service(&self) -> Option<crate::ffi::dispatcher::IrohHttpService> {
+        self.inner
+            .ffi
+            .local_service
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
     // ── HTTP runtime accessors ────────────────────────────────────────────────
 
     /// Maximum byte size of an HTTP/1.1 head.

@@ -253,6 +253,7 @@ impl IrohEndpoint {
             },
             ffi: FfiBridge {
                 handles: HandleStore::new(store_config),
+                local_service: std::sync::Mutex::new(None),
             },
         });
 

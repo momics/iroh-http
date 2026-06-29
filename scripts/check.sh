@@ -22,6 +22,12 @@ ok()      { echo -e "  ${GREEN}✓${NC}  $1"; }
 section() { echo -e "\n${BOLD}${BLUE}── $1 ──${NC}"; }
 die()     { echo -e "  ${RED}✗${NC}  $1"; exit 1; }
 
+section "Format"
+
+echo "  → fmt:check"
+npm run fmt:check --silent || die "deno fmt failed — run: npm run fmt"
+ok "deno fmt"
+
 section "Rust"
 
 echo "  → lint"

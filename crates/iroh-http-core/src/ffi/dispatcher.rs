@@ -333,6 +333,11 @@ where
     });
     let svc = IrohHttpService { dispatcher };
 
+    // Register the service for in-process self-requests (ADR-015): a later
+    // `fetch()` to this node's own id dispatches to this exact service instead
+    // of dialing over QUIC (which iroh forbids). Cleared on serve stop / close.
+    endpoint.set_local_service(svc.clone());
+
     serve_with_events(endpoint, options, svc, on_connection_event)
 }
 

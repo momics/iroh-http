@@ -20,6 +20,7 @@ impl IrohEndpoint {
         if let Some(h) = handle {
             h.drain().await;
         }
+        self.clear_local_service();
         self.inner.transport.ep.close().await;
         let _ = self.inner.session.closed_tx.send(true);
     }
@@ -36,6 +37,7 @@ impl IrohEndpoint {
         if let Some(h) = handle {
             h.abort();
         }
+        self.clear_local_service();
         self.inner.transport.ep.close().await;
         let _ = self.inner.session.closed_tx.send(true);
     }
@@ -80,6 +82,7 @@ impl IrohEndpoint {
 
     /// Signal the serve loop to stop accepting new connections.
     pub fn stop_serve(&self) {
+        self.clear_local_service();
         let guard = self
             .inner
             .session

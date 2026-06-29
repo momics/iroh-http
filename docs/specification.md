@@ -51,6 +51,12 @@ interface IrohNode {
     input: string | URL,
     init?: IrohFetchInit,
   ): Promise<Response>;
+  // Self-requests: when `input` targets this node's own id, the request is
+  // routed in-process to this node's own `serve()` service instead of dialing
+  // over QUIC (iroh forbids self-dial). This requires an active `serve()`;
+  // otherwise the fetch rejects with a clear "no active server" error. The
+  // handler observes `peer-id == own id`. Loopback skips the wire (no
+  // QUIC/TLS, compression, or per-connection server limits). See ADR-015.
 
   /** Start serving HTTP requests from peers. */
   serve(handler: ServeHandler): ServeHandle;
@@ -624,6 +630,12 @@ Handles are slotmap keys (generational), not plain indices.
 ```
 fetch(endpoint, peer, path, method, headers, body_reader?) → FfiResponse
 ```
+
+When `peer` equals the endpoint's own node id, `fetch` routes the request
+in-process to the node's own serve service (ADR-015) rather than dialing over
+QUIC, which iroh refuses for self-connections. This requires an active
+`serve()`; otherwise it returns a `CONNECTION_FAILED` error explaining the
+missing server.
 
 A dedicated `connect`/`raw_connect` FFI symbol no longer exists; bidirectional connections go through the session API (`session_connect`, `session_create_bidi_stream`, etc., see below).
 
