@@ -345,19 +345,20 @@ function filesUrl(rawPath: string, fallback: string): string | null {
 // Fill the host field with this node's own ID so the Stream-files tab targets
 // the local server — exercising the self-request loopback. Requires serving
 // (Server tab → Start serving) so this node has a handler for its own ID.
-document.querySelector<HTMLButtonElement>("#files-use-self-btn")!.addEventListener(
-  "click",
-  () => {
-    filesHostInput.value = node.publicKey.toString();
-    setStatus(
-      filesStatus,
-      serveAbort
-        ? "targeting this node (self-request loopback)"
-        : "targeting this node — start serving first (Server tab)",
-      serveAbort ? "ok" : "error",
-    );
-  },
-);
+document.querySelector<HTMLButtonElement>("#files-use-self-btn")!
+  .addEventListener(
+    "click",
+    () => {
+      filesHostInput.value = node.publicKey.toString();
+      setStatus(
+        filesStatus,
+        serveAbort
+          ? "targeting this node (self-request loopback)"
+          : "targeting this node — start serving first (Server tab)",
+        serveAbort ? "ok" : "error",
+      );
+    },
+  );
 
 document.querySelector<HTMLButtonElement>("#files-audio-btn")!.addEventListener(
   "click",
