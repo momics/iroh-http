@@ -225,23 +225,20 @@ async fn self_fetch(
     };
 
     let cancel_notify = fetch_token.and_then(|t| endpoint.handles().get_fetch_cancel_notify(t));
-    let resp: hyper::Response<Body> = match cancel_notify {
+    let result: Result<hyper::Response<Body>, CoreError> = match cancel_notify {
         Some(notify) => tokio::select! {
-            _ = notify.notified() => {
-                if let Some(t) = fetch_token {
-                    endpoint.handles().remove_fetch_token(t);
-                }
-                return Err(CoreError::cancelled());
-            }
-            r = timed => r?,
+            _ = notify.notified() => Err(CoreError::cancelled()),
+            r = timed => r,
         },
-        None => timed.await?,
+        None => timed.await,
     };
 
-    // Always clean up the cancellation token, even on the early-return paths.
+    // Remove the cancel token on every exit — success, timeout, or cancel —
+    // before propagating, so a timed-out self-fetch cannot leak a handle.
     if let Some(t) = fetch_token {
         endpoint.handles().remove_fetch_token(t);
     }
+    let resp = result?;
 
     package_response(endpoint, resp, remote_str, path, max_response_body_bytes).await
 }

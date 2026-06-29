@@ -142,6 +142,51 @@ async fn self_fetch_without_server_errors_clearly() {
     );
 }
 
+/// A self-request that times out must release its fetch cancellation token
+/// before propagating the error — a leak would accumulate handles on every
+/// timed-out request. Regression guard for the `?`-before-cleanup bug.
+#[tokio::test]
+async fn self_fetch_timeout_releases_token() {
+    let ep = single_node().await;
+    let own_id = ep.node_id().to_string();
+    // Handler that accepts the request but never responds → forces timeout.
+    let server_ep = ep.clone();
+    ffi_serve(
+        ep.clone(),
+        ServeOptions::default(),
+        move |_payload: RequestPayload| {
+            let _ = &server_ep; // hold handler open; never call respond()
+        },
+    );
+
+    for _ in 0..20 {
+        let token = ep.handles().alloc_fetch_token().unwrap();
+        let err = fetch(
+            &ep,
+            &own_id,
+            "/slow",
+            "GET",
+            &[],
+            None,
+            Some(token),
+            None,
+            Some(std::time::Duration::from_millis(50)),
+            true,
+            None,
+        )
+        .await
+        .expect_err("self-fetch should time out");
+        assert!(
+            err.to_string().to_lowercase().contains("timed out"),
+            "expected timeout error, got: {err}"
+        );
+        assert!(
+            ep.handles().get_fetch_cancel_notify(token).is_none(),
+            "fetch token leaked after timeout"
+        );
+    }
+}
+
 /// After the server stops, a self-request again fails cleanly rather than
 /// dispatching to a torn-down handler.
 #[tokio::test]
