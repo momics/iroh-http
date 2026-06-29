@@ -178,6 +178,11 @@ void (async () => {
 
 // ── HTTP server ────────────────────────────────────────────────────────────────
 
+// Bundled demo media this node hosts over httpi:// (see the serve handler).
+// Mirrors the files the Deno `host` task serves, so the Stream-files tab works
+// against this node — including against its own ID (self-request loopback).
+const HOSTED_FILES = new Set(["/audio.wav", "/image.png"]);
+
 const serveBtn = document.querySelector<HTMLButtonElement>("#serve-btn")!;
 const serverStatus = document.querySelector<HTMLElement>("#server-status")!;
 const serverLog = document.querySelector<HTMLElement>("#server-log")!;
@@ -240,6 +245,32 @@ serveBtn.addEventListener("click", () => {
     const path = new URL(req.url).pathname;
     const peer = req.headers.get("peer-id") ?? "?";
     appendLog(serverLog, `${req.method} ${path} ← ${peer.slice(0, 20)}…`);
+
+    // Host the bundled demo media (audio.wav, image.png) so this node can serve
+    // files to peers — and to itself. Pointing the Stream-files tab at this
+    // node's own ID exercises the in-process self-request loopback (a node
+    // fetching its own ID, routed straight into this handler). The webview
+    // fetches the bundled asset from the app origin and forwards it, honoring
+    // Range so <audio> can seek.
+    if (HOSTED_FILES.has(path)) {
+      const range = req.headers.get("range");
+      const asset = await fetch(path, range ? { headers: { range } } : {});
+      const headers = new Headers();
+      for (
+        const h of [
+          "content-type",
+          "content-length",
+          "content-range",
+          "accept-ranges",
+          "etag",
+          "last-modified",
+        ]
+      ) {
+        const v = asset.headers.get(h);
+        if (v) headers.set(h, v);
+      }
+      return new Response(asset.body, { status: asset.status, headers });
+    }
 
     return new Response(`Hello from iroh-http! (${req.method} ${path})`, {
       headers: { "content-type": "text/plain" },
@@ -310,6 +341,23 @@ function filesUrl(rawPath: string, fallback: string): string | null {
   const p = rawPath.trim() || fallback;
   return `httpi://${host}${p.startsWith("/") ? p : `/${p}`}`;
 }
+
+// Fill the host field with this node's own ID so the Stream-files tab targets
+// the local server — exercising the self-request loopback. Requires serving
+// (Server tab → Start serving) so this node has a handler for its own ID.
+document.querySelector<HTMLButtonElement>("#files-use-self-btn")!.addEventListener(
+  "click",
+  () => {
+    filesHostInput.value = node.publicKey.toString();
+    setStatus(
+      filesStatus,
+      serveAbort
+        ? "targeting this node (self-request loopback)"
+        : "targeting this node — start serving first (Server tab)",
+      serveAbort ? "ok" : "error",
+    );
+  },
+);
 
 document.querySelector<HTMLButtonElement>("#files-audio-btn")!.addEventListener(
   "click",
