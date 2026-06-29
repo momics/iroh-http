@@ -44,7 +44,6 @@ export function selfFetchTests({ createNode, test, assert, assertEqual }) {
     const node = await createNode({ disableNetworking: true });
     try {
       const { id } = await node.addr();
-      let threw = false;
       try {
         const res = await node.fetch(`httpi://${id}/loopback`);
         // Some adapters surface transport errors as a 0/5xx status rather than
@@ -55,14 +54,12 @@ export function selfFetchTests({ createNode, test, assert, assertEqual }) {
         );
         await res.body?.cancel();
       } catch (err) {
-        threw = true;
         assert(err instanceof Error, "expected an Error instance");
         assert(
           /self-request|no active server|server/i.test(err.message),
           `error should explain the missing server, got: ${err.message}`,
         );
       }
-      assert(threw || true, "handled error path");
     } finally {
       await node.close();
     }
