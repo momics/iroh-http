@@ -15,6 +15,10 @@ use iroh_http_core::{
     fetch, ffi_serve, respond, ErrorCode, IrohEndpoint, NetworkingOptions, NodeOptions,
 };
 use iroh_http_core::{RequestPayload, ServeOptions};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 
 /// Bind a single loopback-only endpoint (relay disabled).
 async fn single_node() -> IrohEndpoint {
@@ -286,5 +290,37 @@ async fn self_fetch_after_stop_errors_clearly() {
     assert!(
         msg.contains("self-request") || msg.contains("no active server"),
         "error should explain the missing server, got: {msg}"
+    );
+}
+
+/// Regression: #282 — the endpoint self-request slot must not strongly retain
+/// the locally-running FFI service. Draining the returned serve handle without
+/// going through endpoint teardown does not explicitly clear the slot, so this
+/// proves the slot itself cannot keep the dispatcher callback alive.
+#[tokio::test]
+async fn local_service_slot_holds_weak_no_leak() {
+    struct DropSentinel(Arc<AtomicBool>);
+
+    impl Drop for DropSentinel {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    let ep = single_node().await;
+    let dropped = Arc::new(AtomicBool::new(false));
+    let sentinel = DropSentinel(dropped.clone());
+
+    let handle = ffi_serve(ep.clone(), ServeOptions::default(), move |_payload| {
+        let _keep_alive = &sentinel;
+    });
+
+    drop(ep);
+    handle.drain().await;
+    tokio::task::yield_now().await;
+
+    assert!(
+        dropped.load(Ordering::SeqCst),
+        "local_service retained the dispatcher callback after the serve task exited"
     );
 }

@@ -104,7 +104,7 @@ impl Drop for ReqHeadGuard {
 /// JS `on_request` callback, and rendezvous on the response head sent via
 /// [`respond`]. Shared across every accepted connection and request via
 /// `Arc`.
-struct FfiDispatcher {
+pub(crate) struct FfiDispatcher {
     on_request: Arc<dyn Fn(RequestPayload) + Send + Sync>,
     endpoint: IrohEndpoint,
     own_node_id: Arc<String>,
@@ -115,6 +115,22 @@ struct FfiDispatcher {
 #[derive(Clone)]
 pub(crate) struct IrohHttpService {
     dispatcher: Arc<FfiDispatcher>,
+}
+
+impl IrohHttpService {
+    /// Downgrade to a Weak handle for the self-request slot (#282): the
+    /// endpoint stores only a Weak so it cannot form a strong reference
+    /// cycle (endpoint → service → dispatcher → endpoint).
+    pub(crate) fn downgrade(&self) -> std::sync::Weak<FfiDispatcher> {
+        std::sync::Arc::downgrade(&self.dispatcher)
+    }
+
+    /// Reconstruct a live service from a stored Weak, or None if the
+    /// serve task has been torn down (the "no active server" path).
+    pub(crate) fn upgrade(weak: &std::sync::Weak<FfiDispatcher>) -> Option<Self> {
+        weak.upgrade()
+            .map(|dispatcher| IrohHttpService { dispatcher })
+    }
 }
 
 /// ADR-014 D2 / #175: service is concrete — not generic over `B`.
@@ -362,7 +378,7 @@ where
     // Register the service for in-process self-requests (ADR-015): a later
     // `fetch()` to this node's own id dispatches to this exact service instead
     // of dialing over QUIC (which iroh forbids). Cleared on serve stop / close.
-    endpoint.set_local_service(svc.clone());
+    endpoint.set_local_service(&svc);
 
     serve_with_events(endpoint, options, svc, on_connection_event)
 }
