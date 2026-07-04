@@ -70,9 +70,39 @@ export class SecretKey {
     return this.#bytes.slice();
   }
 
-  /** Base32 representation of the secret key bytes. */
+  /**
+   * Redacted string representation.
+   *
+   * Returns a fixed marker — never the raw key material — so accidental
+   * stringification (via `console.log`, template interpolation, error
+   * messages, or UI) can never leak the identity. To export the actual
+   * secret, call the explicitly-named {@link toBase32Secret} or
+   * {@link toStringUnsafe}.
+   */
   toString(): string {
+    return "SecretKey(********)";
+  }
+
+  /**
+   * Export the raw secret key as a base32 string.
+   *
+   * ⚠️ Security: this returns the full, restorable Ed25519 private key. Anyone
+   * with this string can impersonate this identity. Only call it when you
+   * deliberately intend to export or persist the secret, and never log it.
+   */
+  toBase32Secret(): string {
     return base32Encode(this.#bytes);
+  }
+
+  /**
+   * Alias for {@link toBase32Secret}. Named to make deliberate secret export
+   * unmistakable at the call site.
+   *
+   * ⚠️ Security: returns the raw, restorable base32 secret. See
+   * {@link toBase32Secret}.
+   */
+  toStringUnsafe(): string {
+    return this.toBase32Secret();
   }
 
   /**
