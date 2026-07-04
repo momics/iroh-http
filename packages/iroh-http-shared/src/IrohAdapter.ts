@@ -241,4 +241,12 @@ export abstract class IrohAdapter {
       new Error("nextPathChange() not supported by this adapter"),
     );
   }
+
+  /** Stop an active path-change subscription for a specific peer. */
+  unsubscribePathChanges(
+    _endpointHandle: number,
+    _nodeId: string,
+  ): Promise<void> {
+    return Promise.resolve();
+  }
 }

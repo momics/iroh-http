@@ -41,6 +41,7 @@ import {
   sessionSendDatagram as napiSessionSendDatagram,
   startTransportEvents as napiStartTransportEvents,
   stopServe as napiStopServe,
+  unsubscribePathChanges as napiUnsubscribePathChanges,
   waitEndpointClosed as napiWaitEndpointClosed,
   waitServeStop as napiWaitServeStop,
 } from "./index.js";
@@ -348,6 +349,8 @@ class NodeAdapter extends IrohAdapter {
       poolSize: Number(s.poolSize),
       activeConnections: Number(s.activeConnections),
       activeRequests: Number(s.activeRequests),
+      activePathSubscriptions: Number(s.activePathSubscriptions),
+      activePathWatchers: Number(s.activePathWatchers),
     };
   }
 
@@ -402,6 +405,14 @@ class NodeAdapter extends IrohAdapter {
     const json = await napiNextPathChange(endpointHandle, nodeId);
     if (json === null || json === undefined) return null;
     return JSON.parse(json) as PathInfo;
+  }
+
+  override unsubscribePathChanges(
+    endpointHandle: number,
+    nodeId: string,
+  ): Promise<void> {
+    napiUnsubscribePathChanges(endpointHandle, nodeId);
+    return Promise.resolve();
   }
 }
 

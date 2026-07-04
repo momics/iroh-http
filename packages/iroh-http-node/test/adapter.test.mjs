@@ -11,6 +11,17 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createNode, PublicKey, SecretKey } from "../lib.js";
 
+async function waitFor(predicate, message, timeoutMs = 1_000) {
+  const deadline = Date.now() + timeoutMs;
+  let last;
+  while (Date.now() < deadline) {
+    last = await predicate();
+    if (last) return last;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  assert.fail(`${message}; last value: ${String(last)}`);
+}
+
 test("module exports createNode, PublicKey, SecretKey", () => {
   assert.equal(typeof createNode, "function", "createNode must be a function");
   assert.ok(PublicKey != null, "PublicKey must be exported");
@@ -76,5 +87,53 @@ test("fetch numeric validation rejects invalid values instead of defaulting", as
   } finally {
     await node.close();
     await handle.finished.catch(() => {});
+  }
+});
+
+test("pathChanges abort releases native subscriptions (regression #279)", async () => {
+  const node = await createNode({ disableNetworking: true });
+  const baselineStats = await node.stats();
+  const baselineSubscriptions = baselineStats.activePathSubscriptions;
+  const baselineWatchers = baselineStats.activePathWatchers;
+  const controllers = [];
+  const pending = [];
+
+  try {
+    for (const cycles of [1, 100]) {
+      for (let i = 0; i < cycles; i++) {
+        const bytes = new Uint8Array(32);
+        bytes[30] = cycles;
+        bytes[31] = i;
+        const ac = new AbortController();
+        controllers.push(ac);
+        const iterator = node.pathChanges(PublicKey.fromBytes(bytes), {
+          signal: ac.signal,
+        })[Symbol.asyncIterator]();
+        pending.push(iterator.next().catch(() => null));
+      }
+
+      await waitFor(
+        async () =>
+          (await node.stats()).activePathSubscriptions >=
+            baselineSubscriptions + cycles,
+        `expected ${cycles} active path-change subscriptions`,
+      );
+
+      for (const ac of controllers.splice(0)) ac.abort();
+
+      await waitFor(
+        async () => {
+          const stats = await node.stats();
+          return stats.activePathSubscriptions <= baselineSubscriptions &&
+            stats.activePathWatchers <= baselineWatchers;
+        },
+        `path-change subscriptions should return to baseline after aborting ${cycles} iterators`,
+        1_500,
+      );
+    }
+  } finally {
+    for (const ac of controllers) ac.abort();
+    await node.close();
+    await Promise.allSettled(pending);
   }
 });

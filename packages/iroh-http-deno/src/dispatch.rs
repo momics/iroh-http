@@ -40,6 +40,20 @@ use std::sync::{Mutex, OnceLock};
 #[cfg(feature = "discovery")]
 use tokio::sync::Mutex as TokioMutex;
 
+struct PathSub {
+    rx: tokio::sync::Mutex<
+        tokio::sync::mpsc::UnboundedReceiver<iroh_http_core::endpoint::PathInfo>,
+    >,
+    notify: tokio::sync::Notify,
+}
+
+type PathRxMap = dashmap::DashMap<(u64, String), std::sync::Arc<PathSub>>;
+
+fn path_change_rxs() -> &'static PathRxMap {
+    static PATH_CHANGE_RXS: std::sync::OnceLock<PathRxMap> = std::sync::OnceLock::new();
+    PATH_CHANGE_RXS.get_or_init(dashmap::DashMap::new)
+}
+
 // ── Endpoint helpers ─────────────────────────────────────────────────────────
 
 fn get_endpoint(handle: u64) -> Option<IrohEndpoint> {
@@ -186,6 +200,7 @@ pub async fn dispatch(method: &str, payload: &[u8]) -> Value {
         async "startTransportEvents"    => start_transport_events_dispatch,
         async "nextTransportEvent"      => next_transport_event_dispatch,
         async "nextPathChange"          => next_path_change_dispatch,
+        sync  "unsubscribePathChanges"  => unsubscribe_path_changes_dispatch,
     )
 }
 
@@ -1508,13 +1523,7 @@ struct NextPathChangePayload {
 }
 
 async fn next_path_change_dispatch(p: Value) -> Value {
-    use std::sync::Arc;
-    type PathRx = tokio::sync::Mutex<
-        tokio::sync::mpsc::UnboundedReceiver<iroh_http_core::endpoint::PathInfo>,
-    >;
-    type PathRxMap = dashmap::DashMap<(u64, String), Arc<PathRx>>;
-    static PATH_CHANGE_RXS: std::sync::OnceLock<PathRxMap> = std::sync::OnceLock::new();
-    let rxs = PATH_CHANGE_RXS.get_or_init(dashmap::DashMap::new);
+    let rxs = path_change_rxs();
 
     let payload: NextPathChangePayload = match serde_json::from_value(p) {
         Ok(v) => v,
@@ -1538,15 +1547,23 @@ async fn next_path_change_dispatch(p: Value) -> Value {
         .entry(key.clone())
         .or_insert_with(|| {
             let rx = ep.subscribe_path_changes(&payload.node_id);
-            Arc::new(tokio::sync::Mutex::new(rx))
+            std::sync::Arc::new(PathSub {
+                rx: tokio::sync::Mutex::new(rx),
+                notify: tokio::sync::Notify::new(),
+            })
         })
         .clone();
 
-    let mut rx = rx_arc.lock().await;
-    match rx.recv().await {
+    let mut rx = rx_arc.rx.lock().await;
+    match tokio::select! {
+        path = rx.recv() => path,
+        () = rx_arc.notify.notified() => None,
+    } {
         None => {
             drop(rx);
-            rxs.remove(&key);
+            rxs.remove_if(&key, |_, existing| {
+                std::sync::Arc::ptr_eq(existing, &rx_arc)
+            });
             ok(serde_json::Value::Null)
         }
         Some(path) => match serde_json::to_value(&path) {
@@ -1554,4 +1571,31 @@ async fn next_path_change_dispatch(p: Value) -> Value {
             Err(e) => err(e),
         },
     }
+}
+
+fn unsubscribe_path_changes_dispatch(p: Value) -> Value {
+    let payload: NextPathChangePayload = match serde_json::from_value(p) {
+        Ok(v) => v,
+        Err(e) => return err(e),
+    };
+    let ep = match get_endpoint(payload.endpoint_handle) {
+        Some(ep) => ep,
+        None => {
+            return err_code(
+                "INVALID_HANDLE",
+                format!(
+                    "node closed or not found (handle {})",
+                    payload.endpoint_handle
+                ),
+            )
+        }
+    };
+
+    if let Some((_, sub)) =
+        path_change_rxs().remove(&(payload.endpoint_handle, payload.node_id.clone()))
+    {
+        sub.notify.notify_waiters();
+    }
+    ep.unsubscribe_path_changes(&payload.node_id);
+    ok(serde_json::Value::Null)
 }

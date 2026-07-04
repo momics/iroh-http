@@ -504,20 +504,42 @@ export class IrohNode extends EventTarget {
 
     return {
       [Symbol.asyncIterator]() {
+        let stopped = false;
+        let abortListener: (() => void) | undefined;
+        const cleanup = async (): Promise<void> => {
+          if (stopped) return;
+          stopped = true;
+          if (abortListener) {
+            signal?.removeEventListener("abort", abortListener);
+            abortListener = undefined;
+          }
+          try {
+            await adapter.unsubscribePathChanges(endpointHandle, nodeId);
+          } catch {
+            // Endpoint shutdown may race iterator cleanup; the subscription is
+            // already gone in that case.
+          }
+        };
+        abortListener = () => {
+          void cleanup();
+        };
+        signal?.addEventListener("abort", abortListener, { once: true });
+
         return {
           async next(): Promise<IteratorResult<PathInfo>> {
-            if (signal?.aborted) {
+            if (stopped || signal?.aborted) {
+              await cleanup();
               return { done: true, value: undefined };
             }
             const path = await adapter.nextPathChange(endpointHandle, nodeId);
-            if (path === null) {
+            if (path === null || stopped || signal?.aborted) {
+              await cleanup();
               return { done: true, value: undefined };
             }
             return { done: false, value: path };
           },
-          return(): Promise<IteratorResult<PathInfo>> {
-            // break / return from for-await — nothing to clean up on JS side;
-            // Rust watcher exits when the channel sender is dropped.
+          async return(): Promise<IteratorResult<PathInfo>> {
+            await cleanup();
             return Promise.resolve({ done: true, value: undefined });
           },
         };

@@ -359,6 +359,7 @@ const METHOD_BUFS: Record<string, Uint8Array> = Object.fromEntries(
     "startTransportEvents",
     "nextTransportEvent",
     "nextPathChange",
+    "unsubscribePathChanges",
     "sessionAccept",
   ].map((m) => [m, enc.encode(m)]),
 );
@@ -1561,6 +1562,16 @@ export class DenoAdapter extends IrohAdapter {
     nodeId: string,
   ): Promise<PathInfo | null> {
     return call<PathInfo | null>("nextPathChange", {
+      endpointHandle: this.#eh,
+      nodeId,
+    });
+  }
+
+  override async unsubscribePathChanges(
+    _endpointHandle: number,
+    nodeId: string,
+  ): Promise<void> {
+    await call<null>("unsubscribePathChanges", {
       endpointHandle: this.#eh,
       nodeId,
     });

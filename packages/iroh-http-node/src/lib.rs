@@ -69,6 +69,20 @@ use iroh_http_adapter::{
     MAX_BODY_BYTES as ADAPTER_MAX_BODY_BYTES, MAX_TIMEOUT_MS as ADAPTER_MAX_TIMEOUT_MS,
 };
 
+struct PathSub {
+    rx: tokio::sync::Mutex<
+        tokio::sync::mpsc::UnboundedReceiver<iroh_http_core::endpoint::PathInfo>,
+    >,
+    notify: tokio::sync::Notify,
+}
+
+type PathRxMap = dashmap::DashMap<(u32, String), Arc<PathSub>>;
+
+fn path_change_rxs() -> &'static PathRxMap {
+    static PATH_CHANGE_RXS: std::sync::OnceLock<PathRxMap> = std::sync::OnceLock::new();
+    PATH_CHANGE_RXS.get_or_init(dashmap::DashMap::new)
+}
+
 // ── Endpoint helpers ──────────────────────────────────────────────────────────
 
 const MAX_NODE_ID_LEN: usize = 128;
@@ -779,6 +793,8 @@ pub struct JsEndpointStats {
     pub pool_size: i64,
     pub active_connections: i64,
     pub active_requests: i64,
+    pub active_path_subscriptions: i64,
+    pub active_path_watchers: i64,
 }
 
 /// Snapshot of current endpoint statistics (point-in-time).
@@ -794,6 +810,8 @@ pub fn endpoint_stats(endpoint_handle: u32) -> napi::Result<JsEndpointStats> {
         pool_size: s.pool_size as i64,
         active_connections: s.active_connections as i64,
         active_requests: s.active_requests as i64,
+        active_path_subscriptions: s.active_path_subscriptions as i64,
+        active_path_watchers: s.active_path_watchers as i64,
     })
 }
 
@@ -867,12 +885,7 @@ pub async fn next_path_change(
     endpoint_handle: u32,
     node_id: String,
 ) -> napi::Result<Option<String>> {
-    type PathRx = tokio::sync::Mutex<
-        tokio::sync::mpsc::UnboundedReceiver<iroh_http_core::endpoint::PathInfo>,
-    >;
-    type PathRxMap = dashmap::DashMap<(u32, String), Arc<PathRx>>;
-    static PATH_CHANGE_RXS: std::sync::OnceLock<PathRxMap> = std::sync::OnceLock::new();
-    let rxs = PATH_CHANGE_RXS.get_or_init(dashmap::DashMap::new);
+    let rxs = path_change_rxs();
 
     validate_node_id_input(&node_id).map_err(ffi_invalid_arg)?;
     let ep = get_endpoint(endpoint_handle)?;
@@ -883,15 +896,21 @@ pub async fn next_path_change(
         .entry(key.clone())
         .or_insert_with(|| {
             let rx = ep.subscribe_path_changes(&node_id);
-            Arc::new(tokio::sync::Mutex::new(rx))
+            Arc::new(PathSub {
+                rx: tokio::sync::Mutex::new(rx),
+                notify: tokio::sync::Notify::new(),
+            })
         })
         .clone();
 
-    let mut rx = rx_arc.lock().await;
-    match rx.recv().await {
+    let mut rx = rx_arc.rx.lock().await;
+    match tokio::select! {
+        path = rx.recv() => path,
+        () = rx_arc.notify.notified() => None,
+    } {
         None => {
             drop(rx);
-            rxs.remove(&key);
+            rxs.remove_if(&key, |_, existing| Arc::ptr_eq(existing, &rx_arc));
             Ok(None)
         }
         Some(path) => {
@@ -900,6 +919,18 @@ pub async fn next_path_change(
             Ok(Some(json))
         }
     }
+}
+
+/// Unsubscribe from path changes for a specific peer.
+#[napi]
+pub fn unsubscribe_path_changes(endpoint_handle: u32, node_id: String) -> napi::Result<()> {
+    validate_node_id_input(&node_id).map_err(ffi_invalid_arg)?;
+    let ep = get_endpoint(endpoint_handle)?;
+    if let Some((_, sub)) = path_change_rxs().remove(&(endpoint_handle, node_id.clone())) {
+        sub.notify.notify_waiters();
+    }
+    ep.unsubscribe_path_changes(&node_id);
+    Ok(())
 }
 
 // ── Body streaming ────────────────────────────────────────────────────────────

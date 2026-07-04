@@ -104,6 +104,8 @@ export interface JsEndpointStats {
   poolSize: number
   activeConnections: number
   activeRequests: number
+  activePathSubscriptions: number
+  activePathWatchers: number
 }
 
 /**
@@ -421,6 +423,9 @@ export declare function startTransportEvents(endpointHandle: number, handler: ((
  * is a no-op — the serve loop is already stopped.
  */
 export declare function stopServe(endpointHandle: number): void
+
+/** Unsubscribe from path changes for a specific peer. */
+export declare function unsubscribePathChanges(endpointHandle: number, nodeId: string): void
 
 /**
  * Wait until this endpoint has been fully closed — either because `closeEndpoint()`
