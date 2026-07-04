@@ -63,16 +63,17 @@ use slab::Slab;
 #[cfg(feature = "discovery")]
 use tokio::sync::Mutex as TokioMutex;
 
-use iroh_http_adapter::{core_error_to_json, format_error_json};
+use iroh_http_adapter::{
+    core_error_to_json, format_error_json, safe_f64_to_u64 as adapter_safe_f64_to_u64,
+    safe_f64_to_usize as adapter_safe_f64_to_usize, validate_header_rows, AdapterInputError,
+    MAX_BODY_BYTES as ADAPTER_MAX_BODY_BYTES, MAX_TIMEOUT_MS as ADAPTER_MAX_TIMEOUT_MS,
+};
 
 // ── Endpoint helpers ──────────────────────────────────────────────────────────
 
 const MAX_NODE_ID_LEN: usize = 128;
 const MAX_URL_LEN: usize = 8_192;
 const MAX_METHOD_LEN: usize = 32;
-const MAX_HEADER_COUNT: usize = 100;
-const MAX_HEADER_NAME_LEN: usize = 256;
-const MAX_HEADER_VALUE_LEN: usize = 8_192;
 const MAX_DIRECT_ADDRS: usize = 32;
 const MAX_DIRECT_ADDR_LEN: usize = 256;
 #[cfg(feature = "discovery")]
@@ -138,6 +139,10 @@ fn ffi_invalid_arg(err: FfiError) -> napi::Error {
         Status::InvalidArg,
         format_error_json(err.code(), err.message()),
     )
+}
+
+fn ffi_adapter_invalid_arg(err: AdapterInputError) -> napi::Error {
+    napi::Error::new(Status::InvalidArg, err.to_json())
 }
 
 #[cfg(feature = "discovery")]
@@ -217,33 +222,6 @@ fn validate_direct_addrs_input(
         }
     }
     Ok(())
-}
-
-fn validate_header_rows(headers: Vec<Vec<String>>) -> napi::Result<Vec<(String, String)>> {
-    if headers.len() > MAX_HEADER_COUNT {
-        return Err(ffi_invalid_arg(FfiError::InputTooLarge {
-            field: "headers",
-            max: MAX_HEADER_COUNT,
-            got: headers.len(),
-        }));
-    }
-    let mut pairs = Vec::with_capacity(headers.len());
-    for pair in headers {
-        if pair.len() != 2 {
-            return Err(ffi_invalid_arg(FfiError::InvalidArgument {
-                field: "headers",
-                reason: "each header must be [name, value]".to_string(),
-            }));
-        }
-        let name = &pair[0];
-        let value = &pair[1];
-        validate_bounded_string("headerName", name, MAX_HEADER_NAME_LEN)
-            .map_err(ffi_invalid_arg)?;
-        validate_bounded_string("headerValue", value, MAX_HEADER_VALUE_LEN)
-            .map_err(ffi_invalid_arg)?;
-        pairs.push((name.clone(), value.clone()));
-    }
-    Ok(pairs)
 }
 
 // ── Local handle indirection ──────────────────────────────────────────────────
@@ -1074,7 +1052,7 @@ pub async fn raw_fetch(
     validate_method_input(&method).map_err(ffi_invalid_arg)?;
     validate_direct_addrs_input(&direct_addrs).map_err(ffi_invalid_arg)?;
 
-    let pairs = validate_header_rows(headers)?;
+    let pairs = validate_header_rows(headers).map_err(ffi_adapter_invalid_arg)?;
 
     let req_body_reader = req_body_handle
         .map(get_handle)
@@ -1084,10 +1062,14 @@ pub async fn raw_fetch(
     let addrs =
         parse_direct_addrs(&direct_addrs).map_err(|e| napi::Error::new(Status::InvalidArg, e))?;
     let timeout = timeout_ms
-        .and_then(|ms| safe_f64_to_u64(ms, "timeoutMs", MAX_TIMEOUT_MS).ok())
+        .map(|ms| adapter_safe_f64_to_u64(ms, "timeoutMs", ADAPTER_MAX_TIMEOUT_MS))
+        .transpose()
+        .map_err(ffi_adapter_invalid_arg)?
         .map(std::time::Duration::from_millis);
     let max_resp = max_response_body_bytes
-        .and_then(|b| safe_f64_to_usize(b, "maxResponseBodyBytes", MAX_BODY_BYTES).ok());
+        .map(|b| adapter_safe_f64_to_usize(b, "maxResponseBodyBytes", ADAPTER_MAX_BODY_BYTES))
+        .transpose()
+        .map_err(ffi_adapter_invalid_arg)?;
     let res = iroh_http_core::fetch(
         &ep,
         &node_id,
@@ -1130,7 +1112,7 @@ pub fn raw_respond(
     headers: Vec<Vec<String>>,
 ) -> napi::Result<()> {
     let ep = get_endpoint(endpoint_handle)?;
-    let header_pairs = validate_header_rows(headers)?;
+    let header_pairs = validate_header_rows(headers).map_err(ffi_adapter_invalid_arg)?;
     respond(
         ep.handles(),
         get_handle(req_handle)?,

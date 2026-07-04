@@ -54,7 +54,10 @@ fn insert_endpoint(ep: IrohEndpoint) -> u64 {
     registry::insert_endpoint(ep)
 }
 
-use iroh_http_adapter::{core_error_to_json, format_error_json};
+use iroh_http_adapter::{
+    core_error_to_json, format_error_json, safe_f64_to_u64, safe_f64_to_usize,
+    validate_header_rows, AdapterInputError, MAX_BODY_BYTES, MAX_TIMEOUT_MS,
+};
 
 // ── Helper ────────────────────────────────────────────────────────────────────
 
@@ -72,6 +75,10 @@ fn err_code(code: &str, s: impl std::fmt::Display) -> Value {
 
 fn err_core(e: iroh_http_core::CoreError) -> Value {
     json!({ "err": core_error_to_json(&e) })
+}
+
+fn err_adapter(e: AdapterInputError) -> Value {
+    err_code(e.code(), e.message())
 }
 
 /// Extract and look up the endpoint from a JSON payload's `endpointHandle`.
@@ -549,9 +556,11 @@ struct RawFetchPayload {
     req_body_handle: Option<u64>,
     fetch_token: Option<u64>,
     direct_addrs: Option<Vec<String>>,
-    timeout_ms: Option<u64>,
+    #[serde(alias = "timeout_ms")]
+    timeout_ms: Option<f64>,
     decompress: Option<bool>,
-    max_response_body_bytes: Option<u64>,
+    #[serde(alias = "max_response_body_bytes")]
+    max_response_body_bytes: Option<f64>,
 }
 
 async fn raw_fetch(p: Value) -> Value {
@@ -568,23 +577,33 @@ async fn raw_fetch(p: Value) -> Value {
             )
         }
     };
-    let pairs: Vec<(String, String)> = args
-        .headers
-        .into_iter()
-        .filter_map(|p| {
-            if p.len() == 2 {
-                Some((p[0].clone(), p[1].clone()))
-            } else {
-                None
-            }
-        })
-        .collect();
+    let pairs = match validate_header_rows(args.headers) {
+        Ok(pairs) => pairs,
+        Err(e) => return err_adapter(e),
+    };
     let reader = args
         .req_body_handle
         .and_then(|h| ep.handles().claim_pending_reader(h));
     let addrs = match parse_direct_addrs(&args.direct_addrs) {
         Ok(a) => a,
         Err(e) => return err(e),
+    };
+
+    let timeout = match args
+        .timeout_ms
+        .map(|ms| safe_f64_to_u64(ms, "timeoutMs", MAX_TIMEOUT_MS))
+        .transpose()
+    {
+        Ok(timeout) => timeout.map(std::time::Duration::from_millis),
+        Err(e) => return err_adapter(e),
+    };
+    let max_response_body_bytes = match args
+        .max_response_body_bytes
+        .map(|b| safe_f64_to_usize(b, "maxResponseBodyBytes", MAX_BODY_BYTES))
+        .transpose()
+    {
+        Ok(bytes) => bytes,
+        Err(e) => return err_adapter(e),
     };
 
     // #126: If the caller didn't supply a fetch token, allocate one
@@ -603,9 +622,9 @@ async fn raw_fetch(p: Value) -> Value {
         reader,
         fetch_token,
         addrs.as_deref(),
-        args.timeout_ms.map(std::time::Duration::from_millis),
+        timeout,
         args.decompress.unwrap_or(true),
-        args.max_response_body_bytes.map(|b| b as usize),
+        max_response_body_bytes,
     )
     .await
     {
@@ -875,17 +894,10 @@ fn respond_dispatch(p: Value) -> Value {
         Ok(v) => v,
         Err(e) => return err(e),
     };
-    let headers: Vec<(String, String)> = args
-        .headers
-        .into_iter()
-        .filter_map(|p| {
-            if p.len() == 2 {
-                Some((p[0].clone(), p[1].clone()))
-            } else {
-                None
-            }
-        })
-        .collect();
+    let headers = match validate_header_rows(args.headers) {
+        Ok(headers) => headers,
+        Err(e) => return err_adapter(e),
+    };
     match respond(ep.handles(), args.req_handle, args.status, headers) {
         Ok(()) => ok(json!({})),
         Err(e) => err_core(e),

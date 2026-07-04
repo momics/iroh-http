@@ -29,6 +29,8 @@ import { sessionTests } from "../suites/sessions.mjs";
 import { keyTests } from "../suites/keys.mjs";
 // @ts-ignore
 import { discoveryTests } from "../suites/discovery.mjs";
+// @ts-ignore
+import { adapterValidationTests } from "../suites/adapter-validation.mjs";
 
 // ── Config ──────────────────────────────────────────────────────────────────
 
@@ -37,7 +39,10 @@ const ciMode = params.get("ci") === "true";
 
 // ── Sequential test runner ──────────────────────────────────────────────────
 
-interface TestEntry { name: string; fn: () => Promise<void> }
+interface TestEntry {
+  name: string;
+  fn: () => Promise<void>;
+}
 const queue: TestEntry[] = [];
 let passed = 0;
 let failed = 0;
@@ -55,17 +60,27 @@ const ctx = {
     if (!v) throw new Error(msg ?? `assertion failed: ${v}`);
   },
   assertEqual: (a: unknown, b: unknown, msg?: string) => {
-    if (a !== b) throw new Error(msg ?? `expected ${JSON.stringify(b)}, got ${JSON.stringify(a)}`);
+    if (a !== b) {
+      throw new Error(
+        msg ?? `expected ${JSON.stringify(b)}, got ${JSON.stringify(a)}`,
+      );
+    }
   },
   assertNotEqual: (a: unknown, b: unknown, msg?: string) => {
-    if (a === b) throw new Error(msg ?? `expected values to differ, both are ${JSON.stringify(a)}`);
+    if (a === b) {
+      throw new Error(
+        msg ?? `expected values to differ, both are ${JSON.stringify(a)}`,
+      );
+    }
   },
   assertThrows: async (fn: () => Promise<unknown>) => {
     try {
       await fn();
       throw new Error("expected function to throw, but it did not");
     } catch (err) {
-      if ((err as Error).message === "expected function to throw, but it did not") throw err;
+      if (
+        (err as Error).message === "expected function to throw, but it did not"
+      ) throw err;
       return err;
     }
   },
@@ -73,7 +88,11 @@ const ctx = {
     try {
       return await promise;
     } catch (err) {
-      throw new Error(`expected promise to resolve, but it rejected: ${(err as Error).message}`);
+      throw new Error(
+        `expected promise to resolve, but it rejected: ${
+          (err as Error).message
+        }`,
+      );
     }
   },
 };
@@ -87,6 +106,7 @@ eventTests(ctx);
 sessionTests(ctx);
 keyTests(ctx);
 discoveryTests(ctx);
+adapterValidationTests(ctx);
 
 // ── Run ─────────────────────────────────────────────────────────────────────
 
@@ -114,12 +134,13 @@ async function run() {
 
   // Publish the result on `window` so an external WebDriver harness (see
   // tests/tauri-app) can observe the outcome without relying on process exit.
-  (globalThis as unknown as { __irohTestSummary?: unknown }).__irohTestSummary = {
-    passed,
-    failed,
-    total: queue.length,
-    failures,
-  };
+  (globalThis as unknown as { __irohTestSummary?: unknown }).__irohTestSummary =
+    {
+      passed,
+      failed,
+      total: queue.length,
+      failures,
+    };
 
   if (ciMode) {
     try {

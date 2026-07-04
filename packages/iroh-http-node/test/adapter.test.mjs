@@ -32,3 +32,49 @@ test("createNode via NAPI returns a node with expected API surface", async () =>
     await node.close();
   }
 });
+
+test("fetch numeric validation rejects invalid values instead of defaulting", async () => {
+  const node = await createNode({ disableNetworking: true });
+  const handle = node.serve(() => new Response("ok"));
+  const { id } = await node.addr();
+  const url = `httpi://${id}/validation`;
+  const maxTimeoutMs = 300_000;
+  const maxBodyBytes = 16 * 1024 * 1024;
+
+  try {
+    for (
+      const value of [
+        Number.NaN,
+        Number.POSITIVE_INFINITY,
+        -1,
+        1.5,
+        maxTimeoutMs + 1,
+      ]
+    ) {
+      await assert.rejects(
+        () => node.fetch(url, { requestTimeout: value }),
+        undefined,
+        `requestTimeout=${String(value)} must reject`,
+      );
+    }
+
+    for (
+      const value of [
+        Number.NaN,
+        Number.POSITIVE_INFINITY,
+        -1,
+        1.5,
+        maxBodyBytes + 1,
+      ]
+    ) {
+      await assert.rejects(
+        () => node.fetch(url, { maxResponseBodyBytes: value }),
+        undefined,
+        `maxResponseBodyBytes=${String(value)} must reject`,
+      );
+    }
+  } finally {
+    await node.close();
+    await handle.finished.catch(() => {});
+  }
+});

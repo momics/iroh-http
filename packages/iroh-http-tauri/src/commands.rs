@@ -13,7 +13,10 @@ use tauri::Manager;
 
 use crate::state;
 
-use iroh_http_adapter::{core_error_to_json, format_error_json};
+use iroh_http_adapter::{
+    core_error_to_json, format_error_json, safe_f64_to_u64, safe_f64_to_usize,
+    validate_header_rows, MAX_BODY_BYTES, MAX_TIMEOUT_MS,
+};
 
 // ── Endpoint ──────────────────────────────────────────────────────────────────
 
@@ -475,9 +478,9 @@ pub struct RawFetchArgs {
     pub req_body_handle: Option<u64>,
     pub fetch_token: Option<u64>,
     pub direct_addrs: Option<Vec<String>>,
-    pub timeout_ms: Option<u64>,
+    pub timeout_ms: Option<f64>,
     pub decompress: Option<bool>,
-    pub max_response_body_bytes: Option<u64>,
+    pub max_response_body_bytes: Option<f64>,
 }
 
 /// Response payload returned by `rawFetch`.
@@ -500,23 +503,24 @@ pub async fn fetch(args: RawFetchArgs) -> Result<FfiResponsePayload, String> {
         )
     })?;
 
-    let pairs: Vec<(String, String)> = args
-        .headers
-        .into_iter()
-        .filter_map(|p| {
-            if p.len() == 2 {
-                Some((p[0].clone(), p[1].clone()))
-            } else {
-                None
-            }
-        })
-        .collect();
+    let pairs = validate_header_rows(args.headers).map_err(|e| e.to_json())?;
 
     let req_body_reader = args
         .req_body_handle
         .and_then(|h| ep.handles().claim_pending_reader(h));
 
     let addrs = parse_direct_addrs(&args.direct_addrs)?;
+    let timeout = args
+        .timeout_ms
+        .map(|ms| safe_f64_to_u64(ms, "timeoutMs", MAX_TIMEOUT_MS))
+        .transpose()
+        .map_err(|e| e.to_json())?
+        .map(std::time::Duration::from_millis);
+    let max_response_body_bytes = args
+        .max_response_body_bytes
+        .map(|b| safe_f64_to_usize(b, "maxResponseBodyBytes", MAX_BODY_BYTES))
+        .transpose()
+        .map_err(|e| e.to_json())?;
     let res = iroh_http_core::fetch(
         &ep,
         &args.node_id,
@@ -526,9 +530,9 @@ pub async fn fetch(args: RawFetchArgs) -> Result<FfiResponsePayload, String> {
         req_body_reader,
         args.fetch_token,
         addrs.as_deref(),
-        args.timeout_ms.map(std::time::Duration::from_millis),
+        timeout,
         args.decompress.unwrap_or(true),
-        args.max_response_body_bytes.map(|b| b as usize),
+        max_response_body_bytes,
     )
     .await
     .map_err(|e| core_error_to_json(&e))?;
@@ -722,17 +726,7 @@ pub fn respond_to_request(args: RespondArgs) -> Result<(), String> {
             format!("invalid endpoint handle: {}", args.endpoint_handle),
         )
     })?;
-    let headers: Vec<(String, String)> = args
-        .headers
-        .into_iter()
-        .filter_map(|p| {
-            if p.len() == 2 {
-                Some((p[0].clone(), p[1].clone()))
-            } else {
-                None
-            }
-        })
-        .collect();
+    let headers = validate_header_rows(args.headers).map_err(|e| e.to_json())?;
     respond(ep.handles(), args.req_handle, args.status, headers).map_err(|e| core_error_to_json(&e))
 }
 // ── Session ───────────────────────────────────────────────────────────────────
