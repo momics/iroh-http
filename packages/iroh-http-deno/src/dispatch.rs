@@ -628,6 +628,23 @@ async fn raw_fetch(p: Value) -> Value {
         Ok(v) => v,
         Err(e) => return err(e),
     };
+    raw_fetch_impl(args).await
+}
+
+/// Warm fetch hot path (#286): parse the original request slice straight into
+/// `RawFetchPayload`, skipping the `Value` round trip the generic dispatch
+/// table performs (`from_slice` → `Value` → `to_vec` → `from_slice` → `Value`
+/// → `from_value`). Callers get the same `err` envelope on malformed JSON as
+/// `dispatch` would return.
+pub async fn raw_fetch_from_slice(payload: &[u8]) -> Value {
+    let args: RawFetchPayload = match serde_json::from_slice(payload) {
+        Ok(v) => v,
+        Err(e) => return err(format!("invalid JSON payload: {e}")),
+    };
+    raw_fetch_impl(args).await
+}
+
+async fn raw_fetch_impl(args: RawFetchPayload) -> Value {
     let ep = match get_endpoint(args.endpoint_handle) {
         Some(e) => e,
         None => {

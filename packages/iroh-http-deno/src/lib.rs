@@ -693,19 +693,19 @@ pub unsafe extern "C" fn iroh_http_start_fetch(request_ptr: *const u8, request_l
         None => return 0,
     };
 
-    // Parse the request payload eagerly on the JS thread (fast: ~5µs).
-    let p: serde_json::Value = match serde_json::from_slice(payload) {
-        Ok(v) => v,
-        Err(_) => return 0,
-    };
+    // #286: Own the payload bytes and hand them straight to the typed
+    // rawFetch fast path — avoids re-parsing to a serde_json::Value here and
+    // again in `dispatch`, plus the intermediate `to_vec` re-encode. The
+    // borrowed FFI slice is only valid for this synchronous call, so copy it
+    // before moving into the worker-thread task.
+    let payload_vec = payload.to_vec();
 
     let token = FETCH_COUNTER.fetch_add(1, Ordering::Relaxed);
 
     // Spawn the fetch as a tokio task — runs on worker threads, no
     // spawn_blocking overhead.
     let handle = rt.spawn(async move {
-        let response =
-            dispatch::dispatch("rawFetch", &serde_json::to_vec(&p).unwrap_or_default()).await;
+        let response = dispatch::raw_fetch_from_slice(&payload_vec).await;
         let encoded = serde_json::to_vec(&response).unwrap_or_else(|e| {
             serde_json::to_vec(&serde_json::json!({ "err": e.to_string() }))
                 .expect("static error JSON is always valid")
