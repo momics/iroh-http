@@ -445,7 +445,7 @@ function makeTauriSessionFns(epHandle: number): RawSessionFns {
       return h != null ? BigInt(h) : null;
     },
     sendDatagram: async (sessionHandle, data) => {
-      const b64 = btoa(String.fromCharCode(...data));
+      const b64 = encodeBase64(data);
       await invoke<void>(`${PLUGIN}|session_send_datagram`, {
         endpointHandle: epHandle,
         sessionHandle: Number(sessionHandle),
