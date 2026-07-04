@@ -60,6 +60,26 @@ fn fetch_results() -> &'static Mutex<HashMap<u64, FetchResult>> {
     R.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+// ── Stream error cache ────────────────────────────────────────────────────────
+
+type StreamErrorKey = (u64, u64);
+type StreamErrorMap = HashMap<StreamErrorKey, Vec<u8>>;
+
+fn stream_errors() -> &'static Mutex<StreamErrorMap> {
+    static R: OnceLock<Mutex<StreamErrorMap>> = OnceLock::new();
+    R.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn record_stream_error(endpoint_handle: u64, handle: u64, error: iroh_http_core::CoreError) {
+    stream_errors()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(
+            (endpoint_handle, handle),
+            iroh_http_adapter::core_error_to_json(&error).into_bytes(),
+        );
+}
+
 // ── Overflow response cache ───────────────────────────────────────────────────
 //
 // When dispatch produces a response larger than the caller-provided output
@@ -288,7 +308,10 @@ pub unsafe extern "C" fn iroh_http_next_chunk(
     };
 
     match result {
-        Err(_) => -1,
+        Err(e) => {
+            record_stream_error(endpoint_handle, handle, e);
+            -1
+        }
         Ok(None) => 0,
         Ok(Some(b)) => {
             let len = b.len();
@@ -359,10 +382,49 @@ pub unsafe extern "C" fn iroh_http_try_next_chunk(
             if e.message.starts_with("try_next_chunk:") {
                 -2 // Transient — no data yet.
             } else {
+                record_stream_error(endpoint_handle, handle, e);
                 -1 // Hard error (invalid handle, etc.)
             }
         }
     }
+}
+
+/// Retrieve and clear structured JSON for the last hard stream error on a handle.
+///
+/// Return value:
+/// - `n > 0`  — bytes written into the buffer.
+/// - `n == 0` — no cached error exists.
+/// - `n < 0`  — `|n|` bytes required; caller must retry with a larger buffer.
+///
+/// # Safety
+/// `out_ptr` must be valid for `out_cap` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn iroh_http_take_last_stream_error(
+    endpoint_handle: u64,
+    handle: u64,
+    out_ptr: *mut u8,
+    out_cap: usize,
+) -> i32 {
+    if out_cap > 0 && out_ptr.is_null() {
+        return -1;
+    }
+
+    let key = (endpoint_handle, handle);
+    let mut errors = stream_errors().lock().unwrap_or_else(|e| e.into_inner());
+    let Some(bytes) = errors.get(&key) else {
+        return 0;
+    };
+    let len = bytes.len();
+    if len > out_cap {
+        return i32::try_from(len)
+            .map(|n| 0i32.wrapping_sub(n))
+            .unwrap_or(i32::MIN);
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), out_ptr, len);
+    }
+    errors.remove(&key);
+    len as i32
 }
 
 /// Raw-buffer `sendChunk` — bypasses JSON dispatch for streaming throughput.

@@ -16,6 +16,7 @@
 use bytes::Bytes;
 
 use super::handles::{BodyReader, BodyWriter};
+use crate::CoreError;
 
 // ── Shared pump helpers ───────────────────────────────────────────────────────
 
@@ -102,7 +103,8 @@ where
 /// A slow-drip peer that stalls indefinitely will be cut off after this deadline.
 ///
 /// When a byte limit is set and the body exceeds it, `overflow_tx` is fired
-/// so the caller can return a `413 Content Too Large` response (ISS-004).
+/// so the caller can observe the overflow. The body reader also terminates
+/// with `BodyTooLarge` instead of a clean EOF.
 pub(crate) async fn pump_hyper_body_to_channel_limited<B>(
     body: B,
     writer: BodyWriter,
@@ -126,6 +128,7 @@ pub(crate) async fn pump_hyper_body_to_channel_limited<B>(
         let frame_result = match tokio::time::timeout(frame_timeout, body.frame()).await {
             Err(_elapsed) => {
                 tracing::warn!("iroh-http: body frame read timed out after {frame_timeout:?}");
+                writer.abort(CoreError::timeout("body frame read timed out"));
                 break;
             }
             Ok(None) => break,
@@ -134,6 +137,9 @@ pub(crate) async fn pump_hyper_body_to_channel_limited<B>(
         match frame_result {
             Err(e) => {
                 tracing::warn!("iroh-http: body frame error: {e:?}");
+                writer.abort(CoreError::body_too_large(
+                    "body exceeded configured size limit",
+                ));
                 break;
             }
             Ok(frame) => {
@@ -153,6 +159,9 @@ pub(crate) async fn pump_hyper_body_to_channel_limited<B>(
                             if let Some(tx) = overflow_tx.take() {
                                 let _ = tx.send(());
                             }
+                            writer.abort(CoreError::body_too_large(format!(
+                                "body exceeded configured size limit of {limit} bytes"
+                            )));
                             overflowed = true;
                             continue; // drain remaining frames without stalling the peer
                         }
