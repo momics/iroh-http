@@ -8,7 +8,7 @@
 //! an adapter-layer concern, not HTTP transport semantics.
 #![deny(unsafe_code)]
 
-use iroh_http_core::{CoreError, ErrorCode};
+use iroh_http_core::{respond, CoreError, ErrorCode, HandleStore, ResponseHeadEntry};
 
 /// Maximum number of header rows accepted at an adapter boundary.
 pub const MAX_HEADER_COUNT: usize = 100;
@@ -20,6 +20,33 @@ pub const MAX_HEADER_VALUE_LEN: usize = 8_192;
 pub const MAX_TIMEOUT_MS: u64 = 300_000;
 /// Maximum adapter-level body cap in bytes.
 pub const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
+
+const UNDELIVERABLE_STATUS: u16 = 503;
+const UNDELIVERABLE_HEADERS: [(&str, &str); 1] = [("content-length", "0")];
+
+/// Build the fail-closed response head for a request that cannot reach JS.
+///
+/// `reason` is accepted at call sites so logs and future diagnostics can pass
+/// stable context without redefining the response status or headers.
+pub fn reject_undeliverable(_reason: impl std::fmt::Display) -> ResponseHeadEntry {
+    ResponseHeadEntry {
+        status: UNDELIVERABLE_STATUS,
+        headers: UNDELIVERABLE_HEADERS
+            .iter()
+            .map(|(name, value)| ((*name).to_string(), (*value).to_string()))
+            .collect(),
+    }
+}
+
+/// Send the standard undeliverable rejection to a pending core request.
+pub fn send_undeliverable_rejection(
+    handles: &HandleStore,
+    req_handle: u64,
+    reason: impl std::fmt::Display,
+) -> Result<(), CoreError> {
+    let head = reject_undeliverable(reason);
+    respond(handles, req_handle, head.status, head.headers)
+}
 
 /// Adapter-boundary input validation error.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -239,6 +266,13 @@ mod tests {
             validate_header_rows(rows),
             Ok(vec![("content-type".to_string(), "text/plain".to_string())])
         );
+    }
+
+    #[test]
+    fn reject_undeliverable_uses_single_503_head() {
+        let head = reject_undeliverable("queue full");
+        assert_eq!(head.status, 503);
+        assert_eq!(head.headers, vec![("content-length".into(), "0".into())]);
     }
 
     #[test]

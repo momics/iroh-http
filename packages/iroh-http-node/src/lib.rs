@@ -65,8 +65,9 @@ use tokio::sync::Mutex as TokioMutex;
 
 use iroh_http_adapter::{
     core_error_to_json, format_error_json, safe_f64_to_u64 as adapter_safe_f64_to_u64,
-    safe_f64_to_usize as adapter_safe_f64_to_usize, validate_header_rows, AdapterInputError,
-    MAX_BODY_BYTES as ADAPTER_MAX_BODY_BYTES, MAX_TIMEOUT_MS as ADAPTER_MAX_TIMEOUT_MS,
+    safe_f64_to_usize as adapter_safe_f64_to_usize, send_undeliverable_rejection,
+    validate_header_rows, AdapterInputError, MAX_BODY_BYTES as ADAPTER_MAX_BODY_BYTES,
+    MAX_TIMEOUT_MS as ADAPTER_MAX_TIMEOUT_MS,
 };
 
 struct PathSub {
@@ -1292,12 +1293,11 @@ pub async fn raw_serve(
             let status = tsfn.call(js_args, ThreadsafeFunctionCallMode::NonBlocking);
             if status != napi::Status::Ok {
                 tracing::warn!("iroh-http-node: TSFN enqueue failed ({status:?}), responding 503");
-                let _ = ep_ref.handles().take_req_sender(req_handle).map(|tx| {
-                    let _ = tx.send(iroh_http_core::ResponseHeadEntry {
-                        status: 503,
-                        headers: vec![("content-length".to_string(), "0".to_string())],
-                    });
-                });
+                let _ = send_undeliverable_rejection(
+                    ep_ref.handles(),
+                    req_handle,
+                    format_args!("node TSFN enqueue failed: {status:?}"),
+                );
             }
         },
         conn_event_fn,

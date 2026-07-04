@@ -15,7 +15,7 @@ use crate::state;
 
 use iroh_http_adapter::{
     core_error_to_json, format_error_json, safe_f64_to_u64, safe_f64_to_usize,
-    validate_header_rows, MAX_BODY_BYTES, MAX_TIMEOUT_MS,
+    send_undeliverable_rejection, validate_header_rows, MAX_BODY_BYTES, MAX_TIMEOUT_MS,
 };
 
 // ── Endpoint ──────────────────────────────────────────────────────────────────
@@ -647,11 +647,10 @@ pub async fn serve(
                 tracing::warn!("iroh-http-tauri: channel send error: {e}; responding 503");
                 // The JS side will never see this request — close it fail-closed so
                 // the client receives a 503 instead of a hung connection.
-                let _ = respond(
+                let _ = send_undeliverable_rejection(
                     ep_for_closure.handles(),
                     req_handle,
-                    503,
-                    vec![("content-length".into(), "0".into())],
+                    format_args!("tauri channel send failed: {e}"),
                 );
                 let _ = ep_for_closure.handles().finish_body(res_body_handle);
             }

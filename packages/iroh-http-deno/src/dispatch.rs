@@ -70,7 +70,8 @@ fn insert_endpoint(ep: IrohEndpoint) -> u64 {
 
 use iroh_http_adapter::{
     core_error_to_json, format_error_json, safe_f64_to_u64, safe_f64_to_usize,
-    validate_header_rows, AdapterInputError, MAX_BODY_BYTES, MAX_TIMEOUT_MS,
+    send_undeliverable_rejection, validate_header_rows, AdapterInputError, MAX_BODY_BYTES,
+    MAX_TIMEOUT_MS,
 };
 
 // ── Helper ────────────────────────────────────────────────────────────────────
@@ -93,6 +94,50 @@ fn err_core(e: iroh_http_core::CoreError) -> Value {
 
 fn err_adapter(e: AdapterInputError) -> Value {
     err_code(e.code(), e.message())
+}
+
+fn deliver_request_to_queue(handle: u64, ep: &IrohEndpoint, payload: RequestPayload) {
+    // #122: Look up the CURRENT queue from the registry instead of a captured
+    // Arc.  When serve is restarted (stopServe → serveStart), old QUIC
+    // connections may still be alive (connection pool reuse). Requests on
+    // those old connections must be delivered to the NEW queue, not the old
+    // (removed) one.
+    let req_handle = payload.req_handle;
+    let q = match serve_registry::get(handle) {
+        Some(q) => q,
+        None => {
+            tracing::warn!("iroh-http-deno: serve registry miss — responding 503");
+            let _ = send_undeliverable_rejection(ep.handles(), req_handle, "deno registry miss");
+            return;
+        }
+    };
+    // #149: Reject immediately if this queue belongs to a stopped serve cycle.
+    // The queue stays in the registry between stopServe and the next serveStart
+    // so the request never hangs until the tower timeout.
+    if *q.shutdown_rx.borrow() {
+        tracing::warn!("iroh-http-deno: serve shutdown — responding 503");
+        let _ = send_undeliverable_rejection(ep.handles(), req_handle, "deno serve shutdown");
+        return;
+    }
+    let headers: Vec<Vec<String>> = payload
+        .headers
+        .into_iter()
+        .map(|(k, v)| vec![k, v])
+        .collect();
+    let event = serde_json::json!({
+        "reqHandle":         payload.req_handle,
+        "reqBodyHandle":     payload.req_body_handle,
+        "resBodyHandle":     payload.res_body_handle,
+        "isBidi":            payload.is_bidi,
+        "method":            payload.method,
+        "url":               payload.url,
+        "headers":           headers,
+        "remoteNodeId":      payload.remote_node_id,
+    });
+    if q.tx.try_send(event).is_err() {
+        tracing::warn!("iroh-http-deno: serve queue full — dropping request with 503");
+        let _ = send_undeliverable_rejection(ep.handles(), req_handle, "deno serve queue full");
+    }
 }
 
 /// Extract and look up the endpoint from a JSON payload's `endpointHandle`.
@@ -705,66 +750,7 @@ async fn serve_start(p: Value) -> Value {
         ep.clone(),
         serve_opts,
         move |payload: RequestPayload| {
-            // #122: Look up the CURRENT queue from the registry instead of a
-            // captured Arc.  When serve is restarted (stopServe → serveStart),
-            // old QUIC connections may still be alive (connection pool reuse).
-            // Requests on those old connections must be delivered to the NEW
-            // queue, not the old (removed) one.
-            let req_handle = payload.req_handle;
-            let q = match serve_registry::get(handle) {
-                Some(q) => q,
-                None => {
-                    // Queue removed (endpoint closed) — respond with 503.
-                    tracing::warn!("iroh-http-deno: serve registry miss — responding 503");
-                    let _ = respond(
-                        ep_clone.handles(),
-                        req_handle,
-                        503,
-                        vec![("content-length".to_string(), "0".to_string())],
-                    );
-                    return;
-                }
-            };
-            // #149: Reject immediately if this queue belongs to a stopped
-            // serve cycle.  The queue stays in the registry between
-            // stopServe and the next serveStart so that the lookup above
-            // never returns None during the transition.  Without this
-            // check, the request would be queued but never consumed,
-            // hanging until the 60 s request timeout.
-            if *q.shutdown_rx.borrow() {
-                tracing::warn!("iroh-http-deno: serve shutdown — responding 503");
-                let _ = respond(
-                    ep_clone.handles(),
-                    req_handle,
-                    503,
-                    vec![("content-length".to_string(), "0".to_string())],
-                );
-                return;
-            }
-            let headers: Vec<Vec<String>> = payload
-                .headers
-                .into_iter()
-                .map(|(k, v)| vec![k, v])
-                .collect();
-            let event = serde_json::json!({
-                "reqHandle":         payload.req_handle,
-                "reqBodyHandle":     payload.req_body_handle,
-                "resBodyHandle":     payload.res_body_handle,
-                "isBidi":            payload.is_bidi,
-                "method":            payload.method,
-                "url":               payload.url,
-                "headers":           headers,
-                "remoteNodeId":      payload.remote_node_id,
-            });
-            if q.tx.try_send(event).is_err() {
-                tracing::warn!("iroh-http-deno: serve queue full — dropping request with 503");
-                let _ = respond(
-                    ep_clone.handles(),
-                    req_handle,
-                    503,
-                    vec![("content-length".to_string(), "0".to_string())],
-                );
-            }
+            deliver_request_to_queue(handle, &ep_clone, payload);
         },
         conn_event_fn,
     );
@@ -799,12 +785,7 @@ async fn stop_serve(p: Value) -> Value {
         if let Ok(mut rx) = queue.rx.try_lock() {
             while let Ok(payload) = rx.try_recv() {
                 if let Some(h) = payload.get("reqHandle").and_then(|v| v.as_u64()) {
-                    let _ = respond(
-                        ep.handles(),
-                        h,
-                        503,
-                        vec![("content-length".into(), "0".into())],
-                    );
+                    let _ = send_undeliverable_rejection(ep.handles(), h, "deno stopServe drain");
                 }
             }
         }
@@ -1598,4 +1579,128 @@ fn unsubscribe_path_changes_dispatch(p: Value) -> Value {
     }
     ep.unsubscribe_path_changes(&payload.node_id);
     ok(serde_json::Value::Null)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use iroh_http_core::{NodeOptions, ResponseHeadEntry};
+    use tokio::sync::oneshot;
+
+    async fn test_endpoint() -> (u64, IrohEndpoint) {
+        let mut opts = NodeOptions::default();
+        opts.networking.disabled = true;
+        opts.networking.bind_addrs = vec!["127.0.0.1:0".to_string()];
+        let ep = IrohEndpoint::bind(opts).await.unwrap();
+        let handle = insert_endpoint(ep.clone());
+        (handle, ep)
+    }
+
+    fn pending_payload(
+        ep: &IrohEndpoint,
+    ) -> (RequestPayload, oneshot::Receiver<ResponseHeadEntry>) {
+        let (tx, rx) = oneshot::channel();
+        let req_handle = ep.handles().allocate_req_handle(tx).unwrap();
+        (
+            RequestPayload {
+                req_handle,
+                req_body_handle: 0,
+                res_body_handle: 0,
+                method: "GET".to_string(),
+                url: "httpi://test/".to_string(),
+                headers: Vec::new(),
+                remote_node_id: "peer".to_string(),
+                is_bidi: false,
+            },
+            rx,
+        )
+    }
+
+    fn assert_undeliverable(mut rx: oneshot::Receiver<ResponseHeadEntry>) {
+        let expected = iroh_http_adapter::reject_undeliverable("test assertion");
+        let head = rx
+            .try_recv()
+            .expect("undeliverable request should receive an immediate response head");
+        assert_eq!(head.status, expected.status);
+        assert_eq!(head.headers, expected.headers);
+    }
+
+    async fn cleanup(handle: u64, ep: IrohEndpoint) {
+        serve_registry::remove(handle);
+        let _ = remove_endpoint(handle);
+        ep.close_force().await;
+    }
+
+    #[tokio::test]
+    async fn deno_delivery_registry_miss_rejects_undeliverable_request() {
+        let (handle, ep) = test_endpoint().await;
+        let (payload, rx) = pending_payload(&ep);
+
+        deliver_request_to_queue(handle, &ep, payload);
+
+        assert_undeliverable(rx);
+        cleanup(handle, ep).await;
+    }
+
+    #[tokio::test]
+    async fn deno_delivery_shutdown_mid_request_rejects_without_queueing() {
+        let (handle, ep) = test_endpoint().await;
+        let queue = serve_registry::register(handle);
+        serve_registry::signal_shutdown(handle);
+        let (payload, rx) = pending_payload(&ep);
+
+        deliver_request_to_queue(handle, &ep, payload);
+
+        assert_undeliverable(rx);
+        assert!(queue.rx.try_lock().unwrap().try_recv().is_err());
+        cleanup(handle, ep).await;
+    }
+
+    #[tokio::test]
+    async fn deno_delivery_queue_full_rejects_undeliverable_request() {
+        let (handle, ep) = test_endpoint().await;
+        let queue = serve_registry::register(handle);
+        for i in 0..10_000 {
+            if queue.tx.try_send(json!({ "reqHandle": i })).is_err() {
+                break;
+            }
+        }
+        assert!(
+            queue
+                .tx
+                .try_send(json!({ "reqHandle": "sentinel" }))
+                .is_err(),
+            "test setup should fill the bounded serve queue"
+        );
+        let (payload, rx) = pending_payload(&ep);
+
+        deliver_request_to_queue(handle, &ep, payload);
+
+        assert_undeliverable(rx);
+        cleanup(handle, ep).await;
+    }
+
+    #[tokio::test]
+    async fn deno_stop_serve_drains_queued_requests_and_stops_polling() {
+        let (handle, ep) = test_endpoint().await;
+        let queue = serve_registry::register(handle);
+        let (payload, rx) = pending_payload(&ep);
+        queue
+            .tx
+            .try_send(json!({ "reqHandle": payload.req_handle }))
+            .unwrap();
+
+        let result = stop_serve(json!({ "endpointHandle": handle })).await;
+
+        assert!(
+            result.get("ok").is_some(),
+            "stopServe should succeed: {result}"
+        );
+        assert_undeliverable(rx);
+        let mut out = [0u8; 64];
+        let poll =
+            unsafe { crate::iroh_http_try_next_request(handle, out.as_mut_ptr(), out.len()) };
+        assert_eq!(poll, -1, "polling should stop after stopServe shutdown");
+        cleanup(handle, ep).await;
+    }
 }
