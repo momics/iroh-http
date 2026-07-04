@@ -37,7 +37,8 @@ Every node publishes a machine-readable API description:
 interface ApiCapabilities {
   versions: string[];                    // semver strings, oldest first
   extensions?: string[];                 // named optional features
-  maxRequestBodyBytes?: number;
+  maxRequestBodyWireBytes?: number;
+  maxRequestBodyDecodedBytes?: number;
   supportsCompression?: boolean;
   supportsStreaming?: boolean;
   supportsWebTransport?: boolean;

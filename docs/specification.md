@@ -225,8 +225,10 @@ interface ServeOptions {
   maxConnectionsPerPeer?: number;
   /** Per-request timeout in ms. Default: 60 000. 0 = disabled. */
   requestTimeout?: number;
-  /** Max request body size in bytes. Default: 16 777 216 (16 MiB). */
-  maxRequestBodyBytes?: number;
+  /** Max request body size in wire (compressed) bytes. Default: 16 777 216 (16 MiB). */
+  maxRequestBodyWireBytes?: number;
+  /** Max request body size in decoded (post-decompression) bytes. Default: 16 777 216 (16 MiB). */
+  maxRequestBodyDecodedBytes?: number;
   /** Max total QUIC connections. Unlimited by default. */
   maxTotalConnections?: number;
   /** Max consecutive accept errors before shutdown. Default: 5. */
@@ -778,8 +780,12 @@ Configured via `NodeOptions` or `ServeOptions`. See [server-limits.md](features/
 | `maxConcurrency` | Request flood | 408 Request Timeout |
 | `maxConnectionsPerPeer` | Connection flood | Closed at QUIC level |
 | `requestTimeout` | Slow request | 408 Request Timeout |
-| `maxRequestBodyBytes` | Oversized body | 413 Content Too Large |
+| `maxRequestBodyWireBytes` | Oversized compressed body | 413 Content Too Large |
+| `maxRequestBodyDecodedBytes` | Compression bomb (post-decode) | 413 Content Too Large |
 | `maxHeaderBytes` | Header flood | 431 Request Header Fields Too Large |
+
+See [wire bytes vs decoded bytes](features/server-limits.md#wire-bytes-vs-decoded-bytes)
+for how the two request-body caps differ.
 
 ### WebTransport
 

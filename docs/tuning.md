@@ -154,9 +154,13 @@ cannot distinguish a migrating connection from a dead one. Lower
 | `requestTimeout` | 60 000 ms | Transfers large files (increase) or want fast failure detection (decrease) |
 | `maxConcurrency` | 1 024 | Serving many concurrent requests (increase); or throttling (decrease) |
 | `maxConnectionsPerPeer` | 8 | IoT with few connections/peer (decrease); busy API clients (increase) |
-| `maxRequestBodyBytes` | unlimited | Prevent large upload attacks (set a limit) |
+| `maxRequestBodyWireBytes` | 16 MiB | Prevent large upload floods (compressed wire bytes) |
+| `maxRequestBodyDecodedBytes` | 16 MiB | Prevent compression bombs (post-decompression bytes) |
 | `drainTimeout` | 5 000 ms | Slow readers expected (increase); tight latency SLA (decrease) |
 | `maxServeErrors` | 5 | Noisy channels (increase); fail-fast desired (decrease) |
+
+> The two request-body caps guard different layers — see
+> [wire bytes vs decoded bytes](features/server-limits.md#wire-bytes-vs-decoded-bytes).
 
 ---
 

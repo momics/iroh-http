@@ -78,7 +78,8 @@ configurable via `NodeOptions`):
 
 | Limit | Default | Protects against |
 |---|---|---|
-| `maxRequestBodyBytes` | 16 MiB | Request body exhausting memory |
+| `maxRequestBodyWireBytes` | 16 MiB | Compressed request body exhausting bandwidth/memory |
+| `maxRequestBodyDecodedBytes` | 16 MiB | Compression bomb exhausting memory after decode |
 | `maxConcurrency` | 1 024 | Request flood from many peers |
 | `maxConnectionsPerPeer` | 8 | Connection flood from one peer |
 | `requestTimeout` | 60 s | Slow request / stalled handler |
@@ -86,6 +87,9 @@ configurable via `NodeOptions`):
 | `maxTotalConnections` | unlimited | Total QUIC connection cap |
 | QUIC `max_concurrent_bidi_streams` | 128 | Stream-level slowloris |
 | Response body limit | 256 MiB | Compression bomb from malicious server |
+
+The distinction between the wire and decoded body caps is explained in
+[wire bytes vs decoded bytes](features/server-limits.md#wire-bytes-vs-decoded-bytes).
 
 ## Out-of-scope threats
 
