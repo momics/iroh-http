@@ -36,6 +36,7 @@ export type FetchFn = {
 export function makeFetch(
   adapter: IrohAdapter,
   endpointHandle: number,
+  maxChunkSizeBytes?: number,
 ): FetchFn {
   return async function irohFetch(
     input: string | URL,
@@ -169,6 +170,7 @@ export function makeFetch(
       // The catch below resets the request stream via cancelFetch instead.
       bodyPipePromise = pipeToWriter(adapter, bodyStream, reqBodyHandle, {
         skipFinishOnError: true,
+        maxChunkSizeBytes,
       });
       // If the body source fails mid-stream, reset the request stream instead
       // of letting it finish cleanly. A clean finish would present a truncated

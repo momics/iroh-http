@@ -50,6 +50,19 @@ export interface PipeToWriterOptions {
    * {@link pipeToWriter} for the full rationale.
    */
   skipFinishOnError?: boolean;
+  /**
+   * Maximum size (bytes) of each `sendChunk` piece. Larger source chunks are
+   * split into pieces of at most this size. Defaults to 64 KiB.
+   *
+   * This should mirror the node's configured `maxChunkSizeBytes` (which sets
+   * the Rust-side `StreamingOptions` chunk limit): when the two match, each JS
+   * piece is a single core channel push and the core never re-splits it. A
+   * larger value reduces the number of JS→native `sendChunk` crossings on
+   * large streaming bodies (bench #287); the full end-to-end benefit requires
+   * the core `maxChunkSizeBytes` to be raised in lockstep, otherwise the core
+   * splits oversized pieces back down to its own limit.
+   */
+  maxChunkSizeBytes?: number;
 }
 
 /**
@@ -88,8 +101,11 @@ export async function pipeToWriter(
 ): Promise<void> {
   const skipFinishOnError = options?.skipFinishOnError ?? false;
   // Match the Rust-side max chunk size so each sendChunk is a single
-  // channel push (O(1) when the channel has capacity).
-  const MAX_CHUNK = 64 * 1024;
+  // channel push (O(1) when the channel has capacity). Honors the node's
+  // configured maxChunkSizeBytes (#287); a non-positive value falls back to
+  // the 64 KiB default.
+  const configured = options?.maxChunkSizeBytes;
+  const MAX_CHUNK = configured && configured > 0 ? configured : 64 * 1024;
   const reader = stream.getReader();
   let completed = false;
   try {

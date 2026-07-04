@@ -89,7 +89,8 @@ export class IrohNode extends EventTarget {
       ? SecretKey._fromBytesWithPublicKey(info.keypair, this.publicKey)
       : undefined;
 
-    this.#fetchFn = makeFetch(adapter, info.endpointHandle);
+    const maxChunkSizeBytes = options?.internals?.maxChunkSizeBytes;
+    this.#fetchFn = makeFetch(adapter, info.endpointHandle, maxChunkSizeBytes);
     this.#serveFn = makeServe(
       adapter,
       info.endpointHandle,
@@ -109,6 +110,7 @@ export class IrohNode extends EventTarget {
           );
         }
       },
+      maxChunkSizeBytes,
     );
 
     // Always start the transport event loop. It delivers "pathchange" and
