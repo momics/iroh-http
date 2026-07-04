@@ -11,7 +11,9 @@
 mod common;
 
 use bytes::Bytes;
-use iroh_http_core::{fetch, ffi_serve, respond, IrohEndpoint, NetworkingOptions, NodeOptions};
+use iroh_http_core::{
+    fetch, ffi_serve, respond, ErrorCode, IrohEndpoint, NetworkingOptions, NodeOptions,
+};
 use iroh_http_core::{RequestPayload, ServeOptions};
 
 /// Bind a single loopback-only endpoint (relay disabled).
@@ -185,6 +187,57 @@ async fn self_fetch_timeout_releases_token() {
             "fetch token leaked after timeout"
         );
     }
+}
+
+/// Regression: #284 — cancelling an in-flight self-request must release its
+/// fetch cancellation token before propagating `Cancelled`.
+#[tokio::test]
+async fn self_fetch_cancel_releases_token() {
+    let ep = single_node().await;
+    let own_id = ep.node_id().to_string();
+    // Handler that accepts the request but never responds → fetch hangs until cancelled.
+    let server_ep = ep.clone();
+    ffi_serve(
+        ep.clone(),
+        ServeOptions::default(),
+        move |_payload: RequestPayload| {
+            let _ = &server_ep; // hold handler open; never call respond()
+        },
+    );
+
+    let token = ep.handles().alloc_fetch_token().unwrap();
+    let fetch_ep = ep.clone();
+    let fetch_own_id = own_id.clone();
+    let task = tokio::spawn(async move {
+        fetch(
+            &fetch_ep,
+            &fetch_own_id,
+            "/slow",
+            "GET",
+            &[],
+            None,
+            Some(token),
+            None,
+            None,
+            true,
+            None,
+        )
+        .await
+    });
+
+    tokio::time::sleep(std::time::Duration::from_millis(75)).await;
+    ep.handles().cancel_in_flight(token);
+
+    let err = tokio::time::timeout(std::time::Duration::from_secs(2), task)
+        .await
+        .expect("cancelled self-fetch task should complete")
+        .expect("self-fetch task should not panic")
+        .expect_err("self-fetch should be cancelled");
+    assert_eq!(err.code, ErrorCode::Cancelled);
+    assert!(
+        ep.handles().get_fetch_cancel_notify(token).is_none(),
+        "fetch token leaked after cancellation"
+    );
 }
 
 /// After the server stops, a self-request again fails cleanly rather than
