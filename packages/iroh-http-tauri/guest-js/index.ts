@@ -584,7 +584,6 @@ export async function createNode(options?: NodeOptions): Promise<IrohNode> {
   const info = await invoke<{
     endpointHandle: number;
     nodeId: string;
-    keypair: number[];
   }>(`${PLUGIN}|create_endpoint`, {
     args: options
       ? {
@@ -630,7 +629,6 @@ export async function createNode(options?: NodeOptions): Promise<IrohNode> {
     {
       endpointHandle: Number(info.endpointHandle),
       nodeId: info.nodeId,
-      keypair: new Uint8Array(info.keypair),
     },
     options,
     nativeClosed,
@@ -655,6 +653,23 @@ export async function createNode(options?: NodeOptions): Promise<IrohNode> {
   }
 
   return node;
+}
+
+/**
+ * Export raw endpoint secret key bytes for identity persistence.
+ *
+ * SECURITY: This command requires the `iroh-http:crypto` permission and hands
+ * raw private-key bytes to the webview. Store them only in encrypted storage,
+ * overwrite temporary copies after use, and never log or expose them to
+ * untrusted code.
+ */
+export async function exportSecretKey(
+  endpointHandle: number,
+): Promise<Uint8Array> {
+  const bytes = await invoke<number[]>(`${PLUGIN}|export_secret_key`, {
+    endpointHandle,
+  });
+  return new Uint8Array(bytes);
 }
 
 export type { IrohNode, NodeOptions };

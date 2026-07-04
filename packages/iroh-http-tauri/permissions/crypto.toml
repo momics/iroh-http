@@ -2,8 +2,9 @@
 
 [[set]]
 identifier = "crypto"
-description = "Enables low-level key operations — generate keypairs, sign with a secret key, and verify public key signatures."
+description = "Enables low-level key operations — generate keypairs, export raw secret key bytes, sign with a secret key, and verify public key signatures."
 permissions = [
+  "allow-export-secret-key",
   "allow-generate-secret-key",
   "allow-secret-key-sign",
   "allow-public-key-verify",

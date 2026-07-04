@@ -43,7 +43,12 @@ const _INTERNAL = Symbol("IrohNode._create");
 
 export class IrohNode extends EventTarget {
   readonly publicKey: PublicKey;
-  readonly secretKey: SecretKey;
+  /**
+   * Raw secret key wrapper when the runtime exposes private key material to JS.
+   * Undefined in runtimes that keep endpoint keys native-held, such as the
+   * Tauri webview without the `crypto` permission.
+   */
+  readonly secretKey: SecretKey | undefined;
   readonly closed: Promise<WebTransportCloseInfo>;
 
   #adapter: IrohAdapter;
@@ -79,12 +84,10 @@ export class IrohNode extends EventTarget {
     nativeClosed.then(() =>
       resolveClose({ closeCode: 0, reason: "native shutdown" })
     );
-
     this.publicKey = PublicKey.fromString(info.nodeId);
-    this.secretKey = SecretKey._fromBytesWithPublicKey(
-      info.keypair,
-      this.publicKey,
-    );
+    this.secretKey = info.keypair
+      ? SecretKey._fromBytesWithPublicKey(info.keypair, this.publicKey)
+      : undefined;
 
     this.#fetchFn = makeFetch(adapter, info.endpointHandle);
     this.#serveFn = makeServe(

@@ -40,6 +40,7 @@ fn main() {
         "session_recv_datagram",
         "session_max_datagram_size",
         // Crypto utilities (iroh-http:crypto)
+        "export_secret_key",
         "secret_key_sign",
         "public_key_verify",
         "generate_secret_key",

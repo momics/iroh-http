@@ -210,6 +210,32 @@ Denies the endpoint_stats command without any pre-configured scope.
 <tr>
 <td>
 
+`iroh-http:allow-export-secret-key`
+
+</td>
+<td>
+
+Enables the export_secret_key command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`iroh-http:deny-export-secret-key`
+
+</td>
+<td>
+
+Denies the export_secret_key command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
 `iroh-http:allow-fetch`
 
 </td>
@@ -1164,7 +1190,7 @@ Enables raw QUIC sessions — bidirectional streams and datagrams directly to a 
 </td>
 <td>
 
-Enables low-level key operations — generate keypairs, sign with a secret key, and verify public key signatures.
+Enables low-level key operations — generate keypairs, export raw secret key bytes, sign with a secret key, and verify public key signatures.
 
 </td>
 </tr>

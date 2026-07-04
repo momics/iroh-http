@@ -119,6 +119,7 @@ impl<R: Runtime> PluginBuilder<R> {
             commands::wait_serve_stop,
             commands::wait_endpoint_closed,
             commands::respond_to_request,
+            commands::export_secret_key,
             commands::secret_key_sign,
             commands::public_key_verify,
             commands::generate_secret_key,
