@@ -40,6 +40,20 @@ use std::sync::{Mutex, OnceLock};
 #[cfg(feature = "discovery")]
 use tokio::sync::Mutex as TokioMutex;
 
+struct PathSub {
+    rx: tokio::sync::Mutex<
+        tokio::sync::mpsc::UnboundedReceiver<iroh_http_core::endpoint::PathInfo>,
+    >,
+    notify: tokio::sync::Notify,
+}
+
+type PathRxMap = dashmap::DashMap<(u64, String), std::sync::Arc<PathSub>>;
+
+fn path_change_rxs() -> &'static PathRxMap {
+    static PATH_CHANGE_RXS: std::sync::OnceLock<PathRxMap> = std::sync::OnceLock::new();
+    PATH_CHANGE_RXS.get_or_init(dashmap::DashMap::new)
+}
+
 // ── Endpoint helpers ─────────────────────────────────────────────────────────
 
 fn get_endpoint(handle: u64) -> Option<IrohEndpoint> {
@@ -54,7 +68,11 @@ fn insert_endpoint(ep: IrohEndpoint) -> u64 {
     registry::insert_endpoint(ep)
 }
 
-use iroh_http_adapter::{core_error_to_json, format_error_json};
+use iroh_http_adapter::{
+    core_error_to_json, format_error_json, safe_f64_to_u64, safe_f64_to_usize,
+    send_undeliverable_rejection, validate_header_rows, AdapterInputError, MAX_BODY_BYTES,
+    MAX_TIMEOUT_MS,
+};
 
 // ── Helper ────────────────────────────────────────────────────────────────────
 
@@ -72,6 +90,54 @@ fn err_code(code: &str, s: impl std::fmt::Display) -> Value {
 
 fn err_core(e: iroh_http_core::CoreError) -> Value {
     json!({ "err": core_error_to_json(&e) })
+}
+
+fn err_adapter(e: AdapterInputError) -> Value {
+    err_code(e.code(), e.message())
+}
+
+fn deliver_request_to_queue(handle: u64, ep: &IrohEndpoint, payload: RequestPayload) {
+    // #122: Look up the CURRENT queue from the registry instead of a captured
+    // Arc.  When serve is restarted (stopServe → serveStart), old QUIC
+    // connections may still be alive (connection pool reuse). Requests on
+    // those old connections must be delivered to the NEW queue, not the old
+    // (removed) one.
+    let req_handle = payload.req_handle;
+    let q = match serve_registry::get(handle) {
+        Some(q) => q,
+        None => {
+            tracing::warn!("iroh-http-deno: serve registry miss — responding 503");
+            let _ = send_undeliverable_rejection(ep.handles(), req_handle, "deno registry miss");
+            return;
+        }
+    };
+    // #149: Reject immediately if this queue belongs to a stopped serve cycle.
+    // The queue stays in the registry between stopServe and the next serveStart
+    // so the request never hangs until the tower timeout.
+    if *q.shutdown_rx.borrow() {
+        tracing::warn!("iroh-http-deno: serve shutdown — responding 503");
+        let _ = send_undeliverable_rejection(ep.handles(), req_handle, "deno serve shutdown");
+        return;
+    }
+    let headers: Vec<Vec<String>> = payload
+        .headers
+        .into_iter()
+        .map(|(k, v)| vec![k, v])
+        .collect();
+    let event = serde_json::json!({
+        "reqHandle":         payload.req_handle,
+        "reqBodyHandle":     payload.req_body_handle,
+        "resBodyHandle":     payload.res_body_handle,
+        "isBidi":            payload.is_bidi,
+        "method":            payload.method,
+        "url":               payload.url,
+        "headers":           headers,
+        "remoteNodeId":      payload.remote_node_id,
+    });
+    if q.tx.try_send(event).is_err() {
+        tracing::warn!("iroh-http-deno: serve queue full — dropping request with 503");
+        let _ = send_undeliverable_rejection(ep.handles(), req_handle, "deno serve queue full");
+    }
 }
 
 /// Extract and look up the endpoint from a JSON payload's `endpointHandle`.
@@ -179,6 +245,7 @@ pub async fn dispatch(method: &str, payload: &[u8]) -> Value {
         async "startTransportEvents"    => start_transport_events_dispatch,
         async "nextTransportEvent"      => next_transport_event_dispatch,
         async "nextPathChange"          => next_path_change_dispatch,
+        sync  "unsubscribePathChanges"  => unsubscribe_path_changes_dispatch,
     )
 }
 
@@ -289,13 +356,8 @@ async fn create_endpoint(p: Value) -> Value {
         Err(e) => err_core(e),
         Ok(ep) => {
             let node_id = ep.node_id().to_string();
-            // SECURITY: secret_key_bytes() returns raw private key material.
-            // The Vec<u8> serialised into the Deno response is not zeroed automatically;
-            // callers must overwrite it with zeros after writing to encrypted storage.
-            // Never log, include in error payloads, or pass to untrusted code.
-            let keypair: Vec<u8> = ep.secret_key_bytes().to_vec();
             let handle = insert_endpoint(ep);
-            ok(json!({ "endpointHandle": handle, "nodeId": node_id, "keypair": keypair }))
+            ok(json!({ "endpointHandle": handle, "nodeId": node_id }))
         }
     }
 }
@@ -549,9 +611,11 @@ struct RawFetchPayload {
     req_body_handle: Option<u64>,
     fetch_token: Option<u64>,
     direct_addrs: Option<Vec<String>>,
-    timeout_ms: Option<u64>,
+    #[serde(alias = "timeout_ms")]
+    timeout_ms: Option<f64>,
     decompress: Option<bool>,
-    max_response_body_bytes: Option<u64>,
+    #[serde(alias = "max_response_body_bytes")]
+    max_response_body_bytes: Option<f64>,
 }
 
 async fn raw_fetch(p: Value) -> Value {
@@ -559,6 +623,23 @@ async fn raw_fetch(p: Value) -> Value {
         Ok(v) => v,
         Err(e) => return err(e),
     };
+    raw_fetch_impl(args).await
+}
+
+/// Warm fetch hot path (#286): parse the original request slice straight into
+/// `RawFetchPayload`, skipping the `Value` round trip the generic dispatch
+/// table performs (`from_slice` → `Value` → `to_vec` → `from_slice` → `Value`
+/// → `from_value`). Callers get the same `err` envelope on malformed JSON as
+/// `dispatch` would return.
+pub async fn raw_fetch_from_slice(payload: &[u8]) -> Value {
+    let args: RawFetchPayload = match serde_json::from_slice(payload) {
+        Ok(v) => v,
+        Err(e) => return err(format!("invalid JSON payload: {e}")),
+    };
+    raw_fetch_impl(args).await
+}
+
+async fn raw_fetch_impl(args: RawFetchPayload) -> Value {
     let ep = match get_endpoint(args.endpoint_handle) {
         Some(e) => e,
         None => {
@@ -568,23 +649,33 @@ async fn raw_fetch(p: Value) -> Value {
             )
         }
     };
-    let pairs: Vec<(String, String)> = args
-        .headers
-        .into_iter()
-        .filter_map(|p| {
-            if p.len() == 2 {
-                Some((p[0].clone(), p[1].clone()))
-            } else {
-                None
-            }
-        })
-        .collect();
+    let pairs = match validate_header_rows(args.headers) {
+        Ok(pairs) => pairs,
+        Err(e) => return err_adapter(e),
+    };
     let reader = args
         .req_body_handle
         .and_then(|h| ep.handles().claim_pending_reader(h));
     let addrs = match parse_direct_addrs(&args.direct_addrs) {
         Ok(a) => a,
         Err(e) => return err(e),
+    };
+
+    let timeout = match args
+        .timeout_ms
+        .map(|ms| safe_f64_to_u64(ms, "timeoutMs", MAX_TIMEOUT_MS))
+        .transpose()
+    {
+        Ok(timeout) => timeout.map(std::time::Duration::from_millis),
+        Err(e) => return err_adapter(e),
+    };
+    let max_response_body_bytes = match args
+        .max_response_body_bytes
+        .map(|b| safe_f64_to_usize(b, "maxResponseBodyBytes", MAX_BODY_BYTES))
+        .transpose()
+    {
+        Ok(bytes) => bytes,
+        Err(e) => return err_adapter(e),
     };
 
     // #126: If the caller didn't supply a fetch token, allocate one
@@ -603,9 +694,9 @@ async fn raw_fetch(p: Value) -> Value {
         reader,
         fetch_token,
         addrs.as_deref(),
-        args.timeout_ms.map(std::time::Duration::from_millis),
+        timeout,
         args.decompress.unwrap_or(true),
-        args.max_response_body_bytes.map(|b| b as usize),
+        max_response_body_bytes,
     )
     .await
     {
@@ -671,66 +762,7 @@ async fn serve_start(p: Value) -> Value {
         ep.clone(),
         serve_opts,
         move |payload: RequestPayload| {
-            // #122: Look up the CURRENT queue from the registry instead of a
-            // captured Arc.  When serve is restarted (stopServe → serveStart),
-            // old QUIC connections may still be alive (connection pool reuse).
-            // Requests on those old connections must be delivered to the NEW
-            // queue, not the old (removed) one.
-            let req_handle = payload.req_handle;
-            let q = match serve_registry::get(handle) {
-                Some(q) => q,
-                None => {
-                    // Queue removed (endpoint closed) — respond with 503.
-                    tracing::warn!("iroh-http-deno: serve registry miss — responding 503");
-                    let _ = respond(
-                        ep_clone.handles(),
-                        req_handle,
-                        503,
-                        vec![("content-length".to_string(), "0".to_string())],
-                    );
-                    return;
-                }
-            };
-            // #149: Reject immediately if this queue belongs to a stopped
-            // serve cycle.  The queue stays in the registry between
-            // stopServe and the next serveStart so that the lookup above
-            // never returns None during the transition.  Without this
-            // check, the request would be queued but never consumed,
-            // hanging until the 60 s request timeout.
-            if *q.shutdown_rx.borrow() {
-                tracing::warn!("iroh-http-deno: serve shutdown — responding 503");
-                let _ = respond(
-                    ep_clone.handles(),
-                    req_handle,
-                    503,
-                    vec![("content-length".to_string(), "0".to_string())],
-                );
-                return;
-            }
-            let headers: Vec<Vec<String>> = payload
-                .headers
-                .into_iter()
-                .map(|(k, v)| vec![k, v])
-                .collect();
-            let event = serde_json::json!({
-                "reqHandle":         payload.req_handle,
-                "reqBodyHandle":     payload.req_body_handle,
-                "resBodyHandle":     payload.res_body_handle,
-                "isBidi":            payload.is_bidi,
-                "method":            payload.method,
-                "url":               payload.url,
-                "headers":           headers,
-                "remoteNodeId":      payload.remote_node_id,
-            });
-            if q.tx.try_send(event).is_err() {
-                tracing::warn!("iroh-http-deno: serve queue full — dropping request with 503");
-                let _ = respond(
-                    ep_clone.handles(),
-                    req_handle,
-                    503,
-                    vec![("content-length".to_string(), "0".to_string())],
-                );
-            }
+            deliver_request_to_queue(handle, &ep_clone, payload);
         },
         conn_event_fn,
     );
@@ -765,12 +797,7 @@ async fn stop_serve(p: Value) -> Value {
         if let Ok(mut rx) = queue.rx.try_lock() {
             while let Ok(payload) = rx.try_recv() {
                 if let Some(h) = payload.get("reqHandle").and_then(|v| v.as_u64()) {
-                    let _ = respond(
-                        ep.handles(),
-                        h,
-                        503,
-                        vec![("content-length".into(), "0".into())],
-                    );
+                    let _ = send_undeliverable_rejection(ep.handles(), h, "deno stopServe drain");
                 }
             }
         }
@@ -875,17 +902,10 @@ fn respond_dispatch(p: Value) -> Value {
         Ok(v) => v,
         Err(e) => return err(e),
     };
-    let headers: Vec<(String, String)> = args
-        .headers
-        .into_iter()
-        .filter_map(|p| {
-            if p.len() == 2 {
-                Some((p[0].clone(), p[1].clone()))
-            } else {
-                None
-            }
-        })
-        .collect();
+    let headers = match validate_header_rows(args.headers) {
+        Ok(headers) => headers,
+        Err(e) => return err_adapter(e),
+    };
     match respond(ep.handles(), args.req_handle, args.status, headers) {
         Ok(()) => ok(json!({})),
         Err(e) => err_core(e),
@@ -1496,13 +1516,7 @@ struct NextPathChangePayload {
 }
 
 async fn next_path_change_dispatch(p: Value) -> Value {
-    use std::sync::Arc;
-    type PathRx = tokio::sync::Mutex<
-        tokio::sync::mpsc::UnboundedReceiver<iroh_http_core::endpoint::PathInfo>,
-    >;
-    type PathRxMap = dashmap::DashMap<(u64, String), Arc<PathRx>>;
-    static PATH_CHANGE_RXS: std::sync::OnceLock<PathRxMap> = std::sync::OnceLock::new();
-    let rxs = PATH_CHANGE_RXS.get_or_init(dashmap::DashMap::new);
+    let rxs = path_change_rxs();
 
     let payload: NextPathChangePayload = match serde_json::from_value(p) {
         Ok(v) => v,
@@ -1526,20 +1540,179 @@ async fn next_path_change_dispatch(p: Value) -> Value {
         .entry(key.clone())
         .or_insert_with(|| {
             let rx = ep.subscribe_path_changes(&payload.node_id);
-            Arc::new(tokio::sync::Mutex::new(rx))
+            std::sync::Arc::new(PathSub {
+                rx: tokio::sync::Mutex::new(rx),
+                notify: tokio::sync::Notify::new(),
+            })
         })
         .clone();
 
-    let mut rx = rx_arc.lock().await;
-    match rx.recv().await {
+    let mut rx = rx_arc.rx.lock().await;
+    match tokio::select! {
+        path = rx.recv() => path,
+        () = rx_arc.notify.notified() => None,
+    } {
         None => {
             drop(rx);
-            rxs.remove(&key);
+            rxs.remove_if(&key, |_, existing| {
+                std::sync::Arc::ptr_eq(existing, &rx_arc)
+            });
             ok(serde_json::Value::Null)
         }
         Some(path) => match serde_json::to_value(&path) {
             Ok(v) => ok(v),
             Err(e) => err(e),
         },
+    }
+}
+
+fn unsubscribe_path_changes_dispatch(p: Value) -> Value {
+    let payload: NextPathChangePayload = match serde_json::from_value(p) {
+        Ok(v) => v,
+        Err(e) => return err(e),
+    };
+    let ep = match get_endpoint(payload.endpoint_handle) {
+        Some(ep) => ep,
+        None => {
+            return err_code(
+                "INVALID_HANDLE",
+                format!(
+                    "node closed or not found (handle {})",
+                    payload.endpoint_handle
+                ),
+            )
+        }
+    };
+
+    if let Some((_, sub)) =
+        path_change_rxs().remove(&(payload.endpoint_handle, payload.node_id.clone()))
+    {
+        sub.notify.notify_waiters();
+    }
+    ep.unsubscribe_path_changes(&payload.node_id);
+    ok(serde_json::Value::Null)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use iroh_http_core::{NodeOptions, ResponseHeadEntry};
+    use tokio::sync::oneshot;
+
+    async fn test_endpoint() -> (u64, IrohEndpoint) {
+        let mut opts = NodeOptions::default();
+        opts.networking.disabled = true;
+        opts.networking.bind_addrs = vec!["127.0.0.1:0".to_string()];
+        let ep = IrohEndpoint::bind(opts).await.unwrap();
+        let handle = insert_endpoint(ep.clone());
+        (handle, ep)
+    }
+
+    fn pending_payload(
+        ep: &IrohEndpoint,
+    ) -> (RequestPayload, oneshot::Receiver<ResponseHeadEntry>) {
+        let (tx, rx) = oneshot::channel();
+        let req_handle = ep.handles().allocate_req_handle(tx).unwrap();
+        (
+            RequestPayload {
+                req_handle,
+                req_body_handle: 0,
+                res_body_handle: 0,
+                method: "GET".to_string(),
+                url: "httpi://test/".to_string(),
+                headers: Vec::new(),
+                remote_node_id: "peer".to_string(),
+                is_bidi: false,
+            },
+            rx,
+        )
+    }
+
+    fn assert_undeliverable(mut rx: oneshot::Receiver<ResponseHeadEntry>) {
+        let expected = iroh_http_adapter::reject_undeliverable("test assertion");
+        let head = rx
+            .try_recv()
+            .expect("undeliverable request should receive an immediate response head");
+        assert_eq!(head.status, expected.status);
+        assert_eq!(head.headers, expected.headers);
+    }
+
+    async fn cleanup(handle: u64, ep: IrohEndpoint) {
+        serve_registry::remove(handle);
+        let _ = remove_endpoint(handle);
+        ep.close_force().await;
+    }
+
+    #[tokio::test]
+    async fn deno_delivery_registry_miss_rejects_undeliverable_request() {
+        let (handle, ep) = test_endpoint().await;
+        let (payload, rx) = pending_payload(&ep);
+
+        deliver_request_to_queue(handle, &ep, payload);
+
+        assert_undeliverable(rx);
+        cleanup(handle, ep).await;
+    }
+
+    #[tokio::test]
+    async fn deno_delivery_shutdown_mid_request_rejects_without_queueing() {
+        let (handle, ep) = test_endpoint().await;
+        let queue = serve_registry::register(handle);
+        serve_registry::signal_shutdown(handle);
+        let (payload, rx) = pending_payload(&ep);
+
+        deliver_request_to_queue(handle, &ep, payload);
+
+        assert_undeliverable(rx);
+        assert!(queue.rx.try_lock().unwrap().try_recv().is_err());
+        cleanup(handle, ep).await;
+    }
+
+    #[tokio::test]
+    async fn deno_delivery_queue_full_rejects_undeliverable_request() {
+        let (handle, ep) = test_endpoint().await;
+        let queue = serve_registry::register(handle);
+        for i in 0..10_000 {
+            if queue.tx.try_send(json!({ "reqHandle": i })).is_err() {
+                break;
+            }
+        }
+        assert!(
+            queue
+                .tx
+                .try_send(json!({ "reqHandle": "sentinel" }))
+                .is_err(),
+            "test setup should fill the bounded serve queue"
+        );
+        let (payload, rx) = pending_payload(&ep);
+
+        deliver_request_to_queue(handle, &ep, payload);
+
+        assert_undeliverable(rx);
+        cleanup(handle, ep).await;
+    }
+
+    #[tokio::test]
+    async fn deno_stop_serve_drains_queued_requests_and_stops_polling() {
+        let (handle, ep) = test_endpoint().await;
+        let queue = serve_registry::register(handle);
+        let (payload, rx) = pending_payload(&ep);
+        queue
+            .tx
+            .try_send(json!({ "reqHandle": payload.req_handle }))
+            .unwrap();
+
+        let result = stop_serve(json!({ "endpointHandle": handle })).await;
+
+        assert!(
+            result.get("ok").is_some(),
+            "stopServe should succeed: {result}"
+        );
+        assert_undeliverable(rx);
+        let mut out = [0u8; 64];
+        let poll =
+            unsafe { crate::iroh_http_try_next_request(handle, out.as_mut_ptr(), out.len()) };
+        assert_eq!(poll, -1, "polling should stop after stopServe shutdown");
+        cleanup(handle, ep).await;
     }
 }

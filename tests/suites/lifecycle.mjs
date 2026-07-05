@@ -42,10 +42,25 @@ export function lifecycleTests({ createNode, test, assert, assertEqual, assertNo
     await b.close();
   });
 
-  test("node has a secretKey", async () => {
-    const node = await createNode();
-    assert(node.secretKey != null, "secretKey is null");
-    await node.close();
+  test("secretKey is present only when a key is supplied", async () => {
+    // No key → the natively generated identity is never surfaced to JS.
+    const ephemeral = await createNode();
+    assert(
+      ephemeral.secretKey == null,
+      "secretKey must be undefined when no key is provided",
+    );
+    await ephemeral.close();
+
+    // Supplied key → the node hands it back.
+    const key = new Uint8Array(32).fill(7);
+    const keyed = await createNode({ key });
+    assert(keyed.secretKey != null, "secretKey must exist when key provided");
+    assertEqual(
+      Array.from(keyed.secretKey.toBytes()).join(","),
+      Array.from(key).join(","),
+      "secretKey must equal the supplied key",
+    );
+    await keyed.close();
   });
 
   test("node.addr() returns nodeId and addrs", async () => {
@@ -184,7 +199,8 @@ export function lifecycleTests({ createNode, test, assert, assertEqual, assertNo
   // ── Key persistence ────────────────────────────────────────────────────────
 
   test("createNode with saved key produces same publicKey", async () => {
-    const node1 = await createNode();
+    const key = new Uint8Array(32).fill(0x11);
+    const node1 = await createNode({ key });
     const savedKey = node1.secretKey.toBytes();
     const pk1 = node1.publicKey.toString();
     await node1.close();

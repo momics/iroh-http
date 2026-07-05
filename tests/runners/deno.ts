@@ -8,12 +8,12 @@
  *   deno test -A tests/runners/deno.ts
  */
 
+import { assert, assertEquals, assertNotEquals } from "jsr:@std/assert@^1";
 import {
-  assert,
-  assertEquals,
-  assertNotEquals,
-} from "jsr:@std/assert@^1";
-import { createNode, PublicKey, SecretKey } from "../../packages/iroh-http-deno/mod.ts";
+  createNode,
+  PublicKey,
+  SecretKey,
+} from "../../packages/iroh-http-deno/mod.ts";
 
 import { lifecycleTests } from "../suites/lifecycle.mjs";
 import { errorTests } from "../suites/errors.mjs";
@@ -23,6 +23,7 @@ import { sessionTests } from "../suites/sessions.mjs";
 import { keyTests } from "../suites/keys.mjs";
 import { discoveryTests } from "../suites/discovery.mjs";
 import { selfFetchTests } from "../suites/self-fetch.mjs";
+import { adapterValidationTests } from "../suites/adapter-validation.mjs";
 
 /** Adapter from shared test API → Deno.test + @std/assert */
 const ctx = {
@@ -32,14 +33,18 @@ const ctx = {
   test: (name: string, fn: () => Promise<void>) =>
     Deno.test({ name, sanitizeOps: false, sanitizeResources: false }, fn),
   assert: (v: unknown, msg?: string) => assert(v, msg),
-  assertEqual: (a: unknown, b: unknown, msg?: string) => assertEquals(a, b, msg),
-  assertNotEqual: (a: unknown, b: unknown, msg?: string) => assertNotEquals(a, b, msg),
+  assertEqual: (a: unknown, b: unknown, msg?: string) =>
+    assertEquals(a, b, msg),
+  assertNotEqual: (a: unknown, b: unknown, msg?: string) =>
+    assertNotEquals(a, b, msg),
   assertThrows: async (fn: () => Promise<unknown>) => {
     try {
       await fn();
       throw new Error("expected function to throw, but it did not");
     } catch (err) {
-      if ((err as Error).message === "expected function to throw, but it did not") throw err;
+      if (
+        (err as Error).message === "expected function to throw, but it did not"
+      ) throw err;
       return err;
     }
   },
@@ -47,7 +52,11 @@ const ctx = {
     try {
       return await promise;
     } catch (err) {
-      throw new Error(`expected promise to resolve, but it rejected: ${(err as Error).message}`);
+      throw new Error(
+        `expected promise to resolve, but it rejected: ${
+          (err as Error).message
+        }`,
+      );
     }
   },
 };
@@ -60,3 +69,4 @@ sessionTests(ctx);
 keyTests(ctx);
 discoveryTests(ctx);
 selfFetchTests(ctx);
+adapterValidationTests(ctx);

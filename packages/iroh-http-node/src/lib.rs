@@ -63,16 +63,32 @@ use slab::Slab;
 #[cfg(feature = "discovery")]
 use tokio::sync::Mutex as TokioMutex;
 
-use iroh_http_adapter::{core_error_to_json, format_error_json};
+use iroh_http_adapter::{
+    core_error_to_json, format_error_json, safe_f64_to_u64 as adapter_safe_f64_to_u64,
+    safe_f64_to_usize as adapter_safe_f64_to_usize, send_undeliverable_rejection,
+    validate_header_rows, AdapterInputError, MAX_BODY_BYTES as ADAPTER_MAX_BODY_BYTES,
+    MAX_TIMEOUT_MS as ADAPTER_MAX_TIMEOUT_MS,
+};
+
+struct PathSub {
+    rx: tokio::sync::Mutex<
+        tokio::sync::mpsc::UnboundedReceiver<iroh_http_core::endpoint::PathInfo>,
+    >,
+    notify: tokio::sync::Notify,
+}
+
+type PathRxMap = dashmap::DashMap<(u32, String), Arc<PathSub>>;
+
+fn path_change_rxs() -> &'static PathRxMap {
+    static PATH_CHANGE_RXS: std::sync::OnceLock<PathRxMap> = std::sync::OnceLock::new();
+    PATH_CHANGE_RXS.get_or_init(dashmap::DashMap::new)
+}
 
 // ── Endpoint helpers ──────────────────────────────────────────────────────────
 
 const MAX_NODE_ID_LEN: usize = 128;
 const MAX_URL_LEN: usize = 8_192;
 const MAX_METHOD_LEN: usize = 32;
-const MAX_HEADER_COUNT: usize = 100;
-const MAX_HEADER_NAME_LEN: usize = 256;
-const MAX_HEADER_VALUE_LEN: usize = 8_192;
 const MAX_DIRECT_ADDRS: usize = 32;
 const MAX_DIRECT_ADDR_LEN: usize = 256;
 #[cfg(feature = "discovery")]
@@ -138,6 +154,10 @@ fn ffi_invalid_arg(err: FfiError) -> napi::Error {
         Status::InvalidArg,
         format_error_json(err.code(), err.message()),
     )
+}
+
+fn ffi_adapter_invalid_arg(err: AdapterInputError) -> napi::Error {
+    napi::Error::new(Status::InvalidArg, err.to_json())
 }
 
 #[cfg(feature = "discovery")]
@@ -217,33 +237,6 @@ fn validate_direct_addrs_input(
         }
     }
     Ok(())
-}
-
-fn validate_header_rows(headers: Vec<Vec<String>>) -> napi::Result<Vec<(String, String)>> {
-    if headers.len() > MAX_HEADER_COUNT {
-        return Err(ffi_invalid_arg(FfiError::InputTooLarge {
-            field: "headers",
-            max: MAX_HEADER_COUNT,
-            got: headers.len(),
-        }));
-    }
-    let mut pairs = Vec::with_capacity(headers.len());
-    for pair in headers {
-        if pair.len() != 2 {
-            return Err(ffi_invalid_arg(FfiError::InvalidArgument {
-                field: "headers",
-                reason: "each header must be [name, value]".to_string(),
-            }));
-        }
-        let name = &pair[0];
-        let value = &pair[1];
-        validate_bounded_string("headerName", name, MAX_HEADER_NAME_LEN)
-            .map_err(ffi_invalid_arg)?;
-        validate_bounded_string("headerValue", value, MAX_HEADER_VALUE_LEN)
-            .map_err(ffi_invalid_arg)?;
-        pairs.push((name.clone(), value.clone()));
-    }
-    Ok(pairs)
 }
 
 // ── Local handle indirection ──────────────────────────────────────────────────
@@ -412,8 +405,6 @@ pub struct JsEndpointInfo {
     pub endpoint_handle: u32,
     /// Base32-encoded public key (stable node identity).
     pub node_id: String,
-    /// 32-byte Ed25519 secret key — store to restore the same identity.
-    pub keypair: Uint8Array,
 }
 
 /// Bind an Iroh QUIC endpoint and return a handle for subsequent operations.
@@ -515,18 +506,12 @@ pub async fn create_endpoint(options: Option<JsNodeOptions>) -> napi::Result<JsE
         .map_err(|e| napi::Error::new(Status::GenericFailure, core_error_to_json(&e)))?;
 
     let node_id = ep.node_id().to_string();
-    // SECURITY: secret_key_bytes() returns raw private key material.
-    // The Uint8Array returned to JS is not zeroed automatically; callers
-    // must overwrite it with zeros after writing to encrypted storage.
-    // Never log, include in error payloads, or pass to untrusted code.
-    let keypair = ep.secret_key_bytes().to_vec();
     let handle_u64 = registry::insert_endpoint(ep);
     let handle = alloc_local_handle(handle_u64);
 
     Ok(JsEndpointInfo {
         endpoint_handle: handle,
         node_id,
-        keypair: Uint8Array::new(keypair),
     })
 }
 
@@ -801,6 +786,8 @@ pub struct JsEndpointStats {
     pub pool_size: i64,
     pub active_connections: i64,
     pub active_requests: i64,
+    pub active_path_subscriptions: i64,
+    pub active_path_watchers: i64,
 }
 
 /// Snapshot of current endpoint statistics (point-in-time).
@@ -816,6 +803,8 @@ pub fn endpoint_stats(endpoint_handle: u32) -> napi::Result<JsEndpointStats> {
         pool_size: s.pool_size as i64,
         active_connections: s.active_connections as i64,
         active_requests: s.active_requests as i64,
+        active_path_subscriptions: s.active_path_subscriptions as i64,
+        active_path_watchers: s.active_path_watchers as i64,
     })
 }
 
@@ -889,12 +878,7 @@ pub async fn next_path_change(
     endpoint_handle: u32,
     node_id: String,
 ) -> napi::Result<Option<String>> {
-    type PathRx = tokio::sync::Mutex<
-        tokio::sync::mpsc::UnboundedReceiver<iroh_http_core::endpoint::PathInfo>,
-    >;
-    type PathRxMap = dashmap::DashMap<(u32, String), Arc<PathRx>>;
-    static PATH_CHANGE_RXS: std::sync::OnceLock<PathRxMap> = std::sync::OnceLock::new();
-    let rxs = PATH_CHANGE_RXS.get_or_init(dashmap::DashMap::new);
+    let rxs = path_change_rxs();
 
     validate_node_id_input(&node_id).map_err(ffi_invalid_arg)?;
     let ep = get_endpoint(endpoint_handle)?;
@@ -905,15 +889,21 @@ pub async fn next_path_change(
         .entry(key.clone())
         .or_insert_with(|| {
             let rx = ep.subscribe_path_changes(&node_id);
-            Arc::new(tokio::sync::Mutex::new(rx))
+            Arc::new(PathSub {
+                rx: tokio::sync::Mutex::new(rx),
+                notify: tokio::sync::Notify::new(),
+            })
         })
         .clone();
 
-    let mut rx = rx_arc.lock().await;
-    match rx.recv().await {
+    let mut rx = rx_arc.rx.lock().await;
+    match tokio::select! {
+        path = rx.recv() => path,
+        () = rx_arc.notify.notified() => None,
+    } {
         None => {
             drop(rx);
-            rxs.remove(&key);
+            rxs.remove_if(&key, |_, existing| Arc::ptr_eq(existing, &rx_arc));
             Ok(None)
         }
         Some(path) => {
@@ -922,6 +912,18 @@ pub async fn next_path_change(
             Ok(Some(json))
         }
     }
+}
+
+/// Unsubscribe from path changes for a specific peer.
+#[napi]
+pub fn unsubscribe_path_changes(endpoint_handle: u32, node_id: String) -> napi::Result<()> {
+    validate_node_id_input(&node_id).map_err(ffi_invalid_arg)?;
+    let ep = get_endpoint(endpoint_handle)?;
+    if let Some((_, sub)) = path_change_rxs().remove(&(endpoint_handle, node_id.clone())) {
+        sub.notify.notify_waiters();
+    }
+    ep.unsubscribe_path_changes(&node_id);
+    Ok(())
 }
 
 // ── Body streaming ────────────────────────────────────────────────────────────
@@ -1074,7 +1076,7 @@ pub async fn raw_fetch(
     validate_method_input(&method).map_err(ffi_invalid_arg)?;
     validate_direct_addrs_input(&direct_addrs).map_err(ffi_invalid_arg)?;
 
-    let pairs = validate_header_rows(headers)?;
+    let pairs = validate_header_rows(headers).map_err(ffi_adapter_invalid_arg)?;
 
     let req_body_reader = req_body_handle
         .map(get_handle)
@@ -1084,10 +1086,14 @@ pub async fn raw_fetch(
     let addrs =
         parse_direct_addrs(&direct_addrs).map_err(|e| napi::Error::new(Status::InvalidArg, e))?;
     let timeout = timeout_ms
-        .and_then(|ms| safe_f64_to_u64(ms, "timeoutMs", MAX_TIMEOUT_MS).ok())
+        .map(|ms| adapter_safe_f64_to_u64(ms, "timeoutMs", ADAPTER_MAX_TIMEOUT_MS))
+        .transpose()
+        .map_err(ffi_adapter_invalid_arg)?
         .map(std::time::Duration::from_millis);
     let max_resp = max_response_body_bytes
-        .and_then(|b| safe_f64_to_usize(b, "maxResponseBodyBytes", MAX_BODY_BYTES).ok());
+        .map(|b| adapter_safe_f64_to_usize(b, "maxResponseBodyBytes", ADAPTER_MAX_BODY_BYTES))
+        .transpose()
+        .map_err(ffi_adapter_invalid_arg)?;
     let res = iroh_http_core::fetch(
         &ep,
         &node_id,
@@ -1130,7 +1136,7 @@ pub fn raw_respond(
     headers: Vec<Vec<String>>,
 ) -> napi::Result<()> {
     let ep = get_endpoint(endpoint_handle)?;
-    let header_pairs = validate_header_rows(headers)?;
+    let header_pairs = validate_header_rows(headers).map_err(ffi_adapter_invalid_arg)?;
     respond(
         ep.handles(),
         get_handle(req_handle)?,
@@ -1279,12 +1285,11 @@ pub async fn raw_serve(
             let status = tsfn.call(js_args, ThreadsafeFunctionCallMode::NonBlocking);
             if status != napi::Status::Ok {
                 tracing::warn!("iroh-http-node: TSFN enqueue failed ({status:?}), responding 503");
-                let _ = ep_ref.handles().take_req_sender(req_handle).map(|tx| {
-                    let _ = tx.send(iroh_http_core::ResponseHeadEntry {
-                        status: 503,
-                        headers: vec![("content-length".to_string(), "0".to_string())],
-                    });
-                });
+                let _ = send_undeliverable_rejection(
+                    ep_ref.handles(),
+                    req_handle,
+                    format_args!("node TSFN enqueue failed: {status:?}"),
+                );
             }
         },
         conn_event_fn,
