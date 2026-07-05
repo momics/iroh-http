@@ -72,19 +72,6 @@ impl IrohEndpoint {
         &self.inner.transport.node_id_str
     }
 
-    /// The node's raw secret key bytes (32 bytes).
-    ///
-    /// # Security
-    ///
-    /// **These 32 bytes are the irrecoverable private key for this node.**
-    /// Anyone who obtains them can impersonate this node permanently.
-    /// Never log, print, or include in error payloads. Encrypt at rest.
-    /// Zeroize after use.
-    #[must_use]
-    pub fn secret_key_bytes(&self) -> [u8; 32] {
-        self.inner.transport.ep.secret_key().to_bytes()
-    }
-
     // ── Handle store ─────────────────────────────────────────────────────────
 
     /// Per-endpoint handle store.
