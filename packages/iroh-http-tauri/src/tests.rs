@@ -58,7 +58,6 @@ mod command_tests {
         .expect("create_endpoint should succeed");
 
         assert!(!result.node_id.is_empty(), "node_id should be non-empty");
-        assert_eq!(result.keypair.len(), 32, "keypair should be 32 bytes");
         result.endpoint_handle
     }
 
@@ -257,9 +256,15 @@ mod command_tests {
 
     #[tokio::test]
     async fn test_sign_and_verify() {
-        // Create an endpoint to get a real keypair and node_id (public key).
+        // Create an endpoint with a caller-supplied key so we own the secret
+        // directly — the endpoint never exports it (keys stay native-held).
+        let sk_bytes = B64
+            .decode(generate_secret_key().expect("generate key"))
+            .expect("valid base64");
+        let sk_b64 = B64.encode(&sk_bytes);
+
         let info = create_endpoint(mock_handle(), Some(CreateEndpointArgs {
-            key: None,
+            key: Some(sk_b64.clone()),
             idle_timeout: None,
             relay_mode: Some("disabled".into()),
             relays: None,
@@ -283,8 +288,7 @@ mod command_tests {
         .await
         .expect("create_endpoint");
 
-        // Secret key from endpoint info (32 bytes).
-        let sk_b64 = B64.encode(&info.keypair);
+        // Secret key is the one we supplied at creation (32 bytes).
         // Public key: decode node_id from base32 (lowercase, no padding).
         let pk_bytes = base32::decode(
             base32::Alphabet::Rfc4648Lower { padding: false },

@@ -71,6 +71,8 @@ export interface EndpointStats {
   poolSize: number;
   activeConnections: number;
   activeRequests: number;
+  activePathSubscriptions: number;
+  activePathWatchers: number;
 }
 
 export interface PeerStats {

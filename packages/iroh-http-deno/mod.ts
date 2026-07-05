@@ -11,7 +11,12 @@
  * ```
  */
 
-import { IrohNode, type NodeOptions } from "@momics/iroh-http-shared";
+import {
+  IrohNode,
+  type IrohNodeWithSecret,
+  type NodeOptions,
+  type SecretKey,
+} from "@momics/iroh-http-shared";
 import {
   createEndpointInfo,
   DenoAdapter,
@@ -34,7 +39,10 @@ export { PublicKey, SecretKey } from "@momics/iroh-http-shared";
  * @param options Optional configuration ({@link NodeOptions}). Omit `key` to
  *   generate a fresh identity; pass a saved `key` to keep a stable node ID across
  *   restarts. Relay, discovery, and tuning are all configured here.
- * @returns A ready-to-use {@link IrohNode}.
+ * @returns A ready-to-use {@link IrohNode}. When you pass a `key`, the returned
+ *   node's `secretKey` is non-optional ({@link IrohNodeWithSecret}); omit `key`
+ *   and the natively generated identity is never surfaced, so `secretKey` is
+ *   `undefined`. To persist an identity, generate a key and pass it back in.
  *
  * @example
  * ```ts
@@ -47,7 +55,13 @@ export { PublicKey, SecretKey } from "@momics/iroh-http-shared";
  * await node.close();
  * ```
  */
-export async function createNode(options?: NodeOptions): Promise<IrohNode> {
+export function createNode(
+  options: NodeOptions & { key: SecretKey | Uint8Array },
+): Promise<IrohNodeWithSecret>;
+export function createNode(options?: NodeOptions): Promise<IrohNode>;
+export async function createNode(
+  options?: NodeOptions,
+): Promise<IrohNode> {
   const info = await createEndpointInfo(options);
   const adapter = new DenoAdapter(info.endpointHandle);
   return IrohNode._create(
@@ -58,4 +72,4 @@ export async function createNode(options?: NodeOptions): Promise<IrohNode> {
   );
 }
 
-export type { IrohNode, NodeOptions };
+export type { IrohNode, IrohNodeWithSecret, NodeOptions };

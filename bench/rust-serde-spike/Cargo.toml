@@ -1,0 +1,22 @@
+# Standalone research spike for issue #286 (perf-2).
+# NOT a workspace member and NOT a production build target — the empty
+# [workspace] table isolates it from the repo workspace so `cargo bench`
+# here never pulls in production crates. Delete freely; nothing depends on it.
+[package]
+name = "deno-serde-spike"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+criterion = "0.8"
+
+[[bench]]
+name = "deno_fetch_serde"
+harness = false

@@ -107,7 +107,8 @@ This is a **loopback, not a network path**. It is the same decision shape as
   per-connection server stack applied at the accept loop (connection-level
   timeouts, body limits). A self-request is therefore **not** a
   network-reachability check. The request-level `timeout` and cancellation
-  passed to `fetch` are still honored.
+  passed to `fetch` are still honored. The `decompress` / compression knob is
+  a no-op on this self-loopback path because compression is wire-only.
 - **Authenticated identity is truthful.** The handler observes `peer-id ==
   own node id`. It is not produced by a cryptographic handshake (there is no
   remote to authenticate), but it cannot be spoofed by a third party.

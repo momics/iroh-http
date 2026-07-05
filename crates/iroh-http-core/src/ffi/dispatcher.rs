@@ -26,7 +26,8 @@ use tower::Service;
 use crate::ffi::handles::ResponseHeadEntry;
 use crate::ffi::pumps::pump_hyper_body_to_channel;
 use crate::http::server::{
-    serve_with_events, ConnectionEventFn, RemoteNodeId, ServeHandle, ServeOptions,
+    options::DEFAULT_MAX_REQUEST_BODY_BYTES, serve_with_events, ConnectionEventFn, RemoteNodeId,
+    ServeHandle, ServeOptions,
 };
 use crate::{Body, CoreError, IrohEndpoint, RequestPayload};
 
@@ -103,16 +104,33 @@ impl Drop for ReqHeadGuard {
 /// JS `on_request` callback, and rendezvous on the response head sent via
 /// [`respond`]. Shared across every accepted connection and request via
 /// `Arc`.
-struct FfiDispatcher {
+pub(crate) struct FfiDispatcher {
     on_request: Arc<dyn Fn(RequestPayload) + Send + Sync>,
     endpoint: IrohEndpoint,
     own_node_id: Arc<String>,
     max_header_size: Option<usize>,
+    max_request_body_wire_bytes: Option<usize>,
 }
 
 #[derive(Clone)]
 pub(crate) struct IrohHttpService {
     dispatcher: Arc<FfiDispatcher>,
+}
+
+impl IrohHttpService {
+    /// Downgrade to a Weak handle for the self-request slot (#282): the
+    /// endpoint stores only a Weak so it cannot form a strong reference
+    /// cycle (endpoint → service → dispatcher → endpoint).
+    pub(crate) fn downgrade(&self) -> std::sync::Weak<FfiDispatcher> {
+        std::sync::Arc::downgrade(&self.dispatcher)
+    }
+
+    /// Reconstruct a live service from a stored Weak, or None if the
+    /// serve task has been torn down (the "no active server" path).
+    pub(crate) fn upgrade(weak: &std::sync::Weak<FfiDispatcher>) -> Option<Self> {
+        weak.upgrade()
+            .map(|dispatcher| IrohHttpService { dispatcher })
+    }
 }
 
 /// ADR-014 D2 / #175: service is concrete — not generic over `B`.
@@ -151,6 +169,7 @@ impl FfiDispatcher {
         let handles = self.endpoint.handles();
         let own_node_id = &*self.own_node_id;
         let max_header_size = self.max_header_size;
+        let max_request_body_wire_bytes = self.max_request_body_wire_bytes;
 
         let method = req.method().to_string();
         let path_and_query = req
@@ -223,6 +242,26 @@ impl FfiDispatcher {
             }
         }
         req_headers.push(("peer-id".to_string(), (*remote_node_id).clone()));
+
+        if let (Some(limit), Some(content_length)) = (
+            max_request_body_wire_bytes,
+            req.headers().get(hyper::header::CONTENT_LENGTH),
+        ) {
+            match content_length
+                .to_str()
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+            {
+                Some(len) if len > limit as u64 => {
+                    drop(req.into_body());
+                    return hyper::Response::builder()
+                        .status(StatusCode::PAYLOAD_TOO_LARGE)
+                        .body(Body::empty())
+                        .expect("static response args are valid");
+                }
+                _ => {}
+            }
+        }
 
         let url = format!("httpi://{own_node_id}{path_and_query}");
 
@@ -330,13 +369,16 @@ where
         } else {
             Some(max_header_size)
         },
+        max_request_body_wire_bytes: options
+            .max_request_body_wire_bytes
+            .or(Some(DEFAULT_MAX_REQUEST_BODY_BYTES)),
     });
     let svc = IrohHttpService { dispatcher };
 
     // Register the service for in-process self-requests (ADR-015): a later
     // `fetch()` to this node's own id dispatches to this exact service instead
     // of dialing over QUIC (which iroh forbids). Cleared on serve stop / close.
-    endpoint.set_local_service(svc.clone());
+    endpoint.set_local_service(&svc);
 
     serve_with_events(endpoint, options, svc, on_connection_event)
 }
@@ -438,6 +480,7 @@ mod tests {
             endpoint,
             own_node_id,
             max_header_size,
+            max_request_body_wire_bytes: None,
         })
     }
 

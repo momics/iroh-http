@@ -11,7 +11,7 @@
 
 use std::sync::Mutex;
 
-use crate::ffi::dispatcher::IrohHttpService;
+use crate::ffi::dispatcher::FfiDispatcher;
 use crate::ffi::handles::HandleStore;
 
 /// FFI handle store and any future JS-facing token registries.
@@ -19,10 +19,10 @@ pub(in crate::endpoint) struct FfiBridge {
     /// Per-endpoint handle store — owns all body readers, writers,
     /// sessions, request-head channels, and fetch-cancel tokens.
     pub(in crate::endpoint) handles: HandleStore,
-    /// The locally-registered serve service, stored while a `serve()` is
+    /// A weak handle to the locally-registered serve service, stored while a `serve()` is
     /// active so that a self-request (`fetch()` to this node's own id) can be
     /// dispatched in-process instead of dialing over QUIC, which iroh forbids.
     /// Set when serving starts and cleared on serve stop / endpoint close.
     /// See ADR-015 and [`crate::ffi::fetch`].
-    pub(in crate::endpoint) local_service: Mutex<Option<IrohHttpService>>,
+    pub(in crate::endpoint) local_service: Mutex<Option<std::sync::Weak<FfiDispatcher>>>,
 }

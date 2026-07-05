@@ -168,7 +168,6 @@ describe("createNode IPC", () => {
           endpointHandle: 1,
           // Valid base32-encoded 32-byte public key (all zeros).
           nodeId: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-          keypair: Array.from(new Uint8Array(32)),
         };
       }
       if (cmd === "plugin:iroh-http|wait_endpoint_closed") {
@@ -187,6 +186,7 @@ describe("createNode IPC", () => {
     const node = await createNode({ disableNetworking: true });
 
     expect(node).toBeDefined();
+    expect(node.secretKey).toBeUndefined();
     expect(invokedCommands).toContain("plugin:iroh-http|create_endpoint");
     expect(invokedCommands).toContain("plugin:iroh-http|wait_endpoint_closed");
   });
