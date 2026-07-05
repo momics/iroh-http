@@ -42,7 +42,7 @@ async function withTimeout<T>(
   message: string,
   timeoutMs = 2_000,
 ): Promise<T> {
-  let timeout: number | undefined;
+  let timeout: ReturnType<typeof setTimeout> | undefined;
   try {
     return await Promise.race([
       promise,
