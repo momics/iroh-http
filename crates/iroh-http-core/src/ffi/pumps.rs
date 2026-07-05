@@ -156,6 +156,13 @@ pub(crate) async fn pump_hyper_body_to_channel_limited<B>(
         };
         match frame_result {
             Err(e) => {
+                if overflowed {
+                    // We already aborted with `BodyTooLarge` and are draining
+                    // remaining frames. A drain-time stream error (e.g. the peer
+                    // resets after being told the body is too large) must not
+                    // overwrite the terminal size-violation error with `Internal`.
+                    break;
+                }
                 // Box the error so we can inspect the concrete type behind the
                 // body's `BoxError`. Deref (`&*boxed`) yields a trait object
                 // carrying the *concrete* vtable, so `is::<LengthLimitError>`
@@ -416,6 +423,47 @@ mod tests {
             code,
             Some(crate::ErrorCode::BodyTooLarge),
             "stack-enforced decoded cap (LengthLimitError) must map to BodyTooLarge"
+        );
+    }
+
+    /// Regression (#269/#271 review): once an over-limit body has been aborted
+    /// with `BodyTooLarge`, a stream error encountered while draining the
+    /// remaining frames (e.g. the peer resets after the 413) must NOT overwrite
+    /// the terminal error with `Internal`. The size-violation classification wins.
+    #[tokio::test]
+    async fn pump_drain_time_error_preserves_body_too_large() {
+        use http_body::Frame;
+        let (writer, reader) = make_body_channel();
+        // 3 × 50 = 150 bytes, limit 100: frame 3 overflows → BodyTooLarge, then
+        // frame 4 is a drain-time stream error that must not clobber it.
+        let err = std::io::Error::other("connection reset by peer");
+        let frames = futures::stream::iter(vec![
+            Ok::<_, std::io::Error>(Frame::data(Bytes::from_static(FIFTY))),
+            Ok(Frame::data(Bytes::from_static(FIFTY))),
+            Ok(Frame::data(Bytes::from_static(FIFTY))),
+            Err(err),
+        ]);
+        let body = StreamBody::new(frames);
+        let pump = tokio::spawn(pump_hyper_body_to_channel_limited(
+            body,
+            writer,
+            Some(100),
+            Duration::from_secs(5),
+            None,
+        ));
+        while reader.next_chunk().await.is_some() {}
+        pump.await.unwrap();
+
+        let code = reader
+            .terminal_error
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|e| e.code);
+        assert_eq!(
+            code,
+            Some(crate::ErrorCode::BodyTooLarge),
+            "a drain-time stream error must not overwrite the BodyTooLarge terminal error"
         );
     }
 
