@@ -89,6 +89,7 @@ handle_to_key!(handle_to_fetch_cancel_key, FetchCancelKey);
 ///   [`Body`](http_body::Body) impl is never polled.
 pub struct BodyReader {
     pub(crate) rx: Arc<tokio::sync::Mutex<mpsc::Receiver<Bytes>>>,
+    pub(crate) terminal_error: Arc<Mutex<Option<CoreError>>>,
     /// ISS-010: cancellation signal — notified when `cancel_reader` is called
     /// so in-flight `next_chunk` awaits terminate promptly.
     pub(crate) cancel: Arc<tokio::sync::Notify>,
@@ -117,6 +118,7 @@ pub struct BodyReader {
 ///   timeout) match `send_chunk` byte-for-byte.
 pub struct BodyWriter {
     pub(crate) tx: mpsc::Sender<Bytes>,
+    pub(crate) terminal_error: Arc<Mutex<Option<CoreError>>>,
     /// Drain timeout baked in at channel-creation time from the endpoint config.
     pub(crate) drain_timeout: Duration,
     /// In-flight `send_chunk` future driven by the [`Sink`] impl. `None`
@@ -145,14 +147,17 @@ pub fn make_body_channel() -> (BodyWriter, BodyReader) {
 
 fn make_body_channel_with(capacity: usize, drain_timeout: Duration) -> (BodyWriter, BodyReader) {
     let (tx, rx) = mpsc::channel(capacity);
+    let terminal_error = Arc::new(Mutex::new(None));
     (
         BodyWriter {
             tx,
+            terminal_error: terminal_error.clone(),
             drain_timeout,
             sending: None,
         },
         BodyReader {
             rx: Arc::new(tokio::sync::Mutex::new(rx)),
+            terminal_error,
             cancel: Arc::new(tokio::sync::Notify::new()),
             pending: None,
         },
@@ -218,6 +223,15 @@ impl BodyWriter {
             .await
             .map_err(|_| "drain timeout: body reader is too slow".to_string())?
             .map_err(|_| "body reader dropped".to_string())
+    }
+
+    /// Mark the channel as ending with an error. The writer must then be
+    /// dropped so readers observe this terminal state instead of clean EOF.
+    pub(crate) fn abort(&self, error: CoreError) {
+        *self
+            .terminal_error
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(error);
     }
 }
 
@@ -582,13 +596,17 @@ impl HandleStore {
     /// cleaned up from the registry automatically.
     pub async fn next_chunk(&self, handle: u64) -> Result<Option<Bytes>, CoreError> {
         // Clone the Arc — allows awaiting without holding the registry mutex.
-        let (rx_arc, cancel) = {
+        let (rx_arc, cancel, terminal_error) = {
             let mut reg = self.readers.lock().unwrap_or_else(|e| e.into_inner());
             let entry = reg
                 .get_mut(handle_to_reader_key(handle))
                 .ok_or_else(|| CoreError::invalid_handle(handle))?;
             entry.touch();
-            (entry.value.rx.clone(), entry.value.cancel.clone())
+            (
+                entry.value.rx.clone(),
+                entry.value.cancel.clone(),
+                entry.value.terminal_error.clone(),
+            )
         };
 
         let chunk = recv_with_cancel(rx_arc, cancel).await;
@@ -599,6 +617,13 @@ impl HandleStore {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .remove(handle_to_reader_key(handle));
+            if let Some(error) = terminal_error
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take()
+            {
+                return Err(error);
+            }
         }
 
         Ok(chunk)
@@ -616,13 +641,13 @@ impl HandleStore {
     /// the body-read hot path.  When data is already buffered in the channel,
     /// this returns it synchronously on the JS thread.
     pub fn try_next_chunk(&self, handle: u64) -> Result<Option<Bytes>, CoreError> {
-        let rx_arc = {
+        let (rx_arc, terminal_error) = {
             let mut reg = self.readers.lock().unwrap_or_else(|e| e.into_inner());
             let entry = reg
                 .get_mut(handle_to_reader_key(handle))
                 .ok_or_else(|| CoreError::invalid_handle(handle))?;
             entry.touch();
-            entry.value.rx.clone()
+            (entry.value.rx.clone(), entry.value.terminal_error.clone())
         };
 
         // Try to acquire the tokio mutex without blocking.
@@ -643,6 +668,13 @@ impl HandleStore {
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .remove(handle_to_reader_key(handle));
+                if let Some(error) = terminal_error
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .take()
+                {
+                    return Err(error);
+                }
                 Ok(None)
             }
         }

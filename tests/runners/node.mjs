@@ -10,7 +10,11 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createNode, PublicKey, SecretKey } from "../../packages/iroh-http-node/lib.js";
+import {
+  createNode,
+  PublicKey,
+  SecretKey,
+} from "../../packages/iroh-http-node/lib.js";
 
 import { lifecycleTests } from "../suites/lifecycle.mjs";
 import { errorTests } from "../suites/errors.mjs";
@@ -20,6 +24,7 @@ import { sessionTests } from "../suites/sessions.mjs";
 import { keyTests } from "../suites/keys.mjs";
 import { discoveryTests } from "../suites/discovery.mjs";
 import { selfFetchTests } from "../suites/self-fetch.mjs";
+import { adapterValidationTests } from "../suites/adapter-validation.mjs";
 
 /** Adapter from shared test API → node:test + node:assert */
 const ctx = {
@@ -43,7 +48,9 @@ const ctx = {
     try {
       return await promise;
     } catch (err) {
-      assert.fail(`expected promise to resolve, but it rejected: ${err.message}`);
+      assert.fail(
+        `expected promise to resolve, but it rejected: ${err.message}`,
+      );
     }
   },
 };
@@ -56,3 +63,4 @@ sessionTests(ctx);
 keyTests(ctx);
 discoveryTests(ctx);
 selfFetchTests(ctx);
+adapterValidationTests(ctx);

@@ -5,7 +5,7 @@
 //! SessionRuntime intentionally stays here alongside IrohEndpoint (tight
 //! lifecycle coupling; no further move is planned).
 
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::sync::Mutex;
 
 use dashmap::DashMap;
@@ -41,4 +41,6 @@ pub(in crate::endpoint) struct SessionRuntime {
     /// Per-peer path-change subscriptions. Key: `node_id_str`. Populated
     /// lazily when `subscribe_path_changes` is called.
     pub(in crate::endpoint) path_subs: DashMap<String, mpsc::UnboundedSender<PathInfo>>,
+    /// Number of live path-change watcher tasks.
+    pub(in crate::endpoint) active_path_watchers: AtomicUsize,
 }

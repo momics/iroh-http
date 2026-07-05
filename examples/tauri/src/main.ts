@@ -77,7 +77,11 @@ function persistKey(key: Uint8Array): void {
 // ── Node init ──────────────────────────────────────────────────────────────────
 
 const savedKey = loadSavedKey();
-const node = await createNode({ key: savedKey });
+// The app owns its identity: reuse the saved key, or generate one ourselves.
+// A key is always supplied to createNode, so node.secretKey is guaranteed
+// present (the Tauri adapter never exports a native-generated key).
+const key = savedKey ?? SecretKey.generate().toBytes();
+const node = await createNode({ key });
 // Always persist so a just-generated key survives the next restart.
 persistKey(node.secretKey.toBytes());
 

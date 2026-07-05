@@ -13,7 +13,10 @@ use tauri::Manager;
 
 use crate::state;
 
-use iroh_http_adapter::{core_error_to_json, format_error_json};
+use iroh_http_adapter::{
+    core_error_to_json, format_error_json, safe_f64_to_u64, safe_f64_to_usize,
+    send_undeliverable_rejection, validate_header_rows, MAX_BODY_BYTES, MAX_TIMEOUT_MS,
+};
 
 // ── Endpoint ──────────────────────────────────────────────────────────────────
 
@@ -52,7 +55,6 @@ pub struct CreateEndpointArgs {
 pub struct EndpointInfoPayload {
     pub endpoint_handle: u64,
     pub node_id: String,
-    pub keypair: Vec<u8>,
 }
 
 /// Bind an Iroh endpoint and return a handle + identity info.
@@ -126,11 +128,6 @@ pub async fn create_endpoint<R: tauri::Runtime>(
         .map_err(|e| core_error_to_json(&e))?;
 
     let node_id = ep.node_id().to_string();
-    // SECURITY: secret_key_bytes() returns raw private key material.
-    // The Vec<u8> serialised into the Tauri response is not zeroed automatically;
-    // callers must overwrite it with zeros after writing to encrypted storage.
-    // Never log, include in error payloads, or pass to untrusted code.
-    let keypair = ep.secret_key_bytes().to_vec();
     let handle = state::insert_endpoint(ep);
 
     // Auto-bind the httpi:// scheme handler to the first endpoint created.
@@ -143,7 +140,6 @@ pub async fn create_endpoint<R: tauri::Runtime>(
     Ok(EndpointInfoPayload {
         endpoint_handle: handle,
         node_id,
-        keypair,
     })
 }
 
@@ -475,9 +471,9 @@ pub struct RawFetchArgs {
     pub req_body_handle: Option<u64>,
     pub fetch_token: Option<u64>,
     pub direct_addrs: Option<Vec<String>>,
-    pub timeout_ms: Option<u64>,
+    pub timeout_ms: Option<f64>,
     pub decompress: Option<bool>,
-    pub max_response_body_bytes: Option<u64>,
+    pub max_response_body_bytes: Option<f64>,
 }
 
 /// Response payload returned by `rawFetch`.
@@ -500,23 +496,24 @@ pub async fn fetch(args: RawFetchArgs) -> Result<FfiResponsePayload, String> {
         )
     })?;
 
-    let pairs: Vec<(String, String)> = args
-        .headers
-        .into_iter()
-        .filter_map(|p| {
-            if p.len() == 2 {
-                Some((p[0].clone(), p[1].clone()))
-            } else {
-                None
-            }
-        })
-        .collect();
+    let pairs = validate_header_rows(args.headers).map_err(|e| e.to_json())?;
 
     let req_body_reader = args
         .req_body_handle
         .and_then(|h| ep.handles().claim_pending_reader(h));
 
     let addrs = parse_direct_addrs(&args.direct_addrs)?;
+    let timeout = args
+        .timeout_ms
+        .map(|ms| safe_f64_to_u64(ms, "timeoutMs", MAX_TIMEOUT_MS))
+        .transpose()
+        .map_err(|e| e.to_json())?
+        .map(std::time::Duration::from_millis);
+    let max_response_body_bytes = args
+        .max_response_body_bytes
+        .map(|b| safe_f64_to_usize(b, "maxResponseBodyBytes", MAX_BODY_BYTES))
+        .transpose()
+        .map_err(|e| e.to_json())?;
     let res = iroh_http_core::fetch(
         &ep,
         &args.node_id,
@@ -526,9 +523,9 @@ pub async fn fetch(args: RawFetchArgs) -> Result<FfiResponsePayload, String> {
         req_body_reader,
         args.fetch_token,
         addrs.as_deref(),
-        args.timeout_ms.map(std::time::Duration::from_millis),
+        timeout,
         args.decompress.unwrap_or(true),
-        args.max_response_body_bytes.map(|b| b as usize),
+        max_response_body_bytes,
     )
     .await
     .map_err(|e| core_error_to_json(&e))?;
@@ -643,11 +640,10 @@ pub async fn serve(
                 tracing::warn!("iroh-http-tauri: channel send error: {e}; responding 503");
                 // The JS side will never see this request — close it fail-closed so
                 // the client receives a 503 instead of a hung connection.
-                let _ = respond(
+                let _ = send_undeliverable_rejection(
                     ep_for_closure.handles(),
                     req_handle,
-                    503,
-                    vec![("content-length".into(), "0".into())],
+                    format_args!("tauri channel send failed: {e}"),
                 );
                 let _ = ep_for_closure.handles().finish_body(res_body_handle);
             }
@@ -722,17 +718,7 @@ pub fn respond_to_request(args: RespondArgs) -> Result<(), String> {
             format!("invalid endpoint handle: {}", args.endpoint_handle),
         )
     })?;
-    let headers: Vec<(String, String)> = args
-        .headers
-        .into_iter()
-        .filter_map(|p| {
-            if p.len() == 2 {
-                Some((p[0].clone(), p[1].clone()))
-            } else {
-                None
-            }
-        })
-        .collect();
+    let headers = validate_header_rows(args.headers).map_err(|e| e.to_json())?;
     respond(ep.handles(), args.req_handle, args.status, headers).map_err(|e| core_error_to_json(&e))
 }
 // ── Session ───────────────────────────────────────────────────────────────────

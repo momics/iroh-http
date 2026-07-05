@@ -163,16 +163,25 @@ const ok  = publicKeyVerify(publicKey, data, sig); // boolean
 
 ### On a live node (always async, round-trips through Rust)
 
+Signing via `node.secretKey` requires a node created with a supplied `key`
+(otherwise `secretKey` is `undefined` — the identity is native-held):
+
 ```ts
-const sig = await node.secretKey.sign(data);
-const ok  = await node.publicKey.verify(data, sig);
+const key  = generateSecretKey();
+const node = await createNode({ key });
+const sig  = await node.secretKey.sign(data);
+const ok   = await node.publicKey.verify(data, sig);
 ```
 
 ### Key persistence
 
+Generate a key, pass it to `createNode`, and store its bytes for next launch:
+
 ```ts
-const saved = node.secretKey.toBytes();            // Uint8Array (32 bytes)
-const restored = await createNode({ key: saved }); // same identity
+const key = generateSecretKey();                   // Uint8Array (32 bytes)
+const node = await createNode({ key });            // node.secretKey === key
+// persist `key` (or node.secretKey.toBytes()) in secure storage
+const restored = await createNode({ key });        // same identity
 ```
 
 ### PublicKey utilities
