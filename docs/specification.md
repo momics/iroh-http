@@ -231,8 +231,12 @@ interface ServeOptions {
   maxConnectionsPerPeer?: number;
   /** Per-request timeout in ms. Default: 60 000. 0 = disabled. */
   requestTimeout?: number;
-  /** Max request body size in bytes. Default: 16 777 216 (16 MiB). */
-  maxRequestBodyBytes?: number;
+  /** Reject bodies larger than this many wire (compressed) bytes.
+   *  Default: 16 777 216 (16 MiB). */
+  maxRequestBodyWireBytes?: number;
+  /** Reject bodies larger than this many decoded bytes (after decompression).
+   *  Default: 16 777 216 (16 MiB). */
+  maxRequestBodyDecodedBytes?: number;
   /** Max total QUIC connections. Unlimited by default. */
   maxTotalConnections?: number;
   /** Max consecutive accept errors before shutdown. Default: 5. */
@@ -784,7 +788,8 @@ Configured via `NodeOptions` or `ServeOptions`. See [server-limits.md](features/
 | `maxConcurrency` | Request flood | 408 Request Timeout |
 | `maxConnectionsPerPeer` | Connection flood | Closed at QUIC level |
 | `requestTimeout` | Slow request | 408 Request Timeout |
-| `maxRequestBodyBytes` | Oversized body | 413 Content Too Large |
+| `maxRequestBodyWireBytes` | Oversized/compressed body | 413 Content Too Large |
+| `maxRequestBodyDecodedBytes` | Compression bomb | 413 Content Too Large |
 | `maxHeaderBytes` | Header flood | 431 Request Header Fields Too Large |
 
 ### WebTransport

@@ -17,9 +17,13 @@ node.serve({
   /** Per-request timeout in milliseconds. Default: 60 000. */
   requestTimeout: 60_000,
 
-  /** Maximum request body size in bytes. Requests with larger bodies are
-   *  rejected with 413 before the body is read. Default: 16 MiB. */
-  maxRequestBodyBytes: 10 * 1024 * 1024,  // 10 MB example
+  /** Reject request bodies larger than this many wire (compressed) bytes,
+   *  before the body is read. Guards against bandwidth floods. Default: 16 MiB. */
+  maxRequestBodyWireBytes: 10 * 1024 * 1024,  // 10 MB example
+
+  /** Reject request bodies larger than this many decoded bytes (after
+   *  decompression). Primary compression-bomb guard. Default: 16 MiB. */
+  maxRequestBodyDecodedBytes: 10 * 1024 * 1024,  // 10 MB example
 
   /** Maximum consecutive accept-loop errors before shutdown. Default: 5. */
   maxServeErrors: 5,
@@ -45,18 +49,20 @@ These limits intercept bytes or connections before they reach the FFI
 boundary. A JS handler never runs for a rejected request, so no user code
 needs to handle the overflow cases.
 
-For example, without `maxRequestBodyBytes` a peer could stream an unbounded
-body, accumulating data in the channel until memory is exhausted. The limit
-is checked as bytes arrive in the Rust body reader — no full-body buffering
+For example, without a request-body limit a peer could stream an unbounded
+body, accumulating data in the channel until memory is exhausted. The limits
+are checked as bytes arrive in the Rust body reader — no full-body buffering
 occurs.
 
-`maxRequestBodyBytes` is enforced in two places against the same byte budget:
-a declared `Content-Length` larger than the limit is rejected up front (before
-the body is read), and the *decoded* body stream is capped as bytes arrive so a
-chunked or compression-bomb upload that omits or understates `Content-Length`
-still stops at the limit. Both surface the same `413`; the decoded-stream cap
-is what protects against a small compressed payload that inflates past the
-limit once decompressed.
+Request bodies are capped by two independent limits. `maxRequestBodyWireBytes`
+bounds the **wire** (compressed) size: a declared `Content-Length` larger than
+the limit is rejected up front (before the body is read), and the wire stream
+is capped as bytes arrive so a chunked upload that omits or understates
+`Content-Length` still stops at the limit. `maxRequestBodyDecodedBytes` bounds
+the **decoded** size (after decompression), so a small compressed payload that
+inflates past the limit once decompressed is stopped as it expands. Both
+surface the same `413`; the decoded cap is what protects against
+compression bombs.
 
 ## What each limit protects against
 
@@ -65,6 +71,7 @@ limit once decompressed.
 | `maxConcurrency` | Request flood from many peers | Excess requests queue until a slot is free; if none frees before `requestTimeout`, they receive a `408 Request Timeout` |
 | `maxConnectionsPerPeer` | Connection flood from one peer | Excess connections are closed at the QUIC level (transport close, not an HTTP response) |
 | `requestTimeout` | Slow request / stalled handler | 408 Request Timeout |
-| `maxRequestBodyBytes` | Oversized body exhausting memory | 413 Content Too Large |
+| `maxRequestBodyWireBytes` | Oversized/compressed body exhausting bandwidth | 413 Content Too Large |
+| `maxRequestBodyDecodedBytes` | Compression bomb exhausting memory | 413 Content Too Large |
 | `maxHeaderBytes` | Header flood exhausting memory | 431 Request Header Fields Too Large |
 
