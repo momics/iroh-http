@@ -1,9 +1,8 @@
 /**
  * SecretKey — typed wrapper around an Ed25519 secret key.
  *
- * Persist `toBytes()` to restore identity across restarts. In Tauri webviews,
- * endpoint secrets may stay native-held and require the crypto-gated
- * `exportSecretKey(endpointHandle)` helper instead.
+ * Persist `toBytes()` to restore identity across restarts: generate a key,
+ * pass it to `createNode({ key })`, and store `toBytes()` for the next launch.
  * The associated `publicKey` is derived lazily on first access.
  */
 
@@ -47,10 +46,9 @@ function ed25519Pkcs8(seed: Uint8Array): ArrayBuffer {
  *
  * @example Save and restore identity:
  * ```ts
- * // First run — generate and save:
- * const node = await createNode();
- * // In Tauri webviews, node.secretKey may be undefined; use the crypto-gated
- * // exportSecretKey(endpointHandle) helper instead.
+ * // First run — generate your own key, use it, and save it:
+ * const key = SecretKey.generate();
+ * const node = await createNode({ key });
  * localStorage.setItem('key', btoa(String.fromCharCode(...node.secretKey.toBytes())));
  *
  * // Subsequent runs — restore:

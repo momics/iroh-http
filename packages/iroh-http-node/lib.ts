@@ -445,9 +445,10 @@ export type { IrohNode, IrohNodeWithSecret, NodeOptions };
  * @param options Optional configuration ({@link NodeOptions}). Omit `key` to
  *   generate a fresh identity; pass a saved `key` to keep a stable node ID across
  *   restarts. Relay, discovery, and tuning are all configured here.
- * @returns A ready-to-use {@link IrohNode}. Node.js always exposes the
- *   endpoint's private key, so the returned node's `secretKey` is
- *   non-optional ({@link IrohNodeWithSecret}).
+ * @returns A ready-to-use {@link IrohNode}. When you pass a `key`, the returned
+ *   node's `secretKey` is non-optional ({@link IrohNodeWithSecret}); omit `key`
+ *   and the natively generated identity is never surfaced, so `secretKey` is
+ *   `undefined`. To persist an identity, generate a key and pass it back in.
  *
  * @example
  * ```ts
@@ -460,9 +461,13 @@ export type { IrohNode, IrohNodeWithSecret, NodeOptions };
  * await node.close();
  * ```
  */
+export function createNode(
+  options: NodeOptions & { key: SecretKey | Uint8Array },
+): Promise<IrohNodeWithSecret>;
+export function createNode(options?: NodeOptions): Promise<IrohNode>;
 export async function createNode(
   options?: NodeOptions,
-): Promise<IrohNodeWithSecret> {
+): Promise<IrohNode> {
   const keyBytes = options?.key
     ? options.key instanceof Uint8Array
       ? options.key
@@ -524,9 +529,8 @@ export async function createNode(
     {
       endpointHandle: info.endpointHandle,
       nodeId: info.nodeId,
-      keypair: info.keypair as Uint8Array,
     },
     options,
     nativeClosed,
-  ) as IrohNodeWithSecret;
+  );
 }

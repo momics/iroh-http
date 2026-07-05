@@ -44,9 +44,11 @@ const _INTERNAL = Symbol("IrohNode._create");
 export class IrohNode extends EventTarget {
   readonly publicKey: PublicKey;
   /**
-   * Raw secret key wrapper when the runtime exposes private key material to JS.
-   * Undefined in runtimes that keep endpoint keys native-held, such as the
-   * Tauri webview without the `crypto` permission.
+   * The node's secret key — present only when a `key` was supplied to
+   * `createNode`. If you did not provide a key, the identity is generated
+   * natively and never surfaced to JS, so this is `undefined` on every adapter.
+   * To keep a stable identity, generate a key yourself and pass it back in:
+   * `createNode({ key })`.
    */
   readonly secretKey: SecretKey | undefined;
   readonly closed: Promise<WebTransportCloseInfo>;
@@ -85,8 +87,16 @@ export class IrohNode extends EventTarget {
       resolveClose({ closeCode: 0, reason: "native shutdown" })
     );
     this.publicKey = PublicKey.fromString(info.nodeId);
-    this.secretKey = info.keypair
-      ? SecretKey._fromBytesWithPublicKey(info.keypair, this.publicKey)
+    // A node exposes a secret key only when the caller supplied one. A key you
+    // did not bring is never surfaced — even when the runtime generated it
+    // natively — so `secretKey` is present iff `key` was passed to createNode,
+    // uniformly across all adapters.
+    const providedKey = options?.key;
+    this.secretKey = providedKey
+      ? SecretKey._fromBytesWithPublicKey(
+        providedKey instanceof Uint8Array ? providedKey : providedKey.toBytes(),
+        this.publicKey,
+      )
       : undefined;
 
     const maxChunkSizeBytes = options?.internals?.maxChunkSizeBytes;
@@ -606,12 +616,12 @@ export class IrohNode extends EventTarget {
 /**
  * An {@link IrohNode} whose `secretKey` is guaranteed to be present.
  *
- * Runtimes that always expose private key material to JS (Node.js and Deno,
- * which pass `keypair` back from the native endpoint) return this refined type
- * from `createNode`, so callers can use `node.secretKey` without an
- * `undefined` check. Runtimes that may keep keys native-held (the Tauri webview
- * without the `crypto` permission) return the base {@link IrohNode}, where
- * `secretKey` is `SecretKey | undefined`.
+ * `createNode` returns this refined type when — and only when — you pass a
+ * `key`. Because you supplied the key, the node can hand it back via
+ * `secretKey` without an `undefined` check. Omit `key` and you get the base
+ * {@link IrohNode}, where `secretKey` is `SecretKey | undefined` — always
+ * `undefined` at runtime, since a natively generated identity is never
+ * exported to JS. This holds identically on Node.js, Deno, and Tauri.
  *
  * The intersection narrows `SecretKey | undefined` ∩ `SecretKey` → `SecretKey`,
  * so the common case keeps a non-optional `secretKey` while options types stay

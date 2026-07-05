@@ -192,32 +192,6 @@ describe("createNode IPC", () => {
   });
 });
 
-// ── crypto-gated secret export ───────────────────────────────────────────────
-
-describe("exportSecretKey IPC", () => {
-  beforeEach(() => {
-    mockWindows("main");
-  });
-
-  it("invokes export_secret_key and returns bytes", async () => {
-    const invokedCommands: string[] = [];
-    mockIPC((cmd) => {
-      invokedCommands.push(cmd);
-      if (cmd === "plugin:iroh-http|export_secret_key") {
-        return Array.from(new Uint8Array(32).fill(7));
-      }
-    });
-
-    const { exportSecretKey } = await import("../index.ts");
-    const bytes = await exportSecretKey(1);
-
-    expect(bytes).toBeInstanceOf(Uint8Array);
-    expect(bytes).toHaveLength(32);
-    expect(bytes[0]).toBe(7);
-    expect(invokedCommands).toContain("plugin:iroh-http|export_secret_key");
-  });
-});
-
 // ── Error propagation ───────────────────────────────────────────────────────
 
 describe("error propagation", () => {

@@ -1009,23 +1009,6 @@ pub fn session_max_datagram_size(
 
 // ── Key operations ────────────────────────────────────────────────────────────
 
-/// Export the endpoint's raw 32-byte Ed25519 secret key.
-#[command]
-pub fn export_secret_key(endpoint_handle: u64) -> Result<Vec<u8>, String> {
-    let ep = state::get_endpoint(endpoint_handle).ok_or_else(|| {
-        format_error_json(
-            "INVALID_HANDLE",
-            format!("node closed or not found (handle {endpoint_handle})"),
-        )
-    })?;
-
-    // SECURITY: secret_key_bytes() returns raw private key material.
-    // The Vec<u8> serialised into the Tauri response is not zeroed automatically;
-    // callers must overwrite it with zeros after writing to encrypted storage.
-    // Never log, include in error payloads, or pass to untrusted code.
-    Ok(ep.secret_key_bytes().to_vec())
-}
-
 /// Sign arbitrary bytes with a 32-byte Ed25519 secret key (base64-encoded).
 /// Returns a 64-byte signature as base64.
 #[command]

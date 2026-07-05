@@ -405,8 +405,6 @@ pub struct JsEndpointInfo {
     pub endpoint_handle: u32,
     /// Base32-encoded public key (stable node identity).
     pub node_id: String,
-    /// 32-byte Ed25519 secret key — store to restore the same identity.
-    pub keypair: Uint8Array,
 }
 
 /// Bind an Iroh QUIC endpoint and return a handle for subsequent operations.
@@ -508,18 +506,12 @@ pub async fn create_endpoint(options: Option<JsNodeOptions>) -> napi::Result<JsE
         .map_err(|e| napi::Error::new(Status::GenericFailure, core_error_to_json(&e)))?;
 
     let node_id = ep.node_id().to_string();
-    // SECURITY: secret_key_bytes() returns raw private key material.
-    // The Uint8Array returned to JS is not zeroed automatically; callers
-    // must overwrite it with zeros after writing to encrypted storage.
-    // Never log, include in error payloads, or pass to untrusted code.
-    let keypair = ep.secret_key_bytes().to_vec();
     let handle_u64 = registry::insert_endpoint(ep);
     let handle = alloc_local_handle(handle_u64);
 
     Ok(JsEndpointInfo {
         endpoint_handle: handle,
         node_id,
-        keypair: Uint8Array::new(keypair),
     })
 }
 

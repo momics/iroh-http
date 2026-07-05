@@ -27,7 +27,7 @@ Data-driven tests validating HTTP semantics (RFC 9110). Extends the upstream `te
 
 Imperative tests for node creation, shutdown, and resource management:
 
-- `createNode()` returns valid node with publicKey, secretKey
+- `createNode()` returns valid node with publicKey; `secretKey` present only when a `key` is supplied
 - publicKey is consistent across accesses
 - Two nodes get different keys
 - `node.addr()` returns correct info

@@ -91,8 +91,6 @@ export interface JsEndpointInfo {
   endpointHandle: number
   /** Base32-encoded public key (stable node identity). */
   nodeId: string
-  /** 32-byte Ed25519 secret key — store to restore the same identity. */
-  keypair: Uint8Array
 }
 
 /** Endpoint-level observability snapshot. */

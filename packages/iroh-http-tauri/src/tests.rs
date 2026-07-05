@@ -255,22 +255,16 @@ mod command_tests {
     }
 
     #[tokio::test]
-    async fn test_export_secret_key_returns_endpoint_secret() {
-        // Regression: #275 — create_endpoint must not expose the endpoint secret
-        // unless callers opt into the crypto-gated export_secret_key command.
-        let handle = make_test_endpoint().await;
-
-        let keypair = export_secret_key(handle).expect("export_secret_key should succeed");
-        assert_eq!(keypair.len(), 32, "exported secret key should be 32 bytes");
-
-        close_endpoint(handle, None).await.ok();
-    }
-
-    #[tokio::test]
     async fn test_sign_and_verify() {
-        // Create an endpoint to get a real endpoint secret and node_id (public key).
+        // Create an endpoint with a caller-supplied key so we own the secret
+        // directly — the endpoint never exports it (keys stay native-held).
+        let sk_bytes = B64
+            .decode(generate_secret_key().expect("generate key"))
+            .expect("valid base64");
+        let sk_b64 = B64.encode(&sk_bytes);
+
         let info = create_endpoint(mock_handle(), Some(CreateEndpointArgs {
-            key: None,
+            key: Some(sk_b64.clone()),
             idle_timeout: None,
             relay_mode: Some("disabled".into()),
             relays: None,
@@ -294,8 +288,7 @@ mod command_tests {
         .await
         .expect("create_endpoint");
 
-        // Secret key exported through the crypto command (32 bytes).
-        let sk_b64 = B64.encode(export_secret_key(info.endpoint_handle).expect("export key"));
+        // Secret key is the one we supplied at creation (32 bytes).
         // Public key: decode node_id from base32 (lowercase, no padding).
         let pk_bytes = base32::decode(
             base32::Alphabet::Rfc4648Lower { padding: false },

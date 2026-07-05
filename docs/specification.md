@@ -43,8 +43,14 @@ node instance.
 interface IrohNode {
   /** The node's Ed25519 public key (its stable network address). */
   readonly publicKey: PublicKey;
-  /** The node's Ed25519 secret key. */
-  readonly secretKey: SecretKey;
+  /**
+   * The node's Ed25519 secret key — present only when a `key` was supplied to
+   * `createNode`. When omitted, the identity is generated natively and never
+   * surfaced to JS, so this is `undefined` (identically on Node.js, Deno, and
+   * Tauri). `createNode({ key })` narrows the return type to
+   * `IrohNodeWithSecret`, where `secretKey` is non-optional.
+   */
+  readonly secretKey: SecretKey | undefined;
 
   /** Send an HTTP request to a peer. */
   fetch(

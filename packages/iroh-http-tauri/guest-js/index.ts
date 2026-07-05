@@ -7,6 +7,7 @@ import {
   classifyBindError,
   encodeBase64,
   IrohNode,
+  type IrohNodeWithSecret,
   type NodeOptions,
   normaliseRelayMode,
   type SecretKey,
@@ -553,21 +554,26 @@ function normaliseDiscovery(disc?: NodeOptions["discovery"]): {
  *   restarts. Relay, discovery, and tuning are all configured here.
  * @returns A ready-to-use {@link IrohNode}.
  *
- * SECURITY: Unlike the Node.js and Deno adapters, the endpoint's private key is
- * kept **native-held** in the Rust process and is *not* handed to the webview.
- * The returned node's {@link IrohNode.secretKey} is therefore `undefined` — this
- * adapter returns the base {@link IrohNode}, not `IrohNodeWithSecret`. To persist
- * or export the identity you must call {@link exportSecretKey}, which requires
- * the `iroh-http:crypto` permission to be granted in your Tauri capabilities.
- * Without that permission the raw key never crosses the IPC boundary.
+ * SECURITY: the endpoint's private key is kept **native-held** in the Rust
+ * process and is never handed to the webview. When you pass your own `key`,
+ * `node.secretKey` returns that key (you already hold it) and the type narrows
+ * to {@link IrohNodeWithSecret}. When you omit `key`, the identity is generated
+ * natively and there is *no* mechanism to export it — `node.secretKey` is
+ * `undefined`. This matches Node.js and Deno exactly. To persist an identity,
+ * generate a key in JS (`SecretKey.generate()`), pass it to `createNode({ key })`,
+ * and store its bytes yourself.
  *
  * @example
  * ```ts
- * import { createNode } from "@momics/iroh-http-tauri";
+ * import { createNode, SecretKey } from "@momics/iroh-http-tauri";
  *
+ * // Ephemeral identity — secretKey is undefined (native-held, never exported).
  * const node = await createNode();
- * node.secretKey; // undefined on Tauri — key is native-held.
- *                 // Use exportSecretKey() (needs `iroh-http:crypto`) to export it.
+ *
+ * // Persistent identity — you own the key.
+ * const key = SecretKey.generate();
+ * const node2 = await createNode({ key });
+ * node2.secretKey; // the key you passed in
  *
  * const server = node.serve((req) => new Response("hello"));
  * const res = await node.fetch(`httpi://${peerId}/`);
@@ -575,6 +581,10 @@ function normaliseDiscovery(disc?: NodeOptions["discovery"]): {
  * await node.close();
  * ```
  */
+export function createNode(
+  options: NodeOptions & { key: SecretKey | Uint8Array },
+): Promise<IrohNodeWithSecret>;
+export function createNode(options?: NodeOptions): Promise<IrohNode>;
 export async function createNode(options?: NodeOptions): Promise<IrohNode> {
   const keyBytes: string | null = options?.key
     ? encodeBase64(
@@ -664,23 +674,6 @@ export async function createNode(options?: NodeOptions): Promise<IrohNode> {
   }
 
   return node;
-}
-
-/**
- * Export raw endpoint secret key bytes for identity persistence.
- *
- * SECURITY: This command requires the `iroh-http:crypto` permission and hands
- * raw private-key bytes to the webview. Store them only in encrypted storage,
- * overwrite temporary copies after use, and never log or expose them to
- * untrusted code.
- */
-export async function exportSecretKey(
-  endpointHandle: number,
-): Promise<Uint8Array> {
-  const bytes = await invoke<number[]>(`${PLUGIN}|export_secret_key`, {
-    endpointHandle,
-  });
-  return new Uint8Array(bytes);
 }
 
 export type { IrohNode, NodeOptions };

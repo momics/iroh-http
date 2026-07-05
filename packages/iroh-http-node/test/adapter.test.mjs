@@ -32,13 +32,34 @@ test("createNode via NAPI returns a node with expected API surface", async () =>
   const node = await createNode({ disableNetworking: true });
   try {
     assert.ok(node.publicKey != null, "publicKey must exist");
-    assert.ok(node.secretKey != null, "secretKey must exist");
+    // No key was supplied, so the natively generated identity is never
+    // surfaced to JS — secretKey is undefined on every adapter.
+    assert.equal(
+      node.secretKey,
+      undefined,
+      "secretKey must be undefined when no key is provided",
+    );
     assert.equal(typeof node.fetch, "function", "fetch must be a function");
     assert.equal(typeof node.serve, "function", "serve must be a function");
     assert.equal(typeof node.close, "function", "close must be a function");
     assert.equal(typeof node.dial, "function", "dial must be a function");
     assert.equal(typeof node.addr, "function", "addr must be a function");
     assert.equal(typeof node.ticket, "function", "ticket must be a function");
+  } finally {
+    await node.close();
+  }
+});
+
+test("createNode exposes secretKey only when a key is supplied", async () => {
+  const key = SecretKey.generate();
+  const node = await createNode({ key, disableNetworking: true });
+  try {
+    assert.ok(node.secretKey != null, "secretKey must exist when key provided");
+    assert.deepEqual(
+      node.secretKey.toBytes(),
+      key.toBytes(),
+      "secretKey must be the key the caller supplied",
+    );
   } finally {
     await node.close();
   }

@@ -46,7 +46,6 @@ export interface PeerConnectionEvent {
 export interface EndpointInfo {
   endpointHandle: number;
   nodeId: string;
-  keypair?: Uint8Array;
 }
 
 export interface NodeAddrInfo {

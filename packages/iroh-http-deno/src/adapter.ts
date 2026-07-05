@@ -965,7 +965,6 @@ export async function createEndpointInfo(
   const res = await call<{
     endpointHandle: number;
     nodeId: string;
-    keypair: number[];
   }>("createEndpoint", {
     key: keyBytes,
     idleTimeout: options?.connections?.idleTimeoutMs ?? null,
@@ -998,7 +997,6 @@ export async function createEndpointInfo(
   return {
     endpointHandle: res.endpointHandle,
     nodeId: res.nodeId,
-    keypair: new Uint8Array(res.keypair),
   };
 }
 
