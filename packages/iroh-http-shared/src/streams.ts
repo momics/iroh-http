@@ -102,10 +102,16 @@ export async function pipeToWriter(
   const skipFinishOnError = options?.skipFinishOnError ?? false;
   // Match the Rust-side max chunk size so each sendChunk is a single
   // channel push (O(1) when the channel has capacity). Honors the node's
-  // configured maxChunkSizeBytes (#287); a non-positive value falls back to
-  // the 64 KiB default.
+  // configured maxChunkSizeBytes (#287). A fractional or non-positive value
+  // is rejected — `subarray` truncates fractional indices, which would yield
+  // empty/duplicated slices and a tight loop — falling back to the 64 KiB
+  // default.
   const configured = options?.maxChunkSizeBytes;
-  const MAX_CHUNK = configured && configured > 0 ? configured : 64 * 1024;
+  const MAX_CHUNK = typeof configured === "number" &&
+      Number.isSafeInteger(configured) &&
+      configured > 0
+    ? configured
+    : 64 * 1024;
   const reader = stream.getReader();
   let completed = false;
   try {

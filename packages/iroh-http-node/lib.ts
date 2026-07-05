@@ -49,6 +49,7 @@ import {
 import {
   classifyBindError,
   IrohNode,
+  type IrohNodeWithSecret,
   type NodeAddrInfo,
   type NodeOptions,
   normaliseRelayMode,
@@ -431,7 +432,7 @@ function normaliseDiscovery(disc?: NodeOptions["discovery"]): {
 }
 
 export { PublicKey, SecretKey } from "@momics/iroh-http-shared";
-export type { IrohNode, NodeOptions };
+export type { IrohNode, IrohNodeWithSecret, NodeOptions };
 
 /**
  * Create an Iroh node — the entry point for peer-to-peer HTTP.
@@ -444,7 +445,9 @@ export type { IrohNode, NodeOptions };
  * @param options Optional configuration ({@link NodeOptions}). Omit `key` to
  *   generate a fresh identity; pass a saved `key` to keep a stable node ID across
  *   restarts. Relay, discovery, and tuning are all configured here.
- * @returns A ready-to-use {@link IrohNode}.
+ * @returns A ready-to-use {@link IrohNode}. Node.js always exposes the
+ *   endpoint's private key, so the returned node's `secretKey` is
+ *   non-optional ({@link IrohNodeWithSecret}).
  *
  * @example
  * ```ts
@@ -457,7 +460,9 @@ export type { IrohNode, NodeOptions };
  * await node.close();
  * ```
  */
-export async function createNode(options?: NodeOptions): Promise<IrohNode> {
+export async function createNode(
+  options?: NodeOptions,
+): Promise<IrohNodeWithSecret> {
   const keyBytes = options?.key
     ? options.key instanceof Uint8Array
       ? options.key
@@ -523,5 +528,5 @@ export async function createNode(options?: NodeOptions): Promise<IrohNode> {
     },
     options,
     nativeClosed,
-  );
+  ) as IrohNodeWithSecret;
 }

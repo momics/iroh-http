@@ -149,6 +149,7 @@ export class IrohNode extends EventTarget {
    * console.log(res.status, await res.text());
    * ```
    */
+
   fetch(input: string | URL, init?: IrohFetchInit): Promise<Response> {
     return this.#fetchFn(input, init);
   }
@@ -601,3 +602,19 @@ export class IrohNode extends EventTarget {
     return this.close();
   }
 }
+
+/**
+ * An {@link IrohNode} whose `secretKey` is guaranteed to be present.
+ *
+ * Runtimes that always expose private key material to JS (Node.js and Deno,
+ * which pass `keypair` back from the native endpoint) return this refined type
+ * from `createNode`, so callers can use `node.secretKey` without an
+ * `undefined` check. Runtimes that may keep keys native-held (the Tauri webview
+ * without the `crypto` permission) return the base {@link IrohNode}, where
+ * `secretKey` is `SecretKey | undefined`.
+ *
+ * The intersection narrows `SecretKey | undefined` ∩ `SecretKey` → `SecretKey`,
+ * so the common case keeps a non-optional `secretKey` while options types stay
+ * fully shared.
+ */
+export type IrohNodeWithSecret = IrohNode & { readonly secretKey: SecretKey };
