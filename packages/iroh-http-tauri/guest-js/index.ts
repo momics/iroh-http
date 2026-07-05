@@ -553,11 +553,22 @@ function normaliseDiscovery(disc?: NodeOptions["discovery"]): {
  *   restarts. Relay, discovery, and tuning are all configured here.
  * @returns A ready-to-use {@link IrohNode}.
  *
+ * SECURITY: Unlike the Node.js and Deno adapters, the endpoint's private key is
+ * kept **native-held** in the Rust process and is *not* handed to the webview.
+ * The returned node's {@link IrohNode.secretKey} is therefore `undefined` — this
+ * adapter returns the base {@link IrohNode}, not `IrohNodeWithSecret`. To persist
+ * or export the identity you must call {@link exportSecretKey}, which requires
+ * the `iroh-http:crypto` permission to be granted in your Tauri capabilities.
+ * Without that permission the raw key never crosses the IPC boundary.
+ *
  * @example
  * ```ts
  * import { createNode } from "@momics/iroh-http-tauri";
  *
  * const node = await createNode();
+ * node.secretKey; // undefined on Tauri — key is native-held.
+ *                 // Use exportSecretKey() (needs `iroh-http:crypto`) to export it.
+ *
  * const server = node.serve((req) => new Response("hello"));
  * const res = await node.fetch(`httpi://${peerId}/`);
  * console.log(await res.text());
