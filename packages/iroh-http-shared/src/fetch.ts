@@ -36,6 +36,7 @@ export type FetchFn = {
 export function makeFetch(
   adapter: IrohAdapter,
   endpointHandle: number,
+  maxChunkSizeBytes?: number,
 ): FetchFn {
   return async function irohFetch(
     input: string | URL,
@@ -64,10 +65,18 @@ export function makeFetch(
     const method = init?.method ?? "GET";
     const signal = init?.signal ?? null;
     const directAddrs = init?.directAddrs ?? null;
+    const requestTimeout = validateJsonSafeNumber(
+      init?.requestTimeout,
+      "requestTimeout",
+    );
+    const maxResponseBodyBytes = validateJsonSafeNumber(
+      init?.maxResponseBodyBytes,
+      "maxResponseBodyBytes",
+    );
     const fetchOptions = {
-      timeoutMs: init?.requestTimeout,
+      timeoutMs: requestTimeout,
       decompress: init?.decompress,
-      maxResponseBodyBytes: init?.maxResponseBodyBytes,
+      maxResponseBodyBytes,
     };
 
     // Reject GET and HEAD request bodies — matches web-platform fetch semantics
@@ -161,6 +170,7 @@ export function makeFetch(
       // The catch below resets the request stream via cancelFetch instead.
       bodyPipePromise = pipeToWriter(adapter, bodyStream, reqBodyHandle, {
         skipFinishOnError: true,
+        maxChunkSizeBytes,
       });
       // If the body source fails mid-stream, reset the request stream instead
       // of letting it finish cleanly. A clean finish would present a truncated
@@ -264,4 +274,15 @@ function normaliseHeaders(
     return pairs;
   }
   return Object.entries(h) as [string, string][];
+}
+
+function validateJsonSafeNumber(
+  value: number | undefined,
+  field: string,
+): number | undefined {
+  if (value === undefined) return undefined;
+  if (!Number.isFinite(value)) {
+    throw new TypeError(`${field} must be a finite number`);
+  }
+  return value;
 }

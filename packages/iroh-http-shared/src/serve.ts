@@ -205,6 +205,7 @@ export function makeServe(
   endpointHandle: number,
   onNodeClose: Promise<void>,
   onPeerEvent?: (event: PeerConnectionEvent) => void,
+  maxChunkSizeBytes?: number,
 ): ServeFn {
   // #114: guard against starting two polling loops on the same endpoint.
   let serveRunning = false;
@@ -314,7 +315,9 @@ export function makeServe(
 
         const bodyStream = res.body ?? emptyStream();
         const doPipe = async () => {
-          await pipeToWriter(adapter, bodyStream, payload.resBodyHandle);
+          await pipeToWriter(adapter, bodyStream, payload.resBodyHandle, {
+            maxChunkSizeBytes,
+          });
         };
 
         // #123: When the handler failed, the error-recovery body is short

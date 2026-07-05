@@ -7,7 +7,8 @@
 
 export function keyTests({ createNode, test, assert, assertEqual, PublicKey, SecretKey }) {
   test("SecretKey / PublicKey — sign and verify round-trip", async () => {
-    const node = await createNode();
+    const key = SecretKey.generate();
+    const node = await createNode({ key });
     try {
       const sk = node.secretKey;
       const pk = node.publicKey;
@@ -42,7 +43,8 @@ export function keyTests({ createNode, test, assert, assertEqual, PublicKey, Sec
   });
 
   test("SecretKey.fromBytes — round-trip via node secretKey", async () => {
-    const node = await createNode({ disableNetworking: true });
+    const key = SecretKey.generate();
+    const node = await createNode({ key, disableNetworking: true });
     try {
       const sk = node.secretKey;
       const bytes = sk.toBytes();
