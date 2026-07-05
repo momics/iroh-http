@@ -154,7 +154,7 @@ cannot distinguish a migrating connection from a dead one. Lower
 | `requestTimeout` | 60 000 ms | Transfers large files (increase) or want fast failure detection (decrease) |
 | `maxConcurrency` | 1 024 | Serving many concurrent requests (increase); or throttling (decrease) |
 | `maxConnectionsPerPeer` | 8 | IoT with few connections/peer (decrease); busy API clients (increase) |
-| `maxRequestBodyBytes` | unlimited | Prevent large upload attacks (set a limit) |
+| `maxRequestBodyBytes` | 16 MiB | Prevent large upload attacks (decrease to tighten; raise for large uploads) |
 | `drainTimeout` | 5 000 ms | Slow readers expected (increase); tight latency SLA (decrease) |
 | `maxServeErrors` | 5 | Noisy channels (increase); fail-fast desired (decrease) |
 

@@ -50,6 +50,14 @@ body, accumulating data in the channel until memory is exhausted. The limit
 is checked as bytes arrive in the Rust body reader — no full-body buffering
 occurs.
 
+`maxRequestBodyBytes` is enforced in two places against the same byte budget:
+a declared `Content-Length` larger than the limit is rejected up front (before
+the body is read), and the *decoded* body stream is capped as bytes arrive so a
+chunked or compression-bomb upload that omits or understates `Content-Length`
+still stops at the limit. Both surface the same `413`; the decoded-stream cap
+is what protects against a small compressed payload that inflates past the
+limit once decompressed.
+
 ## What each limit protects against
 
 | Option | Attack vector | Behavior |
