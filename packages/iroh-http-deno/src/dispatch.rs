@@ -1642,10 +1642,55 @@ mod tests {
         assert_eq!(head.headers, expected.headers);
     }
 
+    fn pending_payload_with_res_body(
+        ep: &IrohEndpoint,
+    ) -> (RequestPayload, oneshot::Receiver<ResponseHeadEntry>) {
+        let (tx, rx) = oneshot::channel();
+        let req_handle = ep.handles().allocate_req_handle(tx).unwrap();
+        let (writer, _reader) = ep.handles().make_body_channel();
+        let res_body_handle = ep.handles().insert_writer(writer).unwrap();
+        (
+            RequestPayload {
+                req_handle,
+                req_body_handle: 0,
+                res_body_handle,
+                method: "GET".to_string(),
+                url: "httpi://test/".to_string(),
+                headers: Vec::new(),
+                remote_node_id: "peer".to_string(),
+                is_bidi: false,
+            },
+            rx,
+        )
+    }
+
     async fn cleanup(handle: u64, ep: IrohEndpoint) {
         serve_registry::remove(handle);
         let _ = remove_endpoint(handle);
         ep.close_force().await;
+    }
+
+    // Regression: #315 — on the undeliverable-503 path Deno (and Node) left the
+    // response body writer open, so `Body::new(res_body_reader)` yielded until
+    // the drain timeout instead of closing immediately. The delivery path must
+    // finish the response body writer when a request cannot be delivered.
+    #[tokio::test]
+    async fn deno_delivery_undeliverable_finishes_response_body() {
+        let (handle, ep) = test_endpoint().await;
+        let (payload, rx) = pending_payload_with_res_body(&ep);
+        let (_, writers_before, _, _) = ep.handles().count_handles();
+        assert_eq!(writers_before, 1, "test setup should register one writer");
+
+        // Registry miss: the request is undeliverable.
+        deliver_request_to_queue(handle, &ep, payload);
+
+        assert_undeliverable(rx);
+        let (_, writers_after, _, _) = ep.handles().count_handles();
+        assert_eq!(
+            writers_after, 0,
+            "response body writer must be finished on the undeliverable path"
+        );
+        cleanup(handle, ep).await;
     }
 
     #[tokio::test]
