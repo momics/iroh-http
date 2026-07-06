@@ -15,6 +15,8 @@ Node lifecycle and introspection. Covers createNode() and close(). Add iroh-http
 - `allow-peer-stats`
 - `allow-endpoint-stats`
 - `allow-start-transport-events`
+- `allow-next-path-change`
+- `allow-unsubscribe-path-changes`
 
 ## Permission Table
 
@@ -463,6 +465,32 @@ Enables the next_chunk command without any pre-configured scope.
 <td>
 
 Denies the next_chunk command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`iroh-http:allow-next-path-change`
+
+</td>
+<td>
+
+Enables the next_path_change command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`iroh-http:deny-next-path-change`
+
+</td>
+<td>
+
+Denies the next_path_change command without any pre-configured scope.
 
 </td>
 </tr>
@@ -1087,6 +1115,32 @@ Enables the try_next_chunk command without any pre-configured scope.
 <td>
 
 Denies the try_next_chunk command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`iroh-http:allow-unsubscribe-path-changes`
+
+</td>
+<td>
+
+Enables the unsubscribe_path_changes command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`iroh-http:deny-unsubscribe-path-changes`
+
+</td>
+<td>
+
+Denies the unsubscribe_path_changes command without any pre-configured scope.
 
 </td>
 </tr>

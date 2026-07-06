@@ -211,6 +211,65 @@ describe("error propagation", () => {
   });
 });
 
+// ── path-change subscription parity (#314) ──────────────────────────────────
+
+describe("path-change subscription", () => {
+  beforeEach(() => {
+    mockWindows("main");
+  });
+
+  // Regression guard: before the Tauri adapter overrode nextPathChange /
+  // unsubscribePathChanges, pathChanges() fell through to the IrohAdapter base
+  // class and rejected with "nextPathChange() not supported by this adapter".
+  it("invokes next_path_change / unsubscribe_path_changes and completes cleanly", async () => {
+    const invoked: Array<{ cmd: string; args: unknown }> = [];
+
+    mockIPC((cmd, args) => {
+      invoked.push({ cmd, args });
+      if (cmd === "plugin:iroh-http|create_endpoint") {
+        return {
+          endpointHandle: 1,
+          nodeId: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        };
+      }
+      if (cmd === "plugin:iroh-http|wait_endpoint_closed") {
+        return new Promise(() => {});
+      }
+      if (cmd === "plugin:iroh-http|node_addr") {
+        return {
+          id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          addrs: [],
+        };
+      }
+      // Subscription end — the core command returns null when the watcher
+      // stops. The iterator must then tear down via unsubscribe_path_changes.
+      if (cmd === "plugin:iroh-http|next_path_change") return null;
+      if (cmd === "plugin:iroh-http|unsubscribe_path_changes") return null;
+      if (cmd === "plugin:iroh-http|close_endpoint") return undefined;
+    });
+
+    const { createNode } = await import("../index.ts");
+    const node = await createNode({ disableNetworking: true });
+    const iterator = node
+      .pathChanges(node.publicKey)
+      [Symbol.asyncIterator]();
+    const result = await iterator.next();
+
+    expect(result.done).toBe(true);
+    const cmds = invoked.map((c) => c.cmd);
+    expect(cmds).toContain("plugin:iroh-http|next_path_change");
+    expect(cmds).toContain("plugin:iroh-http|unsubscribe_path_changes");
+    const nextCall = invoked.find(
+      (c) => c.cmd === "plugin:iroh-http|next_path_change",
+    );
+    expect((nextCall?.args as { endpointHandle?: number }).endpointHandle)
+      .toBe(1);
+    expect(
+      typeof (nextCall?.args as { nodeId?: unknown }).nodeId,
+    ).toBe("string");
+  });
+});
+
 // ── datagram base64 encode (defensive oversize guard, #288) ─────────────────
 
 describe("datagram base64 encode helper", () => {

@@ -25,6 +25,7 @@ import type { RawSessionFns } from "@momics/iroh-http-shared/adapter";
 import type {
   EndpointStats,
   NodeAddrInfo,
+  PathInfo,
   PeerDiscoveryEvent,
   PeerStats,
 } from "@momics/iroh-http-shared";
@@ -380,6 +381,26 @@ class TauriAdapter extends IrohAdapter {
     }).catch((err: unknown) =>
       console.error("[iroh-http-tauri] startTransportEvents error:", err)
     );
+  }
+
+  override async nextPathChange(
+    endpointHandle: number,
+    nodeId: string,
+  ): Promise<PathInfo | null> {
+    return invoke<PathInfo | null>(`${PLUGIN}|next_path_change`, {
+      endpointHandle: Number(endpointHandle),
+      nodeId,
+    });
+  }
+
+  override async unsubscribePathChanges(
+    endpointHandle: number,
+    nodeId: string,
+  ): Promise<void> {
+    await invoke<void>(`${PLUGIN}|unsubscribe_path_changes`, {
+      endpointHandle: Number(endpointHandle),
+      nodeId,
+    });
   }
 }
 
