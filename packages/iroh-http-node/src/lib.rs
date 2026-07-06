@@ -64,10 +64,9 @@ use slab::Slab;
 use tokio::sync::Mutex as TokioMutex;
 
 use iroh_http_adapter::{
-    core_error_to_json, format_error_json, safe_f64_to_u64 as adapter_safe_f64_to_u64,
-    safe_f64_to_usize as adapter_safe_f64_to_usize, send_undeliverable_rejection,
-    validate_direct_addrs, validate_header_rows, validate_method, validate_node_id, validate_url,
-    AdapterInputError, MAX_BODY_BYTES, MAX_HEADER_BYTES, MAX_TIMEOUT_MS, MAX_TOTAL_CONNECTIONS,
+    coerce_endpoint_options, coerce_fetch_options, coerce_serve_options, core_error_to_json,
+    format_error_json, send_undeliverable_rejection, validate_direct_addrs, validate_header_rows,
+    validate_node_id, AdapterInputError, RawEndpointOptions, RawFetchOptions, RawServeOptions,
 };
 
 struct PathSub {
@@ -245,51 +244,6 @@ fn advertise_slab() -> &'static Mutex<Slab<iroh_http_discovery::AdvertiseSession
 
 // ── Endpoint lifecycle ────────────────────────────────────────────────────────
 
-/// Validate and convert an f64 option to a non-negative integer type.
-fn safe_f64_to_u64(value: f64, field: &'static str, max: u64) -> napi::Result<u64> {
-    if value.is_nan() || value.is_infinite() || value < 0.0 {
-        return Err(ffi_invalid_arg(FfiError::InvalidArgument {
-            field,
-            reason: format!("expected a non-negative finite number, got {value}"),
-        }));
-    }
-    if value.fract() != 0.0 {
-        return Err(ffi_invalid_arg(FfiError::InvalidArgument {
-            field,
-            reason: "must be an integer".to_string(),
-        }));
-    }
-    if value > max as f64 {
-        return Err(ffi_invalid_arg(FfiError::InvalidArgument {
-            field,
-            reason: format!("must be <= {max}"),
-        }));
-    }
-    Ok(value as u64)
-}
-
-fn safe_f64_to_usize(value: f64, field: &'static str, max: usize) -> napi::Result<usize> {
-    if value.is_nan() || value.is_infinite() || value < 0.0 {
-        return Err(ffi_invalid_arg(FfiError::InvalidArgument {
-            field,
-            reason: format!("expected a non-negative finite number, got {value}"),
-        }));
-    }
-    if value.fract() != 0.0 {
-        return Err(ffi_invalid_arg(FfiError::InvalidArgument {
-            field,
-            reason: "must be an integer".to_string(),
-        }));
-    }
-    if value > max as f64 {
-        return Err(ffi_invalid_arg(FfiError::InvalidArgument {
-            field,
-            reason: format!("must be <= {max}"),
-        }));
-    }
-    Ok(value as usize)
-}
-
 /// Extract a `u64` handle from a [`BigInt`].
 ///
 /// Returns `InvalidArg` when the BigInt value was out of `u64` range (i.e.
@@ -353,6 +307,15 @@ pub async fn create_endpoint(options: Option<JsNodeOptions>) -> napi::Result<JsE
     install_panic_hook();
     let opts = options
         .map(|o| -> napi::Result<NodeOptions> {
+            let endpoint = coerce_endpoint_options(RawEndpointOptions {
+                idle_timeout_ms: o.idle_timeout,
+                pool_idle_timeout_ms: o.pool_idle_timeout_ms,
+                handle_ttl_ms: o.handle_ttl,
+                sweep_interval_ms: o.sweep_interval,
+                max_header_bytes: o.max_header_bytes,
+                compression_level: o.compression_level,
+            })
+            .map_err(ffi_adapter_invalid_arg)?;
             Ok(NodeOptions {
                 key: match o.key {
                     Some(k) => {
@@ -371,10 +334,7 @@ pub async fn create_endpoint(options: Option<JsNodeOptions>) -> napi::Result<JsE
                     relay_mode: o.relay_mode,
                     relays: o.relays.unwrap_or_default(),
                     bind_addrs: o.bind_addrs.unwrap_or_default(),
-                    idle_timeout_ms: o
-                        .idle_timeout
-                        .map(|t| safe_f64_to_u64(t, "idleTimeout", MAX_TIMEOUT_MS))
-                        .transpose()?,
+                    idle_timeout_ms: endpoint.idle_timeout_ms,
                     proxy_url: o.proxy_url,
                     proxy_from_env: o.proxy_from_env.unwrap_or(false),
                     disabled: o.disable_networking.unwrap_or(false),
@@ -385,47 +345,29 @@ pub async fn create_endpoint(options: Option<JsNodeOptions>) -> napi::Result<JsE
                 },
                 pool: PoolOptions {
                     max_connections: o.max_pooled_connections.map(|v| v as usize),
-                    idle_timeout_ms: o
-                        .pool_idle_timeout_ms
-                        .map(|v| safe_f64_to_u64(v, "poolIdleTimeoutMs", MAX_TIMEOUT_MS))
-                        .transpose()?,
+                    idle_timeout_ms: endpoint.pool_idle_timeout_ms,
                 },
                 streaming: StreamingOptions {
                     channel_capacity: o.channel_capacity.map(|v| v as usize),
                     max_chunk_size_bytes: o.max_chunk_size_bytes.map(|v| v as usize),
                     drain_timeout_ms: None,
-                    handle_ttl_ms: o
-                        .handle_ttl
-                        .map(|v| safe_f64_to_u64(v, "handleTtl", MAX_TIMEOUT_MS))
-                        .transpose()?,
-                    sweep_interval_ms: o
-                        .sweep_interval
-                        .map(|v| safe_f64_to_u64(v, "sweepInterval", MAX_TIMEOUT_MS))
-                        .transpose()?,
+                    handle_ttl_ms: endpoint.handle_ttl_ms,
+                    sweep_interval_ms: endpoint.sweep_interval_ms,
                 },
                 capabilities: Vec::new(),
                 keylog: o.keylog.unwrap_or(false),
-                max_header_size: o
-                    .max_header_bytes
-                    .map(|v| safe_f64_to_usize(v, "maxHeaderBytes", MAX_HEADER_BYTES))
-                    .transpose()?,
+                max_header_size: endpoint.max_header_bytes,
                 max_response_body_bytes: None,
                 // NODE-003: enable compression when level or minBodyBytes is provided.
                 compression: if o.compression_min_body_bytes.is_some()
                     || o.compression_level.is_some()
                 {
-                    // ISS-020: validate compression level range before cast.
-                    let level = o
-                        .compression_level
-                        .map(iroh_http_adapter::validate_compression_level)
-                        .transpose()
-                        .map_err(ffi_adapter_invalid_arg)?;
                     Some(iroh_http_core::CompressionOptions {
                         min_body_bytes: o
                             .compression_min_body_bytes
                             .map(|v| v as usize)
                             .unwrap_or(iroh_http_core::CompressionOptions::DEFAULT_MIN_BODY_BYTES),
-                        level,
+                        level: endpoint.compression_level,
                     })
                 } else {
                     None
@@ -1005,35 +947,32 @@ pub async fn raw_fetch(
     max_response_body_bytes: Option<f64>,
 ) -> napi::Result<JsFfiResponse> {
     let ep = get_endpoint(endpoint_handle)?;
-    validate_node_id(&node_id).map_err(ffi_adapter_invalid_arg)?;
-    validate_url(&url).map_err(ffi_adapter_invalid_arg)?;
-    validate_method(&method).map_err(ffi_adapter_invalid_arg)?;
-    validate_direct_addrs(&direct_addrs).map_err(ffi_adapter_invalid_arg)?;
-
-    let pairs = validate_header_rows(headers).map_err(ffi_adapter_invalid_arg)?;
+    let opts = coerce_fetch_options(RawFetchOptions {
+        node_id,
+        url,
+        method,
+        direct_addrs,
+        headers,
+        timeout_ms,
+        max_response_body_bytes,
+    })
+    .map_err(ffi_adapter_invalid_arg)?;
 
     let req_body_reader = req_body_handle
         .map(get_handle)
         .transpose()?
         .and_then(|h| ep.handles().claim_pending_reader(h));
 
-    let addrs =
-        parse_direct_addrs(&direct_addrs).map_err(|e| napi::Error::new(Status::InvalidArg, e))?;
-    let timeout = timeout_ms
-        .map(|ms| adapter_safe_f64_to_u64(ms, "timeoutMs", MAX_TIMEOUT_MS))
-        .transpose()
-        .map_err(ffi_adapter_invalid_arg)?
-        .map(std::time::Duration::from_millis);
-    let max_resp = max_response_body_bytes
-        .map(|b| adapter_safe_f64_to_usize(b, "maxResponseBodyBytes", MAX_BODY_BYTES))
-        .transpose()
-        .map_err(ffi_adapter_invalid_arg)?;
+    let addrs = parse_direct_addrs(&opts.direct_addrs)
+        .map_err(|e| napi::Error::new(Status::InvalidArg, e))?;
+    let timeout = opts.timeout_ms.map(std::time::Duration::from_millis);
+    let max_resp = opts.max_response_body_bytes;
     let res = iroh_http_core::fetch(
         &ep,
-        &node_id,
-        &url,
-        &method,
-        &pairs,
+        &opts.node_id,
+        &opts.url,
+        &opts.method,
+        &opts.headers,
         req_body_reader,
         Some(get_handle(fetch_token)?),
         addrs.as_deref(),
@@ -1132,29 +1071,22 @@ pub async fn raw_serve(
             load_shed: None,
             decompress: None,
         });
+        let serve = coerce_serve_options(RawServeOptions {
+            request_timeout_ms: o.request_timeout,
+            max_request_body_wire_bytes: o.max_request_body_wire_bytes,
+            max_request_body_decoded_bytes: o.max_request_body_decoded_bytes,
+            max_total_connections: o.max_total_connections,
+            drain_timeout_ms: o.drain_timeout,
+        })
+        .map_err(ffi_adapter_invalid_arg)?;
         iroh_http_core::ServeOptions {
             max_concurrency: o.max_concurrency.map(|v| v as usize),
             max_connections_per_peer: o.max_connections_per_peer.map(|v| v as usize),
-            request_timeout_ms: o
-                .request_timeout
-                .map(|v| safe_f64_to_u64(v, "requestTimeout", MAX_TIMEOUT_MS))
-                .transpose()?,
-            max_request_body_wire_bytes: o
-                .max_request_body_wire_bytes
-                .map(|v| safe_f64_to_usize(v, "maxRequestBodyWireBytes", MAX_BODY_BYTES))
-                .transpose()?,
-            max_request_body_decoded_bytes: o
-                .max_request_body_decoded_bytes
-                .map(|v| safe_f64_to_usize(v, "maxRequestBodyDecodedBytes", MAX_BODY_BYTES))
-                .transpose()?,
-            max_total_connections: o
-                .max_total_connections
-                .map(|v| safe_f64_to_usize(v, "maxTotalConnections", MAX_TOTAL_CONNECTIONS))
-                .transpose()?,
-            drain_timeout_ms: o
-                .drain_timeout
-                .map(|v| safe_f64_to_u64(v, "drainTimeout", MAX_TIMEOUT_MS))
-                .transpose()?,
+            request_timeout_ms: serve.request_timeout_ms,
+            max_request_body_wire_bytes: serve.max_request_body_wire_bytes,
+            max_request_body_decoded_bytes: serve.max_request_body_decoded_bytes,
+            max_total_connections: serve.max_total_connections,
+            drain_timeout_ms: serve.drain_timeout_ms,
             load_shed: o.load_shed,
             decompression: o.decompress,
         }
@@ -1554,33 +1486,8 @@ mod tests {
     }
 
     #[test]
-    fn validate_url_rejects_null_byte() {
-        let result = validate_url("httpi://peer/\x00x");
-        assert!(matches!(
-            result,
-            Err(AdapterInputError::InvalidEncoding { field: "url" })
-        ));
-    }
-
-    #[test]
     fn validate_headers_rejects_malformed_pair() {
         let result = validate_header_rows(vec![vec!["x".to_string()]]);
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn timeout_conversion_rejects_too_large() {
-        let too_large = safe_f64_to_u64(
-            (MAX_TIMEOUT_MS + 1) as f64,
-            "requestTimeout",
-            MAX_TIMEOUT_MS,
-        );
-        assert!(too_large.is_err());
-    }
-
-    #[test]
-    fn timeout_conversion_rejects_fractional() {
-        let fractional = safe_f64_to_u64(1.5, "requestTimeout", MAX_TIMEOUT_MS);
-        assert!(fractional.is_err());
     }
 }

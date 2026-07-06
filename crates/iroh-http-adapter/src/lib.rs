@@ -259,6 +259,188 @@ pub fn validate_compression_level(level: i32) -> Result<u32, AdapterInputError> 
     Ok(level as u32)
 }
 
+/// Raw fetch inputs decoded from a platform FFI call, prior to validation.
+///
+/// This is the shape every adapter (Node napi, Deno FFI, Tauri command) hands
+/// to [`coerce_fetch_options`]. Numeric knobs arrive as `f64` because that is
+/// how JS numbers cross each boundary.
+#[derive(Debug, Clone)]
+pub struct RawFetchOptions {
+    pub node_id: String,
+    pub url: String,
+    pub method: String,
+    pub direct_addrs: Option<Vec<String>>,
+    pub headers: Vec<Vec<String>>,
+    pub timeout_ms: Option<f64>,
+    pub max_response_body_bytes: Option<f64>,
+}
+
+/// Fully validated and coerced fetch inputs produced by [`coerce_fetch_options`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FetchOptions {
+    pub node_id: String,
+    pub url: String,
+    pub method: String,
+    pub direct_addrs: Option<Vec<String>>,
+    pub headers: Vec<(String, String)>,
+    pub timeout_ms: Option<u64>,
+    pub max_response_body_bytes: Option<usize>,
+}
+
+/// Validate and coerce all fetch inputs behind a single seam.
+///
+/// Composes the individual `validate_*` / `safe_f64_*` helpers so every adapter
+/// applies identical boundary checks, in identical order, and receives a single
+/// validated struct. The validation order (node id, url, method, direct addrs,
+/// headers, then the numeric knobs) matches the Node reference implementation.
+pub fn coerce_fetch_options(raw: RawFetchOptions) -> Result<FetchOptions, AdapterInputError> {
+    validate_node_id(&raw.node_id)?;
+    validate_url(&raw.url)?;
+    validate_method(&raw.method)?;
+    validate_direct_addrs(&raw.direct_addrs)?;
+    let headers = validate_header_rows(raw.headers)?;
+    let timeout_ms = raw
+        .timeout_ms
+        .map(|ms| safe_f64_to_u64(ms, "timeoutMs", MAX_TIMEOUT_MS))
+        .transpose()?;
+    let max_response_body_bytes = raw
+        .max_response_body_bytes
+        .map(|b| safe_f64_to_usize(b, "maxResponseBodyBytes", MAX_BODY_BYTES))
+        .transpose()?;
+    Ok(FetchOptions {
+        node_id: raw.node_id,
+        url: raw.url,
+        method: raw.method,
+        direct_addrs: raw.direct_addrs,
+        headers,
+        timeout_ms,
+        max_response_body_bytes,
+    })
+}
+
+/// Raw endpoint (`createNode`/bind) numeric knobs decoded from a platform FFI
+/// call, prior to validation.
+#[derive(Debug, Clone, Default)]
+pub struct RawEndpointOptions {
+    pub idle_timeout_ms: Option<f64>,
+    pub pool_idle_timeout_ms: Option<f64>,
+    pub handle_ttl_ms: Option<f64>,
+    pub sweep_interval_ms: Option<f64>,
+    pub max_header_bytes: Option<f64>,
+    pub compression_level: Option<i32>,
+}
+
+/// Fully validated and coerced endpoint numeric knobs produced by
+/// [`coerce_endpoint_options`].
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct EndpointOptions {
+    pub idle_timeout_ms: Option<u64>,
+    pub pool_idle_timeout_ms: Option<u64>,
+    pub handle_ttl_ms: Option<u64>,
+    pub sweep_interval_ms: Option<u64>,
+    pub max_header_bytes: Option<usize>,
+    pub compression_level: Option<u32>,
+}
+
+/// Validate and coerce the endpoint-bind numeric knobs behind a single seam.
+///
+/// Field order matches the Node reference implementation: idle timeout, pool
+/// idle timeout, handle TTL, sweep interval, max header bytes, compression
+/// level.
+pub fn coerce_endpoint_options(
+    raw: RawEndpointOptions,
+) -> Result<EndpointOptions, AdapterInputError> {
+    let idle_timeout_ms = raw
+        .idle_timeout_ms
+        .map(|v| safe_f64_to_u64(v, "idleTimeout", MAX_TIMEOUT_MS))
+        .transpose()?;
+    let pool_idle_timeout_ms = raw
+        .pool_idle_timeout_ms
+        .map(|v| safe_f64_to_u64(v, "poolIdleTimeoutMs", MAX_TIMEOUT_MS))
+        .transpose()?;
+    let handle_ttl_ms = raw
+        .handle_ttl_ms
+        .map(|v| safe_f64_to_u64(v, "handleTtl", MAX_TIMEOUT_MS))
+        .transpose()?;
+    let sweep_interval_ms = raw
+        .sweep_interval_ms
+        .map(|v| safe_f64_to_u64(v, "sweepInterval", MAX_TIMEOUT_MS))
+        .transpose()?;
+    let max_header_bytes = raw
+        .max_header_bytes
+        .map(|v| safe_f64_to_usize(v, "maxHeaderBytes", MAX_HEADER_BYTES))
+        .transpose()?;
+    let compression_level = raw
+        .compression_level
+        .map(validate_compression_level)
+        .transpose()?;
+    Ok(EndpointOptions {
+        idle_timeout_ms,
+        pool_idle_timeout_ms,
+        handle_ttl_ms,
+        sweep_interval_ms,
+        max_header_bytes,
+        compression_level,
+    })
+}
+
+/// Raw serve numeric knobs decoded from a platform FFI call, prior to
+/// validation.
+#[derive(Debug, Clone, Default)]
+pub struct RawServeOptions {
+    pub request_timeout_ms: Option<f64>,
+    pub max_request_body_wire_bytes: Option<f64>,
+    pub max_request_body_decoded_bytes: Option<f64>,
+    pub max_total_connections: Option<f64>,
+    pub drain_timeout_ms: Option<f64>,
+}
+
+/// Fully validated and coerced serve numeric knobs produced by
+/// [`coerce_serve_options`].
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ServeOptions {
+    pub request_timeout_ms: Option<u64>,
+    pub max_request_body_wire_bytes: Option<usize>,
+    pub max_request_body_decoded_bytes: Option<usize>,
+    pub max_total_connections: Option<usize>,
+    pub drain_timeout_ms: Option<u64>,
+}
+
+/// Validate and coerce the serve numeric knobs behind a single seam.
+///
+/// Field order matches the Node reference implementation: request timeout,
+/// max request body wire bytes, max request body decoded bytes, max total
+/// connections, drain timeout.
+pub fn coerce_serve_options(raw: RawServeOptions) -> Result<ServeOptions, AdapterInputError> {
+    let request_timeout_ms = raw
+        .request_timeout_ms
+        .map(|v| safe_f64_to_u64(v, "requestTimeout", MAX_TIMEOUT_MS))
+        .transpose()?;
+    let max_request_body_wire_bytes = raw
+        .max_request_body_wire_bytes
+        .map(|v| safe_f64_to_usize(v, "maxRequestBodyWireBytes", MAX_BODY_BYTES))
+        .transpose()?;
+    let max_request_body_decoded_bytes = raw
+        .max_request_body_decoded_bytes
+        .map(|v| safe_f64_to_usize(v, "maxRequestBodyDecodedBytes", MAX_BODY_BYTES))
+        .transpose()?;
+    let max_total_connections = raw
+        .max_total_connections
+        .map(|v| safe_f64_to_usize(v, "maxTotalConnections", MAX_TOTAL_CONNECTIONS))
+        .transpose()?;
+    let drain_timeout_ms = raw
+        .drain_timeout_ms
+        .map(|v| safe_f64_to_u64(v, "drainTimeout", MAX_TIMEOUT_MS))
+        .transpose()?;
+    Ok(ServeOptions {
+        request_timeout_ms,
+        max_request_body_wire_bytes,
+        max_request_body_decoded_bytes,
+        max_total_connections,
+        drain_timeout_ms,
+    })
+}
+
 fn validate_bounded_string(
     field: &'static str,
     value: &str,
@@ -562,6 +744,132 @@ mod tests {
             validate_compression_level(-1),
             Err(AdapterInputError::InvalidArgument {
                 field: "compressionLevel",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn coerce_fetch_options_validates_and_coerces() {
+        let ok = coerce_fetch_options(RawFetchOptions {
+            node_id: "abcdefghijklmnopqrstuvwxyz234567".to_string(),
+            url: "httpi://peer/path".to_string(),
+            method: "GET".to_string(),
+            direct_addrs: Some(vec!["127.0.0.1:1234".to_string()]),
+            headers: vec![vec!["x".to_string(), "y".to_string()]],
+            timeout_ms: Some(1000.0),
+            max_response_body_bytes: Some(2048.0),
+        })
+        .expect("valid fetch options");
+        assert_eq!(ok.headers, vec![("x".to_string(), "y".to_string())]);
+        assert_eq!(ok.timeout_ms, Some(1000));
+        assert_eq!(ok.max_response_body_bytes, Some(2048));
+
+        // Invalid node id is rejected.
+        let bad_node = coerce_fetch_options(RawFetchOptions {
+            node_id: "bad-node-id!".to_string(),
+            url: "httpi://peer/".to_string(),
+            method: "GET".to_string(),
+            direct_addrs: None,
+            headers: vec![],
+            timeout_ms: None,
+            max_response_body_bytes: None,
+        });
+        assert!(matches!(bad_node, Err(AdapterInputError::InvalidNodeId)));
+
+        // Over-cap timeout is rejected with the timeoutMs field.
+        let bad_timeout = coerce_fetch_options(RawFetchOptions {
+            node_id: "aaaa".to_string(),
+            url: "httpi://peer/".to_string(),
+            method: "GET".to_string(),
+            direct_addrs: None,
+            headers: vec![],
+            timeout_ms: Some((MAX_TIMEOUT_MS + 1) as f64),
+            max_response_body_bytes: None,
+        });
+        assert!(matches!(
+            bad_timeout,
+            Err(AdapterInputError::InvalidArgument {
+                field: "timeoutMs",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn coerce_endpoint_options_validates_and_coerces() {
+        let ok = coerce_endpoint_options(RawEndpointOptions {
+            idle_timeout_ms: Some(1000.0),
+            pool_idle_timeout_ms: Some(2000.0),
+            handle_ttl_ms: Some(3000.0),
+            sweep_interval_ms: Some(4000.0),
+            max_header_bytes: Some(65536.0),
+            compression_level: Some(9),
+        })
+        .expect("valid endpoint options");
+        assert_eq!(ok.idle_timeout_ms, Some(1000));
+        assert_eq!(ok.max_header_bytes, Some(65536));
+        assert_eq!(ok.compression_level, Some(9));
+
+        assert_eq!(
+            coerce_endpoint_options(RawEndpointOptions::default()),
+            Ok(EndpointOptions::default())
+        );
+
+        // Over-cap max header bytes is rejected.
+        let bad = coerce_endpoint_options(RawEndpointOptions {
+            max_header_bytes: Some((MAX_HEADER_BYTES + 1) as f64),
+            ..Default::default()
+        });
+        assert!(matches!(
+            bad,
+            Err(AdapterInputError::InvalidArgument {
+                field: "maxHeaderBytes",
+                ..
+            })
+        ));
+
+        // Negative compression level is rejected.
+        let bad_level = coerce_endpoint_options(RawEndpointOptions {
+            compression_level: Some(-1),
+            ..Default::default()
+        });
+        assert!(matches!(
+            bad_level,
+            Err(AdapterInputError::InvalidArgument {
+                field: "compressionLevel",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn coerce_serve_options_validates_and_coerces() {
+        let ok = coerce_serve_options(RawServeOptions {
+            request_timeout_ms: Some(1000.0),
+            max_request_body_wire_bytes: Some(2048.0),
+            max_request_body_decoded_bytes: Some(4096.0),
+            max_total_connections: Some(1000.0),
+            drain_timeout_ms: Some(5000.0),
+        })
+        .expect("valid serve options");
+        assert_eq!(ok.request_timeout_ms, Some(1000));
+        assert_eq!(ok.max_total_connections, Some(1000));
+
+        assert_eq!(
+            coerce_serve_options(RawServeOptions::default()),
+            Ok(ServeOptions::default())
+        );
+
+        // Over-cap total connections is rejected.
+        let bad = coerce_serve_options(RawServeOptions {
+            max_total_connections: Some((MAX_TOTAL_CONNECTIONS + 1) as f64),
+            ..Default::default()
+        });
+        assert!(matches!(
+            bad,
+            Err(AdapterInputError::InvalidArgument {
+                field: "maxTotalConnections",
                 ..
             })
         ));
