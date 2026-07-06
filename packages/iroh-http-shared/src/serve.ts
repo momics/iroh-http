@@ -372,9 +372,17 @@ export function makeServe(
       .then(() => Promise.allSettled([...activePipes]))
       .then(() => {});
     // Reset guard when the loop finishes so serve() can be called again.
-    finished.finally(() => {
+    // Use `.then(onFulfilled, onRejected)` (not `.finally`) so the reset runs
+    // exactly one microtask after `finished` settles — matching the original
+    // `.finally` timing that rapid serve/stop/serve cycles depend on (#119) —
+    // while also handling a rejected `finished` (e.g. serve options rejected by
+    // the adapter's numeric caps) so it does not surface as an unhandled
+    // rejection through this internal bookkeeping chain. Callers still observe
+    // the rejection via the `finished` promise they hold.
+    const resetGuard = (): void => {
       serveRunning = false;
-    });
+    };
+    void finished.then(resetGuard, resetGuard);
 
     const doStop = (): void => {
       if (stopRequested) return;

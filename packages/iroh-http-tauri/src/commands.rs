@@ -15,7 +15,9 @@ use crate::state;
 
 use iroh_http_adapter::{
     core_error_to_json, format_error_json, safe_f64_to_u64, safe_f64_to_usize,
-    send_undeliverable_rejection, validate_header_rows, MAX_BODY_BYTES, MAX_TIMEOUT_MS,
+    send_undeliverable_rejection, validate_compression_level, validate_direct_addrs,
+    validate_header_rows, validate_method, validate_node_id, validate_url, MAX_BODY_BYTES,
+    MAX_HEADER_BYTES, MAX_TIMEOUT_MS, MAX_TOTAL_CONNECTIONS,
 };
 
 // ── Endpoint ──────────────────────────────────────────────────────────────────
@@ -27,7 +29,7 @@ use iroh_http_adapter::{
 #[serde(rename_all = "camelCase")]
 pub struct CreateEndpointArgs {
     pub key: Option<String>,
-    pub idle_timeout: Option<u64>,
+    pub idle_timeout: Option<f64>,
     pub relay_mode: Option<String>,
     pub relays: Option<Vec<String>>,
     pub bind_addrs: Option<Vec<String>>,
@@ -35,18 +37,18 @@ pub struct CreateEndpointArgs {
     pub dns_discovery_enabled: Option<bool>,
     pub channel_capacity: Option<usize>,
     pub max_chunk_size_bytes: Option<usize>,
-    pub handle_ttl: Option<u64>,
-    pub sweep_interval: Option<u64>,
+    pub handle_ttl: Option<f64>,
+    pub sweep_interval: Option<f64>,
     pub disable_networking: Option<bool>,
     pub proxy_url: Option<String>,
     pub proxy_from_env: Option<bool>,
     pub keylog: Option<bool>,
     pub compression_min_body_bytes: Option<usize>,
-    pub compression_level: Option<u32>,
-    pub max_header_bytes: Option<usize>,
+    pub compression_level: Option<i32>,
+    pub max_header_bytes: Option<f64>,
     /// TAURI-002: pool-tuning options previously ignored.
     pub max_pooled_connections: Option<usize>,
-    pub pool_idle_timeout_ms: Option<u64>,
+    pub pool_idle_timeout_ms: Option<f64>,
 }
 
 /// Info returned after a successful endpoint bind.
@@ -82,7 +84,11 @@ pub async fn create_endpoint<R: tauri::Runtime>(
                     relay_mode: a.relay_mode,
                     relays: a.relays.unwrap_or_default(),
                     bind_addrs: a.bind_addrs.unwrap_or_default(),
-                    idle_timeout_ms: a.idle_timeout,
+                    idle_timeout_ms: a
+                        .idle_timeout
+                        .map(|v| safe_f64_to_u64(v, "idleTimeout", MAX_TIMEOUT_MS))
+                        .transpose()
+                        .map_err(|e| e.to_json())?,
                     proxy_url: a.proxy_url,
                     proxy_from_env: a.proxy_from_env.unwrap_or(false),
                     disabled: a.disable_networking.unwrap_or(false),
@@ -93,27 +99,49 @@ pub async fn create_endpoint<R: tauri::Runtime>(
                 },
                 pool: PoolOptions {
                     max_connections: a.max_pooled_connections,
-                    idle_timeout_ms: a.pool_idle_timeout_ms,
+                    idle_timeout_ms: a
+                        .pool_idle_timeout_ms
+                        .map(|v| safe_f64_to_u64(v, "poolIdleTimeoutMs", MAX_TIMEOUT_MS))
+                        .transpose()
+                        .map_err(|e| e.to_json())?,
                 },
                 streaming: StreamingOptions {
                     channel_capacity: a.channel_capacity,
                     max_chunk_size_bytes: a.max_chunk_size_bytes,
                     drain_timeout_ms: None,
-                    handle_ttl_ms: a.handle_ttl,
-                    sweep_interval_ms: a.sweep_interval,
+                    handle_ttl_ms: a
+                        .handle_ttl
+                        .map(|v| safe_f64_to_u64(v, "handleTtl", MAX_TIMEOUT_MS))
+                        .transpose()
+                        .map_err(|e| e.to_json())?,
+                    sweep_interval_ms: a
+                        .sweep_interval
+                        .map(|v| safe_f64_to_u64(v, "sweepInterval", MAX_TIMEOUT_MS))
+                        .transpose()
+                        .map_err(|e| e.to_json())?,
                 },
                 capabilities: Vec::new(),
                 keylog: a.keylog.unwrap_or(false),
-                max_header_size: a.max_header_bytes,
+                max_header_size: a
+                    .max_header_bytes
+                    .map(|v| safe_f64_to_usize(v, "maxHeaderBytes", MAX_HEADER_BYTES))
+                    .transpose()
+                    .map_err(|e| e.to_json())?,
                 max_response_body_bytes: None,
                 compression: if a.compression_min_body_bytes.is_some()
                     || a.compression_level.is_some()
                 {
+                    // ISS-020: validate compression level range before cast.
+                    let level = a
+                        .compression_level
+                        .map(validate_compression_level)
+                        .transpose()
+                        .map_err(|e| e.to_json())?;
                     Some(iroh_http_core::CompressionOptions {
                         min_body_bytes: a
                             .compression_min_body_bytes
                             .unwrap_or(iroh_http_core::CompressionOptions::DEFAULT_MIN_BODY_BYTES),
-                        level: a.compression_level,
+                        level,
                     })
                 } else {
                     None
@@ -497,6 +525,10 @@ pub async fn fetch(args: RawFetchArgs) -> Result<FfiResponsePayload, String> {
     })?;
 
     let pairs = validate_header_rows(args.headers).map_err(|e| e.to_json())?;
+    validate_node_id(&args.node_id).map_err(|e| e.to_json())?;
+    validate_url(&args.url).map_err(|e| e.to_json())?;
+    validate_method(&args.method).map_err(|e| e.to_json())?;
+    validate_direct_addrs(&args.direct_addrs).map_err(|e| e.to_json())?;
 
     let req_body_reader = args
         .req_body_handle
@@ -563,11 +595,11 @@ pub struct ServeArgs {
     pub endpoint_handle: u64,
     pub max_concurrency: Option<usize>,
     pub max_connections_per_peer: Option<usize>,
-    pub request_timeout: Option<u64>,
-    pub max_request_body_wire_bytes: Option<usize>,
-    pub max_request_body_decoded_bytes: Option<usize>,
-    pub max_total_connections: Option<usize>,
-    pub drain_timeout: Option<u64>,
+    pub request_timeout: Option<f64>,
+    pub max_request_body_wire_bytes: Option<f64>,
+    pub max_request_body_decoded_bytes: Option<f64>,
+    pub max_total_connections: Option<f64>,
+    pub drain_timeout: Option<f64>,
     pub load_shed: Option<bool>,
     pub decompress: Option<bool>,
 }
@@ -589,11 +621,31 @@ pub async fn serve(
     let serve_opts = iroh_http_core::ServeOptions {
         max_concurrency: args.max_concurrency,
         max_connections_per_peer: args.max_connections_per_peer,
-        request_timeout_ms: args.request_timeout,
-        max_request_body_wire_bytes: args.max_request_body_wire_bytes,
-        max_request_body_decoded_bytes: args.max_request_body_decoded_bytes,
-        max_total_connections: args.max_total_connections,
-        drain_timeout_ms: args.drain_timeout,
+        request_timeout_ms: args
+            .request_timeout
+            .map(|v| safe_f64_to_u64(v, "requestTimeout", MAX_TIMEOUT_MS))
+            .transpose()
+            .map_err(|e| e.to_json())?,
+        max_request_body_wire_bytes: args
+            .max_request_body_wire_bytes
+            .map(|v| safe_f64_to_usize(v, "maxRequestBodyWireBytes", MAX_BODY_BYTES))
+            .transpose()
+            .map_err(|e| e.to_json())?,
+        max_request_body_decoded_bytes: args
+            .max_request_body_decoded_bytes
+            .map(|v| safe_f64_to_usize(v, "maxRequestBodyDecodedBytes", MAX_BODY_BYTES))
+            .transpose()
+            .map_err(|e| e.to_json())?,
+        max_total_connections: args
+            .max_total_connections
+            .map(|v| safe_f64_to_usize(v, "maxTotalConnections", MAX_TOTAL_CONNECTIONS))
+            .transpose()
+            .map_err(|e| e.to_json())?,
+        drain_timeout_ms: args
+            .drain_timeout
+            .map(|v| safe_f64_to_u64(v, "drainTimeout", MAX_TIMEOUT_MS))
+            .transpose()
+            .map_err(|e| e.to_json())?,
         load_shed: args.load_shed,
         decompression: args.decompress,
     };

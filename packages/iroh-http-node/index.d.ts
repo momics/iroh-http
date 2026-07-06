@@ -227,7 +227,7 @@ export interface JsServeOptions {
   maxRequestBodyDecodedBytes?: number
   /** Maximum total QUIC connections the server will accept.  Default: unlimited. */
   maxTotalConnections?: number
-  /** Drain timeout in milliseconds after shutdown signal.  Default: 5000. */
+  /** Drain timeout in milliseconds after shutdown signal.  Default: 30000. */
   drainTimeout?: number
   /** Enable load-shedding (reject with 503 when at capacity). */
   loadShed?: boolean
