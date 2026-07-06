@@ -15,9 +15,9 @@ use crate::state;
 
 use iroh_http_adapter::{
     core_error_to_json, format_error_json, safe_f64_to_u64, safe_f64_to_usize,
-    send_undeliverable_rejection, validate_direct_addrs, validate_header_rows, validate_method,
-    validate_node_id, validate_url, MAX_BODY_BYTES, MAX_HEADER_BYTES, MAX_TIMEOUT_MS,
-    MAX_TOTAL_CONNECTIONS,
+    send_undeliverable_rejection, validate_compression_level, validate_direct_addrs,
+    validate_header_rows, validate_method, validate_node_id, validate_url, MAX_BODY_BYTES,
+    MAX_HEADER_BYTES, MAX_TIMEOUT_MS, MAX_TOTAL_CONNECTIONS,
 };
 
 // ── Endpoint ──────────────────────────────────────────────────────────────────
@@ -44,7 +44,7 @@ pub struct CreateEndpointArgs {
     pub proxy_from_env: Option<bool>,
     pub keylog: Option<bool>,
     pub compression_min_body_bytes: Option<usize>,
-    pub compression_level: Option<u32>,
+    pub compression_level: Option<i32>,
     pub max_header_bytes: Option<f64>,
     /// TAURI-002: pool-tuning options previously ignored.
     pub max_pooled_connections: Option<usize>,
@@ -131,11 +131,17 @@ pub async fn create_endpoint<R: tauri::Runtime>(
                 compression: if a.compression_min_body_bytes.is_some()
                     || a.compression_level.is_some()
                 {
+                    // ISS-020: validate compression level range before cast.
+                    let level = a
+                        .compression_level
+                        .map(validate_compression_level)
+                        .transpose()
+                        .map_err(|e| e.to_json())?;
                     Some(iroh_http_core::CompressionOptions {
                         min_body_bytes: a
                             .compression_min_body_bytes
                             .unwrap_or(iroh_http_core::CompressionOptions::DEFAULT_MIN_BODY_BYTES),
-                        level: a.compression_level,
+                        level,
                     })
                 } else {
                     None

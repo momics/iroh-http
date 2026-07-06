@@ -245,6 +245,20 @@ pub fn safe_f64_to_usize(
     Ok(value as usize)
 }
 
+/// Validate a compression level, rejecting negative values and returning the
+/// unsigned level the core compression config expects. Centralizes the
+/// non-negative check that all three adapters previously hand-rolled (or, in
+/// Tauri's case, delegated to a generic serde error).
+pub fn validate_compression_level(level: i32) -> Result<u32, AdapterInputError> {
+    if level < 0 {
+        return Err(AdapterInputError::InvalidArgument {
+            field: "compressionLevel",
+            reason: format!("must be non-negative, got {level}"),
+        });
+    }
+    Ok(level as u32)
+}
+
 fn validate_bounded_string(
     field: &'static str,
     value: &str,
@@ -535,6 +549,19 @@ mod tests {
             validate_direct_addrs(&Some(vec![long])),
             Err(AdapterInputError::InputTooLarge {
                 field: "directAddr",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn validate_compression_level_rejects_negative() {
+        assert_eq!(validate_compression_level(0), Ok(0));
+        assert_eq!(validate_compression_level(9), Ok(9));
+        assert!(matches!(
+            validate_compression_level(-1),
+            Err(AdapterInputError::InvalidArgument {
+                field: "compressionLevel",
                 ..
             })
         ));

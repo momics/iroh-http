@@ -149,6 +149,15 @@ export function adapterValidationTests({
     }
   });
 
+  test("adapter validation rejects negative compression level", async () => {
+    await assertThrows(async () => {
+      await createNode({
+        disableNetworking: true,
+        compression: { level: -1 },
+      });
+    }, "compressionLevel -1");
+  });
+
   test("adapter validation accepts valid fetch headers and numeric knobs", async () => {
     const node = await createNode({ disableNetworking: true });
     let handle;

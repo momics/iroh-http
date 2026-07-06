@@ -70,9 +70,9 @@ fn insert_endpoint(ep: IrohEndpoint) -> u64 {
 
 use iroh_http_adapter::{
     core_error_to_json, format_error_json, safe_f64_to_u64, safe_f64_to_usize,
-    send_undeliverable_rejection, validate_direct_addrs, validate_header_rows, validate_method,
-    validate_node_id, validate_url, AdapterInputError, MAX_BODY_BYTES, MAX_HEADER_BYTES,
-    MAX_TIMEOUT_MS, MAX_TOTAL_CONNECTIONS,
+    send_undeliverable_rejection, validate_compression_level, validate_direct_addrs,
+    validate_header_rows, validate_method, validate_node_id, validate_url, AdapterInputError,
+    MAX_BODY_BYTES, MAX_HEADER_BYTES, MAX_TIMEOUT_MS, MAX_TOTAL_CONNECTIONS,
 };
 
 // ── Helper ────────────────────────────────────────────────────────────────────
@@ -381,18 +381,19 @@ async fn create_endpoint(p: Value) -> Value {
             || args.compression_level.is_some()
         {
             // ISS-020: validate compression level range before cast.
-            if let Some(level) = args.compression_level {
-                if level < 0 {
-                    return err(format!(
-                        "compressionLevel must be non-negative, got {level}"
-                    ));
-                }
-            }
+            let level = match args
+                .compression_level
+                .map(validate_compression_level)
+                .transpose()
+            {
+                Ok(v) => v,
+                Err(e) => return err_adapter(e),
+            };
             Some(iroh_http_core::CompressionOptions {
                 min_body_bytes: args
                     .compression_min_body_bytes
                     .unwrap_or(iroh_http_core::CompressionOptions::DEFAULT_MIN_BODY_BYTES),
-                level: args.compression_level.map(|v| v as u32),
+                level,
             })
         } else {
             None

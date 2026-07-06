@@ -415,20 +415,17 @@ pub async fn create_endpoint(options: Option<JsNodeOptions>) -> napi::Result<JsE
                     || o.compression_level.is_some()
                 {
                     // ISS-020: validate compression level range before cast.
-                    if let Some(level) = o.compression_level {
-                        if level < 0 {
-                            return Err(napi::Error::new(
-                                Status::InvalidArg,
-                                format!("compressionLevel must be non-negative, got {level}"),
-                            ));
-                        }
-                    }
+                    let level = o
+                        .compression_level
+                        .map(iroh_http_adapter::validate_compression_level)
+                        .transpose()
+                        .map_err(ffi_adapter_invalid_arg)?;
                     Some(iroh_http_core::CompressionOptions {
                         min_body_bytes: o
                             .compression_min_body_bytes
                             .map(|v| v as usize)
                             .unwrap_or(iroh_http_core::CompressionOptions::DEFAULT_MIN_BODY_BYTES),
-                        level: o.compression_level.map(|v| v as u32),
+                        level,
                     })
                 } else {
                     None
@@ -1101,7 +1098,7 @@ pub struct JsServeOptions {
     pub max_request_body_decoded_bytes: Option<f64>,
     /// Maximum total QUIC connections the server will accept.  Default: unlimited.
     pub max_total_connections: Option<f64>,
-    /// Drain timeout in milliseconds after shutdown signal.  Default: 5000.
+    /// Drain timeout in milliseconds after shutdown signal.  Default: 30000.
     pub drain_timeout: Option<f64>,
     /// Enable load-shedding (reject with 503 when at capacity).
     pub load_shed: Option<bool>,
