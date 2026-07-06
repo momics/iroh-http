@@ -8,7 +8,9 @@
 //! an adapter-layer concern, not HTTP transport semantics.
 #![deny(unsafe_code)]
 
-use iroh_http_core::{respond, CoreError, ErrorCode, HandleStore, ResponseHeadEntry};
+use iroh_http_core::{
+    respond, CoreError, ErrorCode, HandleStore, RequestPayload, ResponseHeadEntry,
+};
 
 /// Maximum number of header rows accepted at an adapter boundary.
 pub const MAX_HEADER_COUNT: usize = 100;
@@ -60,6 +62,117 @@ pub fn send_undeliverable_rejection(
 ) -> Result<(), CoreError> {
     let head = reject_undeliverable(reason);
     respond(handles, req_handle, head.status, head.headers)
+}
+
+// ── Request-delivery seam (#315) ────────────────────────────────────────────
+//
+// Core (`FfiDispatcher::dispatch`) acquires the request-body reader / response-
+// body writer, measures header bytes, and fires `on_request` with a
+// `RequestPayload`. The only parts previously duplicated across the three
+// bridges were (1) the header reshape into `Vec<Vec<String>>` and (2) the
+// undeliverable fallback. `deliver_request` owns both, leaving each bridge with
+// only its genuinely runtime-specific byte transport behind `RequestTransport`.
+
+/// A request reshaped once for delivery to a JS/TS runtime.
+///
+/// Built from a core [`RequestPayload`] by [`DeliverableRequest::from_payload`],
+/// which performs the single header reshape (`(k, v)` pairs → `[k, v]` rows)
+/// that each bridge used to do itself.
+#[derive(Debug, Clone)]
+pub struct DeliverableRequest {
+    /// Response-head slot handle (see [`RequestPayload::req_handle`]).
+    pub req_handle: u64,
+    /// Inbound request-body reader handle (`0` = no request body).
+    pub req_body_handle: u64,
+    /// Outbound response-body writer handle (`0` = body already closed).
+    pub res_body_handle: u64,
+    /// Whether this is a bidirectional (`is_bidi`) stream.
+    pub is_bidi: bool,
+    /// HTTP request method.
+    pub method: String,
+    /// Full `httpi://` request URL.
+    pub url: String,
+    /// Request headers as `[[name, value], ...]`, reshaped exactly once.
+    pub headers: Vec<Vec<String>>,
+    /// Base32 node id of the remote peer that sent the request.
+    pub remote_node_id: String,
+}
+
+impl DeliverableRequest {
+    /// Reshape a core [`RequestPayload`] into a [`DeliverableRequest`].
+    ///
+    /// This is the single place the `(name, value)` header pairs are reshaped
+    /// into `[name, value]` rows for the JS/TS boundary.
+    pub fn from_payload(payload: RequestPayload) -> Self {
+        Self {
+            req_handle: payload.req_handle,
+            req_body_handle: payload.req_body_handle,
+            res_body_handle: payload.res_body_handle,
+            is_bidi: payload.is_bidi,
+            method: payload.method,
+            url: payload.url,
+            headers: payload
+                .headers
+                .into_iter()
+                .map(|(k, v)| vec![k, v])
+                .collect(),
+            remote_node_id: payload.remote_node_id,
+        }
+    }
+}
+
+/// Signals that a request could not be handed to the runtime handler.
+///
+/// `reason` carries stable context for logs and the undeliverable rejection.
+#[derive(Debug, Clone)]
+pub struct Undeliverable {
+    /// Human-readable reason the request could not be delivered.
+    pub reason: String,
+}
+
+impl Undeliverable {
+    /// Build an [`Undeliverable`] from any displayable reason.
+    pub fn new(reason: impl std::fmt::Display) -> Self {
+        Self {
+            reason: reason.to_string(),
+        }
+    }
+}
+
+/// The per-runtime byte transport that hands a request to the JS/TS handler.
+///
+/// This is the only per-adapter surface: Node wraps a `ThreadsafeFunction`,
+/// Deno the serve-registry mpsc queue, Tauri a `Channel`. Each maps its native
+/// send failure (and, for Deno, registry-miss / shutdown / queue-full
+/// reachability gating) to [`Undeliverable`]. Implementations must be `T`, not
+/// `dyn`, so the delivery path stays monomorphised and `#![deny(unsafe_code)]`
+/// clean.
+pub trait RequestTransport {
+    /// Attempt to deliver `req` to the runtime handler.
+    ///
+    /// Returns `Err(Undeliverable)` if the request cannot reach the handler;
+    /// [`deliver_request`] then performs the shared fail-closed cleanup.
+    fn deliver(&self, req: &DeliverableRequest) -> Result<(), Undeliverable>;
+}
+
+/// Reshape a request once, deliver it through `transport`, and on failure emit
+/// the fail-closed 503 rejection **and** finish the response body writer.
+///
+/// Finishing the response body is essential: core builds the response body from
+/// a reader that yields until the writer is finished/dropped, so an
+/// undeliverable request that only sent the rejection head would hang until the
+/// drain timeout. Both cleanup steps run exactly once and their errors are
+/// ignored (the request head/body may already be gone).
+pub fn deliver_request<T: RequestTransport>(
+    handles: &HandleStore,
+    transport: &T,
+    payload: RequestPayload,
+) {
+    let req = DeliverableRequest::from_payload(payload);
+    if let Err(undeliverable) = transport.deliver(&req) {
+        let _ = send_undeliverable_rejection(handles, req.req_handle, &undeliverable.reason);
+        let _ = handles.finish_body(req.res_body_handle);
+    }
 }
 
 /// Adapter-boundary input validation error.
@@ -495,7 +608,89 @@ pub fn format_error_json(code: &str, msg: impl std::fmt::Display) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use iroh_http_core::CoreError;
+    use iroh_http_core::{CoreError, HandleStore, RequestPayload, StoreConfig};
+
+    /// Transport that always rejects, mirroring a runtime that can never be
+    /// reached. Used to exercise the shared undeliverable path.
+    struct MockTransport;
+
+    impl RequestTransport for MockTransport {
+        fn deliver(&self, _req: &DeliverableRequest) -> Result<(), Undeliverable> {
+            Err(Undeliverable::new("mock transport is always undeliverable"))
+        }
+    }
+
+    // Regression + conformance guard for #315: on the undeliverable path the
+    // shared delivery must (i) send the 503 + `content-length: 0` head and
+    // (ii) finish the response body writer so the client closes immediately
+    // instead of hanging until the drain timeout.
+    #[test]
+    fn deliver_request_undeliverable_rejects_and_finishes_body() {
+        let store = HandleStore::new(StoreConfig::default());
+        let (tx, mut rx) = tokio::sync::oneshot::channel();
+        let req_handle = store.allocate_req_handle(tx).unwrap();
+        let (writer, _reader) = store.make_body_channel();
+        let res_body_handle = store.insert_writer(writer).unwrap();
+
+        let (_, writers_before, _, _) = store.count_handles();
+        assert_eq!(writers_before, 1, "test setup should register one writer");
+
+        let payload = RequestPayload {
+            req_handle,
+            req_body_handle: 0,
+            res_body_handle,
+            method: "GET".to_string(),
+            url: "httpi://test/".to_string(),
+            headers: vec![("x-a".to_string(), "1".to_string())],
+            remote_node_id: "peer".to_string(),
+            is_bidi: false,
+        };
+
+        deliver_request(&store, &MockTransport, payload);
+
+        let expected = reject_undeliverable("conformance");
+        let head = rx
+            .try_recv()
+            .expect("undeliverable request should receive an immediate response head");
+        assert_eq!(head.status, expected.status);
+        assert_eq!(head.headers, expected.headers);
+
+        let (_, writers_after, _, _) = store.count_handles();
+        assert_eq!(
+            writers_after, 0,
+            "response body writer must be finished on the undeliverable path"
+        );
+    }
+
+    #[test]
+    fn deliverable_request_reshapes_headers_once() {
+        let payload = RequestPayload {
+            req_handle: 1,
+            req_body_handle: 2,
+            res_body_handle: 3,
+            method: "POST".to_string(),
+            url: "httpi://test/x".to_string(),
+            headers: vec![
+                ("a".to_string(), "1".to_string()),
+                ("b".to_string(), "2".to_string()),
+            ],
+            remote_node_id: "peer".to_string(),
+            is_bidi: true,
+        };
+        let req = DeliverableRequest::from_payload(payload);
+        assert_eq!(req.req_handle, 1);
+        assert_eq!(req.req_body_handle, 2);
+        assert_eq!(req.res_body_handle, 3);
+        assert!(req.is_bidi);
+        assert_eq!(req.method, "POST");
+        assert_eq!(
+            req.headers,
+            vec![
+                vec!["a".to_string(), "1".to_string()],
+                vec!["b".to_string(), "2".to_string()],
+            ]
+        );
+    }
 
     #[test]
     fn core_error_to_json_timeout() {

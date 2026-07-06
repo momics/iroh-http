@@ -9,3 +9,6 @@ repository.workspace = true
 [dependencies]
 iroh-http-core = { path = "../iroh-http-core", version = "0.5.2" }
 serde_json = "1"
+
+[dev-dependencies]
+tokio = { workspace = true }
