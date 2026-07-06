@@ -1,6 +1,7 @@
 # iroh-http
 
 [![CI](https://github.com/momics/iroh-http/actions/workflows/ci.yml/badge.svg)](https://github.com/momics/iroh-http/actions/workflows/ci.yml)
+[![Coverage](https://github.com/momics/iroh-http/actions/workflows/coverage.yml/badge.svg)](https://github.com/momics/iroh-http/actions/workflows/coverage.yml)
 [![npm](https://img.shields.io/npm/v/@momics/iroh-http-node)](https://www.npmjs.com/package/@momics/iroh-http-node)
 [![JSR](https://jsr.io/badges/@momics/iroh-http-deno)](https://jsr.io/@momics/iroh-http-deno)
 [![crates.io](https://img.shields.io/crates/v/iroh-http-core)](https://crates.io/crates/iroh-http-core)
@@ -127,6 +128,14 @@ Per-target:
 ```sh
 npm run build:core    npm run build:node    npm run build:deno    npm run build:tauri
 npm run test:rust     npm run test:node     npm run test:deno     npm run test:interop
+```
+
+### Coverage
+
+The [Coverage workflow](.github/workflows/coverage.yml) runs [`cargo llvm-cov`](https://github.com/taiki-e/cargo-llvm-cov) over the Rust workspace on every push and PR. It is **non-blocking** — a baseline report only, never a required check — and publishes an lcov + text summary to the job summary and a `coverage-report` artifact. Reproduce locally with:
+```sh
+cargo install cargo-llvm-cov
+cargo llvm-cov --workspace --summary-only
 ```
 
 ## Acknowledgements
