@@ -20,6 +20,10 @@ pub const MAX_HEADER_VALUE_LEN: usize = 8_192;
 pub const MAX_TIMEOUT_MS: u64 = 300_000;
 /// Maximum adapter-level body cap in bytes.
 pub const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
+/// Maximum total simultaneous connections a served endpoint will accept.
+pub const MAX_TOTAL_CONNECTIONS: usize = 100_000;
+/// Maximum header block size in bytes accepted for a served endpoint.
+pub const MAX_HEADER_BYTES: usize = 1_048_576;
 /// Maximum node-id / ticket string length in bytes accepted at an adapter boundary.
 pub const MAX_NODE_ID_LEN: usize = 128;
 /// Maximum request URL length in bytes accepted at an adapter boundary.

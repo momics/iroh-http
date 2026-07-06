@@ -113,6 +113,42 @@ export function adapterValidationTests({
     }
   });
 
+  test("adapter validation rejects invalid endpoint numeric options", async () => {
+    // Over-cap values can only be rejected by the shared adapter cap logic
+    // (JS has no knowledge of the cap), so this exercises the Rust boundary
+    // identically on every runtime.
+    await assertThrows(async () => {
+      await createNode({
+        disableNetworking: true,
+        limits: { maxHeaderBytes: 2_000_000 },
+      });
+    }, "maxHeaderBytes over cap");
+    await assertThrows(async () => {
+      await createNode({
+        disableNetworking: true,
+        connections: { idleTimeoutMs: 400_000 },
+      });
+    }, "idleTimeoutMs over cap");
+  });
+
+  test("adapter validation rejects invalid serve numeric caps", async () => {
+    const node = await createNode({ disableNetworking: true });
+    try {
+      // Over-cap value is only rejectable by the shared adapter cap logic, so
+      // this exercises the serve-side coercion path identically on every
+      // runtime. The reject surfaces through the serve handle's `finished`.
+      await assertThrows(async () => {
+        const handle = node.serve(
+          { maxTotalConnections: 200_000 },
+          () => new Response("x"),
+        );
+        if (handle && handle.finished) await handle.finished;
+      }, "maxTotalConnections over cap");
+    } finally {
+      await node.close();
+    }
+  });
+
   test("adapter validation accepts valid fetch headers and numeric knobs", async () => {
     const node = await createNode({ disableNetworking: true });
     let handle;

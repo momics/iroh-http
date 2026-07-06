@@ -71,7 +71,8 @@ fn insert_endpoint(ep: IrohEndpoint) -> u64 {
 use iroh_http_adapter::{
     core_error_to_json, format_error_json, safe_f64_to_u64, safe_f64_to_usize,
     send_undeliverable_rejection, validate_direct_addrs, validate_header_rows, validate_method,
-    validate_node_id, validate_url, AdapterInputError, MAX_BODY_BYTES, MAX_TIMEOUT_MS,
+    validate_node_id, validate_url, AdapterInputError, MAX_BODY_BYTES, MAX_HEADER_BYTES,
+    MAX_TIMEOUT_MS, MAX_TOTAL_CONNECTIONS,
 };
 
 // ── Helper ────────────────────────────────────────────────────────────────────
@@ -94,6 +95,24 @@ fn err_core(e: iroh_http_core::CoreError) -> Value {
 
 fn err_adapter(e: AdapterInputError) -> Value {
     err_code(e.code(), e.message())
+}
+
+/// Coerce an optional f64 knob to a capped `u64`, matching the adapter contract.
+fn coerce_opt_u64(
+    value: Option<f64>,
+    field: &'static str,
+    max: u64,
+) -> Result<Option<u64>, AdapterInputError> {
+    value.map(|v| safe_f64_to_u64(v, field, max)).transpose()
+}
+
+/// Coerce an optional f64 knob to a capped `usize`, matching the adapter contract.
+fn coerce_opt_usize(
+    value: Option<f64>,
+    field: &'static str,
+    max: usize,
+) -> Result<Option<usize>, AdapterInputError> {
+    value.map(|v| safe_f64_to_usize(v, field, max)).transpose()
 }
 
 fn deliver_request_to_queue(handle: u64, ep: &IrohEndpoint, payload: RequestPayload) {
@@ -255,7 +274,7 @@ pub async fn dispatch(method: &str, payload: &[u8]) -> Value {
 #[serde(rename_all = "camelCase")]
 struct CreateEndpointPayload {
     key: Option<String>,
-    idle_timeout: Option<u64>,
+    idle_timeout: Option<f64>,
     relay_mode: Option<String>,
     relays: Option<Vec<String>>,
     bind_addrs: Option<Vec<String>>,
@@ -263,17 +282,17 @@ struct CreateEndpointPayload {
     dns_discovery_enabled: Option<bool>,
     channel_capacity: Option<usize>,
     max_chunk_size_bytes: Option<usize>,
-    handle_ttl: Option<u64>,
-    sweep_interval: Option<u64>,
+    handle_ttl: Option<f64>,
+    sweep_interval: Option<f64>,
     max_pooled_connections: Option<usize>,
-    pool_idle_timeout_ms: Option<u64>,
+    pool_idle_timeout_ms: Option<f64>,
     disable_networking: Option<bool>,
     proxy_url: Option<String>,
     proxy_from_env: Option<bool>,
     keylog: Option<bool>,
     compression_level: Option<i32>,
     compression_min_body_bytes: Option<usize>,
-    max_header_bytes: Option<usize>,
+    max_header_bytes: Option<f64>,
 }
 
 async fn create_endpoint(p: Value) -> Value {
@@ -301,13 +320,40 @@ async fn create_endpoint(p: Value) -> Value {
         }
     };
 
+    let idle_timeout_ms = match coerce_opt_u64(args.idle_timeout, "idleTimeout", MAX_TIMEOUT_MS) {
+        Ok(v) => v,
+        Err(e) => return err_adapter(e),
+    };
+    let pool_idle_timeout_ms = match coerce_opt_u64(
+        args.pool_idle_timeout_ms,
+        "poolIdleTimeoutMs",
+        MAX_TIMEOUT_MS,
+    ) {
+        Ok(v) => v,
+        Err(e) => return err_adapter(e),
+    };
+    let handle_ttl_ms = match coerce_opt_u64(args.handle_ttl, "handleTtl", MAX_TIMEOUT_MS) {
+        Ok(v) => v,
+        Err(e) => return err_adapter(e),
+    };
+    let sweep_interval_ms =
+        match coerce_opt_u64(args.sweep_interval, "sweepInterval", MAX_TIMEOUT_MS) {
+            Ok(v) => v,
+            Err(e) => return err_adapter(e),
+        };
+    let max_header_size =
+        match coerce_opt_usize(args.max_header_bytes, "maxHeaderBytes", MAX_HEADER_BYTES) {
+            Ok(v) => v,
+            Err(e) => return err_adapter(e),
+        };
+
     let opts = NodeOptions {
         key,
         networking: NetworkingOptions {
             relay_mode: args.relay_mode,
             relays: args.relays.unwrap_or_default(),
             bind_addrs: args.bind_addrs.unwrap_or_default(),
-            idle_timeout_ms: args.idle_timeout,
+            idle_timeout_ms,
             proxy_url: args.proxy_url,
             proxy_from_env: args.proxy_from_env.unwrap_or(false),
             disabled: args.disable_networking.unwrap_or(false),
@@ -318,18 +364,18 @@ async fn create_endpoint(p: Value) -> Value {
         },
         pool: PoolOptions {
             max_connections: args.max_pooled_connections,
-            idle_timeout_ms: args.pool_idle_timeout_ms,
+            idle_timeout_ms: pool_idle_timeout_ms,
         },
         streaming: StreamingOptions {
             channel_capacity: args.channel_capacity,
             max_chunk_size_bytes: args.max_chunk_size_bytes,
             drain_timeout_ms: None,
-            handle_ttl_ms: args.handle_ttl,
-            sweep_interval_ms: args.sweep_interval,
+            handle_ttl_ms,
+            sweep_interval_ms,
         },
         capabilities: Vec::new(),
         keylog: args.keylog.unwrap_or(false),
-        max_header_size: args.max_header_bytes,
+        max_header_size,
         max_response_body_bytes: None,
         compression: if args.compression_min_body_bytes.is_some()
             || args.compression_level.is_some()
@@ -744,16 +790,51 @@ async fn serve_start(p: Value) -> Value {
     };
 
     // Parse optional serve options from payload.
+    let request_timeout_ms = match coerce_opt_u64(
+        p["requestTimeout"].as_f64(),
+        "requestTimeout",
+        MAX_TIMEOUT_MS,
+    ) {
+        Ok(v) => v,
+        Err(e) => return err_adapter(e),
+    };
+    let max_request_body_wire_bytes = match coerce_opt_usize(
+        p["maxRequestBodyWireBytes"].as_f64(),
+        "maxRequestBodyWireBytes",
+        MAX_BODY_BYTES,
+    ) {
+        Ok(v) => v,
+        Err(e) => return err_adapter(e),
+    };
+    let max_request_body_decoded_bytes = match coerce_opt_usize(
+        p["maxRequestBodyDecodedBytes"].as_f64(),
+        "maxRequestBodyDecodedBytes",
+        MAX_BODY_BYTES,
+    ) {
+        Ok(v) => v,
+        Err(e) => return err_adapter(e),
+    };
+    let max_total_connections = match coerce_opt_usize(
+        p["maxTotalConnections"].as_f64(),
+        "maxTotalConnections",
+        MAX_TOTAL_CONNECTIONS,
+    ) {
+        Ok(v) => v,
+        Err(e) => return err_adapter(e),
+    };
+    let drain_timeout_ms =
+        match coerce_opt_u64(p["drainTimeout"].as_f64(), "drainTimeout", MAX_TIMEOUT_MS) {
+            Ok(v) => v,
+            Err(e) => return err_adapter(e),
+        };
     let serve_opts = iroh_http_core::ServeOptions {
         max_concurrency: p["maxConcurrency"].as_u64().map(|v| v as usize),
         max_connections_per_peer: p["maxConnectionsPerPeer"].as_u64().map(|v| v as usize),
-        request_timeout_ms: p["requestTimeout"].as_u64(),
-        max_request_body_wire_bytes: p["maxRequestBodyWireBytes"].as_u64().map(|v| v as usize),
-        max_request_body_decoded_bytes: p["maxRequestBodyDecodedBytes"]
-            .as_u64()
-            .map(|v| v as usize),
-        max_total_connections: p["maxTotalConnections"].as_u64().map(|v| v as usize),
-        drain_timeout_ms: p["drainTimeout"].as_u64(),
+        request_timeout_ms,
+        max_request_body_wire_bytes,
+        max_request_body_decoded_bytes,
+        max_total_connections,
+        drain_timeout_ms,
         load_shed: p["loadShed"].as_bool(),
         decompression: p["decompress"].as_bool(),
     };

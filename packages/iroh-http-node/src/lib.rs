@@ -67,8 +67,7 @@ use iroh_http_adapter::{
     core_error_to_json, format_error_json, safe_f64_to_u64 as adapter_safe_f64_to_u64,
     safe_f64_to_usize as adapter_safe_f64_to_usize, send_undeliverable_rejection,
     validate_direct_addrs, validate_header_rows, validate_method, validate_node_id, validate_url,
-    AdapterInputError, MAX_BODY_BYTES as ADAPTER_MAX_BODY_BYTES,
-    MAX_TIMEOUT_MS as ADAPTER_MAX_TIMEOUT_MS,
+    AdapterInputError, MAX_BODY_BYTES, MAX_HEADER_BYTES, MAX_TIMEOUT_MS, MAX_TOTAL_CONNECTIONS,
 };
 
 struct PathSub {
@@ -90,10 +89,6 @@ fn path_change_rxs() -> &'static PathRxMap {
 const MAX_URL_LEN: usize = 8_192;
 #[cfg(feature = "discovery")]
 const MAX_MDNS_SERVICE_NAME_LEN: usize = 128;
-const MAX_TIMEOUT_MS: u64 = 300_000;
-const MAX_HEADER_BYTES: usize = 1_048_576;
-const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
-const MAX_TOTAL_CONNECTIONS: usize = 100_000;
 
 #[derive(Debug)]
 enum FfiError {
@@ -1028,12 +1023,12 @@ pub async fn raw_fetch(
     let addrs =
         parse_direct_addrs(&direct_addrs).map_err(|e| napi::Error::new(Status::InvalidArg, e))?;
     let timeout = timeout_ms
-        .map(|ms| adapter_safe_f64_to_u64(ms, "timeoutMs", ADAPTER_MAX_TIMEOUT_MS))
+        .map(|ms| adapter_safe_f64_to_u64(ms, "timeoutMs", MAX_TIMEOUT_MS))
         .transpose()
         .map_err(ffi_adapter_invalid_arg)?
         .map(std::time::Duration::from_millis);
     let max_resp = max_response_body_bytes
-        .map(|b| adapter_safe_f64_to_usize(b, "maxResponseBodyBytes", ADAPTER_MAX_BODY_BYTES))
+        .map(|b| adapter_safe_f64_to_usize(b, "maxResponseBodyBytes", MAX_BODY_BYTES))
         .transpose()
         .map_err(ffi_adapter_invalid_arg)?;
     let res = iroh_http_core::fetch(
