@@ -19,8 +19,9 @@
     "build:debug": "napi build --platform && tsc",
     "build:all": "node scripts/build-all.mjs",
     "typecheck": "tsc --noEmit",
-    "test": "node --test test/adapter.test.mjs && node test/compliance.mjs",
+    "test": "node --test test/adapter.test.mjs test/utils.test.mjs && node test/compliance.mjs",
     "test:adapter": "node --test test/adapter.test.mjs",
+    "test:utils": "node --test test/utils.test.mjs",
     "test:compliance": "node test/compliance.mjs"
   },
   "devDependencies": {

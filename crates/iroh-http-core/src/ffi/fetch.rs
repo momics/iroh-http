@@ -111,42 +111,137 @@ pub async fn fetch(
         .body(req_body)
         .map_err(|e| CoreError::internal(format!("build request: {e}")))?;
 
-    let cancel_notify = fetch_token.and_then(|t| endpoint.handles().get_fetch_cancel_notify(t));
+    // Self-request (ADR-015): a node fetching its own node id. iroh's
+    // transport forbids self-dial ("Connecting to ourself is not supported"),
+    // so route the request in-process to this node's own serve service instead
+    // of attempting a QUIC connection.
+    if remote_str == endpoint.node_id() {
+        // `decompress` is intentionally not forwarded: compression negotiation
+        // is a wire-only, per-connection layer, so it is a no-op on loopback.
+        return self_fetch(
+            endpoint,
+            req,
+            &remote_str,
+            &path,
+            fetch_token,
+            timeout,
+            max_response_body_bytes,
+        )
+        .await;
+    }
 
     // Wire FFI-supplied knobs into the shared stack config.
     // - `timeout` bounds time-to-response-head inside `fetch_request`.
     // - `decompress` toggles the tower-http Decompression layer.
     // Per-frame body-read timeout and the response-body byte limit are
-    // enforced below by `pump_hyper_body_to_channel_limited`; cancellation
-    // is handled by the `tokio::select!` on the cancel-token notifier.
+    // enforced below by `pump_hyper_body_to_channel_limited`; cancellation and
+    // token cleanup are centralized by `run_with_cancel_and_timeout`.
     let cfg = crate::http::server::stack::StackConfig {
         timeout,
         decompression: decompress,
         ..crate::http::server::stack::StackConfig::default()
     };
 
-    let fetch_fut = fetch_request(endpoint, &addr, req, &cfg);
-    let resp = match cancel_notify {
-        Some(notify) => tokio::select! {
-            _ = notify.notified() => {
-                if let Some(t) = fetch_token {
-                    endpoint.handles().remove_fetch_token(t);
-                }
-                return Err(CoreError::cancelled());
-            }
-            r = fetch_fut => r,
-        },
-        None => fetch_fut.await,
+    let fetch_fut = async {
+        fetch_request(endpoint, &addr, req, &cfg)
+            .await
+            .map_err(fetch_error_to_core)
+    };
+    let resp = run_with_cancel_and_timeout(endpoint, fetch_token, None, fetch_fut).await?;
+
+    package_response(endpoint, resp, &remote_str, &path, max_response_body_bytes).await
+}
+
+/// In-process self-request — dispatch a `fetch()` to this node's own id
+/// directly to the locally-registered serve service (ADR-015).
+///
+/// iroh's transport refuses self-dial, so there is no QUIC connection: the
+/// request is handed to the exact same [`crate::ffi::dispatcher::IrohHttpService`]
+/// that remote peers reach, as an in-process `tower::Service` call. The node's
+/// own id is injected as the authenticated [`crate::http::server::RemoteNodeId`]
+/// — truthful, since the peer is us. Cancellation and `timeout` mirror the QUIC
+/// path; the response is packaged identically via [`package_response`].
+///
+/// This deliberately bypasses the wire: no QUIC/TLS handshake, no compression
+/// negotiation, and none of the per-connection server stack (timeouts and body
+/// limits applied at the accept loop). A self-request is therefore not a
+/// network-reachability check. See ADR-015 for the full semantics.
+#[allow(clippy::too_many_arguments)]
+async fn self_fetch(
+    endpoint: &IrohEndpoint,
+    mut req: hyper::Request<Body>,
+    remote_str: &str,
+    path: &str,
+    fetch_token: Option<u64>,
+    timeout: Option<Duration>,
+    max_response_body_bytes: Option<usize>,
+) -> Result<FfiResponse, CoreError> {
+    use tower::ServiceExt;
+
+    let svc = endpoint.local_service().ok_or_else(|| {
+        CoreError::connection_failed(
+            "self-request: this node has no active server to handle a request to its \
+             own node id. Call serve() before fetching httpi://<your-own-node-id>/…",
+        )
+    })?;
+
+    // The QUIC path receives the authenticated peer id from the per-connection
+    // AddExtensionLayer; in-process we inject it directly so the serve handler
+    // still sees a truthful `Peer-Id` (our own id).
+    req.extensions_mut()
+        .insert(crate::http::server::RemoteNodeId(std::sync::Arc::new(
+            remote_str.to_string(),
+        )));
+
+    // `IrohHttpService` is `Infallible`; dispatch and await the response head.
+    let dispatch = async move {
+        match svc.oneshot(req).await {
+            Ok(resp) => resp,
+            Err(never) => match never {},
+        }
     };
 
-    // Always clean up the cancellation token, even on error.
+    let dispatch_fut = async { Ok::<_, CoreError>(dispatch.await) };
+    let resp = run_with_cancel_and_timeout(endpoint, fetch_token, timeout, dispatch_fut).await?;
+
+    package_response(endpoint, resp, remote_str, path, max_response_body_bytes).await
+}
+
+/// Drive `fut` to completion while honoring an optional fetch-cancel token and
+/// an optional hard timeout, and ALWAYS remove the fetch-cancel token on every
+/// exit (success, error, timeout, or cancel). Centralizes the token-leak
+/// guarantee shared by the wire `fetch` and `self_fetch` loopback paths.
+async fn run_with_cancel_and_timeout<F, T>(
+    endpoint: &IrohEndpoint,
+    fetch_token: Option<u64>,
+    timeout: Option<Duration>,
+    fut: F,
+) -> Result<T, CoreError>
+where
+    F: std::future::Future<Output = Result<T, CoreError>>,
+{
+    let cancel_notify = fetch_token.and_then(|t| endpoint.handles().get_fetch_cancel_notify(t));
+    let timed = async {
+        match timeout {
+            Some(t) => tokio::time::timeout(t, fut)
+                .await
+                .map_err(|_| CoreError::timeout("request timed out"))?,
+            None => fut.await,
+        }
+    };
+    let result = match cancel_notify {
+        Some(notify) => {
+            tokio::select! {
+                _ = notify.notified() => Err(CoreError::cancelled()),
+                r = timed => r,
+            }
+        }
+        None => timed.await,
+    };
     if let Some(t) = fetch_token {
         endpoint.handles().remove_fetch_token(t);
     }
-
-    let resp = resp.map_err(fetch_error_to_core)?;
-
-    package_response(endpoint, resp, &remote_str, &path, max_response_body_bytes).await
+    result
 }
 
 /// Translate the typed [`FetchError`] surface into the flat

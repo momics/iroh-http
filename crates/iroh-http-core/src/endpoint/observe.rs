@@ -22,6 +22,12 @@ impl IrohEndpoint {
         let pool_size = self.inner.http.pool.entry_count_approx() as usize;
         let active_connections = self.inner.http.active_connections.load(Ordering::Relaxed);
         let active_requests = self.inner.http.active_requests.load(Ordering::Relaxed);
+        let active_path_subscriptions = self.inner.session.path_subs.len();
+        let active_path_watchers = self
+            .inner
+            .session
+            .active_path_watchers
+            .load(Ordering::Relaxed);
         EndpointStats {
             active_readers,
             active_writers,
@@ -30,6 +36,8 @@ impl IrohEndpoint {
             pool_size,
             active_connections,
             active_requests,
+            active_path_subscriptions,
+            active_path_watchers,
         }
     }
 
@@ -169,6 +177,10 @@ impl IrohEndpoint {
         let ep = self.clone();
         let nid = node_id_str.to_string();
         let event_tx = self.inner.session.event_tx.clone();
+        self.inner
+            .session
+            .active_path_watchers
+            .fetch_add(1, Ordering::Relaxed);
 
         tokio::spawn(async move {
             let mut last_key: Option<String> = None;
@@ -220,8 +232,17 @@ impl IrohEndpoint {
                     }
                 }
             }
+            ep.inner
+                .session
+                .active_path_watchers
+                .fetch_sub(1, Ordering::Relaxed);
         });
 
         rx
+    }
+
+    /// Stop watching path changes for a specific peer.
+    pub fn unsubscribe_path_changes(&self, node_id_str: &str) {
+        self.inner.session.path_subs.remove(node_id_str);
     }
 }

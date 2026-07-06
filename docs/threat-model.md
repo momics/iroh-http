@@ -78,7 +78,8 @@ configurable via `NodeOptions`):
 
 | Limit | Default | Protects against |
 |---|---|---|
-| `maxRequestBodyBytes` | 16 MiB | Request body exhausting memory |
+| `maxRequestBodyWireBytes` | 16 MiB | Oversized/compressed body exhausting bandwidth |
+| `maxRequestBodyDecodedBytes` | 16 MiB | Compression bomb exhausting memory |
 | `maxConcurrency` | 1 024 | Request flood from many peers |
 | `maxConnectionsPerPeer` | 8 | Connection flood from one peer |
 | `requestTimeout` | 60 s | Slow request / stalled handler |

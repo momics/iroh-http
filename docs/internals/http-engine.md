@@ -127,7 +127,7 @@ Duplex mode uses HTTP Upgrade semantics. The ALPN for duplex connections is `iro
 |-------|---------------|-------------|
 | Max header size | `NodeOptions::max_header_size` (default 64 KB) | `max_buf_size(limit.max(8192))` on hyper builder + post-parse byte-count check |
 | Max request body | `ServeOptions::max_request_body_bytes` | Byte counter in `pump_hyper_body_to_channel_limited` |
-| Max concurrent requests | `ServeOptions::max_concurrency` (default 64) | Drain semaphore: one permit per in-flight bi-stream |
+| Max concurrent requests | `ServeOptions::max_concurrency` (default 1024) | Drain semaphore: one permit per in-flight bi-stream |
 | Per-request timeout | `ServeOptions::request_timeout_ms` (default 60 s) | `TimeoutService` wrapping `RequestService` |
 | Max connections per peer | `ServeOptions::max_connections_per_peer` (default 8) | `PeerConnectionGuard` + `DashMap` counter |
 

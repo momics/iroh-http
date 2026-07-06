@@ -168,7 +168,6 @@ describe("createNode IPC", () => {
           endpointHandle: 1,
           // Valid base32-encoded 32-byte public key (all zeros).
           nodeId: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-          keypair: Array.from(new Uint8Array(32)),
         };
       }
       if (cmd === "plugin:iroh-http|wait_endpoint_closed") {
@@ -187,6 +186,7 @@ describe("createNode IPC", () => {
     const node = await createNode({ disableNetworking: true });
 
     expect(node).toBeDefined();
+    expect(node.secretKey).toBeUndefined();
     expect(invokedCommands).toContain("plugin:iroh-http|create_endpoint");
     expect(invokedCommands).toContain("plugin:iroh-http|wait_endpoint_closed");
   });
@@ -208,5 +208,32 @@ describe("error propagation", () => {
 
     const { createNode } = await import("../index.ts");
     await expect(createNode()).rejects.toThrow();
+  });
+});
+
+// ── datagram base64 encode (defensive oversize guard, #288) ─────────────────
+
+describe("datagram base64 encode helper", () => {
+  it("encodes a large synthetic buffer without RangeError", async () => {
+    const { encodeBase64, decodeBase64 } = await import(
+      "@momics/iroh-http-shared"
+    );
+
+    // 256 KiB — well past the ~124 KB threshold where an unbounded
+    // `String.fromCharCode(...bytes)` spread throws RangeError. Not reachable
+    // via real MTU-bounded datagrams, but the encode path must stay safe.
+    const big = new Uint8Array(256 * 1024);
+    for (let i = 0; i < big.length; i++) big[i] = i & 0xff;
+
+    let encoded = "";
+    expect(() => {
+      encoded = encodeBase64(big);
+    }).not.toThrow();
+
+    // Round-trips back to the original bytes.
+    const decoded = decodeBase64(encoded);
+    expect(decoded.length).toBe(big.length);
+    expect(decoded[0]).toBe(big[0]);
+    expect(decoded[big.length - 1]).toBe(big[big.length - 1]);
   });
 });

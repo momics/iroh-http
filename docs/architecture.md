@@ -184,7 +184,7 @@ Handles cross FFI as `u64`. In JavaScript: transmitted as `BigInt`, converted at
 
 | Limit | Default | Config |
 |-------|---------|--------|
-| Max concurrent requests | 64 | `ServeOptions::max_concurrency` |
+| Max concurrent requests | 1024 | `ServeOptions::max_concurrency` |
 | Per-request timeout | 60 000 ms | `ServeOptions::request_timeout_ms` |
 | Per-peer connection limit | 8 | `ServeOptions::max_connections_per_peer` |
 | Max request head size | 64 KB | `NodeOptions::max_header_size` |
@@ -192,6 +192,8 @@ Handles cross FFI as `u64`. In JavaScript: transmitted as `BigInt`, converted at
 | Drain timeout | 30 000 ms | `ServeOptions::drain_timeout_ms` |
 
 All defaults are safe against hostile peers without opt-in. Increasing limits is always explicit.
+
+> **Source of truth:** these defaults are defined in `crates/iroh-http-core/src/http/server/options.rs` (e.g. `DEFAULT_CONCURRENCY = 1024`). Docs should mirror those constants — if they ever disagree, the code wins.
 
 ---
 

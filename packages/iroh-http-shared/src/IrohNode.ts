@@ -43,7 +43,14 @@ const _INTERNAL = Symbol("IrohNode._create");
 
 export class IrohNode extends EventTarget {
   readonly publicKey: PublicKey;
-  readonly secretKey: SecretKey;
+  /**
+   * The node's secret key — present only when a `key` was supplied to
+   * `createNode`. If you did not provide a key, the identity is generated
+   * natively and never surfaced to JS, so this is `undefined` on every adapter.
+   * To keep a stable identity, generate a key yourself and pass it back in:
+   * `createNode({ key })`.
+   */
+  readonly secretKey: SecretKey | undefined;
   readonly closed: Promise<WebTransportCloseInfo>;
 
   #adapter: IrohAdapter;
@@ -79,14 +86,21 @@ export class IrohNode extends EventTarget {
     nativeClosed.then(() =>
       resolveClose({ closeCode: 0, reason: "native shutdown" })
     );
-
     this.publicKey = PublicKey.fromString(info.nodeId);
-    this.secretKey = SecretKey._fromBytesWithPublicKey(
-      info.keypair,
-      this.publicKey,
-    );
+    // A node exposes a secret key only when the caller supplied one. A key you
+    // did not bring is never surfaced — even when the runtime generated it
+    // natively — so `secretKey` is present iff `key` was passed to createNode,
+    // uniformly across all adapters.
+    const providedKey = options?.key;
+    this.secretKey = providedKey
+      ? SecretKey._fromBytesWithPublicKey(
+        providedKey instanceof Uint8Array ? providedKey : providedKey.toBytes(),
+        this.publicKey,
+      )
+      : undefined;
 
-    this.#fetchFn = makeFetch(adapter, info.endpointHandle);
+    const maxChunkSizeBytes = options?.internals?.maxChunkSizeBytes;
+    this.#fetchFn = makeFetch(adapter, info.endpointHandle, maxChunkSizeBytes);
     this.#serveFn = makeServe(
       adapter,
       info.endpointHandle,
@@ -106,6 +120,7 @@ export class IrohNode extends EventTarget {
           );
         }
       },
+      maxChunkSizeBytes,
     );
 
     // Always start the transport event loop. It delivers "pathchange" and
@@ -144,6 +159,7 @@ export class IrohNode extends EventTarget {
    * console.log(res.status, await res.text());
    * ```
    */
+
   fetch(input: string | URL, init?: IrohFetchInit): Promise<Response> {
     return this.#fetchFn(input, init);
   }
@@ -153,9 +169,10 @@ export class IrohNode extends EventTarget {
    *
    * Each incoming request is delivered to `handler` as a web-standard `Request`
    * augmented with a `Peer-Id` header carrying the authenticated caller's public
-   * key. The returned {@link ServeHandle} exposes `finished`, which resolves when
-   * the serve loop stops — via `node.close()`, an aborted `options.signal`, or a
-   * fatal error.
+   * key. The returned {@link ServeHandle} exposes `close()`, which stops this
+   * server (leaving the node alive), and `finished`, which resolves when the
+   * serve loop stops — via `close()`, `node.close()`, an aborted
+   * `options.signal`, or a fatal error.
    *
    * @remarks
    * **Security:** this opens a *public* endpoint — any peer that knows this
@@ -166,7 +183,8 @@ export class IrohNode extends EventTarget {
    * @param options Serve tuning (error handler, shutdown signal, concurrency and
    *   body-size limits). May be omitted to use defaults.
    * @param handler Async function mapping a `Request` to a `Response`.
-   * @returns A {@link ServeHandle} whose `finished` promise settles on shutdown.
+   * @returns A {@link ServeHandle} whose `close()` stops this server and whose
+   *   `finished` promise settles on shutdown.
    *
    * ```ts
    * const server = node.serve((req) => {
@@ -175,7 +193,8 @@ export class IrohNode extends EventTarget {
    *   }
    *   return Response.json({ ok: true });
    * });
-   * await server.finished;
+   * // Later, stop just this server without closing the node:
+   * await server.close();
    * ```
    */
   serve(handler: ServeHandler): ServeHandle;
@@ -504,20 +523,42 @@ export class IrohNode extends EventTarget {
 
     return {
       [Symbol.asyncIterator]() {
+        let stopped = false;
+        let abortListener: (() => void) | undefined;
+        const cleanup = async (): Promise<void> => {
+          if (stopped) return;
+          stopped = true;
+          if (abortListener) {
+            signal?.removeEventListener("abort", abortListener);
+            abortListener = undefined;
+          }
+          try {
+            await adapter.unsubscribePathChanges(endpointHandle, nodeId);
+          } catch {
+            // Endpoint shutdown may race iterator cleanup; the subscription is
+            // already gone in that case.
+          }
+        };
+        abortListener = () => {
+          void cleanup();
+        };
+        signal?.addEventListener("abort", abortListener, { once: true });
+
         return {
           async next(): Promise<IteratorResult<PathInfo>> {
-            if (signal?.aborted) {
+            if (stopped || signal?.aborted) {
+              await cleanup();
               return { done: true, value: undefined };
             }
             const path = await adapter.nextPathChange(endpointHandle, nodeId);
-            if (path === null) {
+            if (path === null || stopped || signal?.aborted) {
+              await cleanup();
               return { done: true, value: undefined };
             }
             return { done: false, value: path };
           },
-          return(): Promise<IteratorResult<PathInfo>> {
-            // break / return from for-await — nothing to clean up on JS side;
-            // Rust watcher exits when the channel sender is dropped.
+          async return(): Promise<IteratorResult<PathInfo>> {
+            await cleanup();
             return Promise.resolve({ done: true, value: undefined });
           },
         };
@@ -574,3 +615,19 @@ export class IrohNode extends EventTarget {
     return this.close();
   }
 }
+
+/**
+ * An {@link IrohNode} whose `secretKey` is guaranteed to be present.
+ *
+ * `createNode` returns this refined type when — and only when — you pass a
+ * `key`. Because you supplied the key, the node can hand it back via
+ * `secretKey` without an `undefined` check. Omit `key` and you get the base
+ * {@link IrohNode}, where `secretKey` is `SecretKey | undefined` — always
+ * `undefined` at runtime, since a natively generated identity is never
+ * exported to JS. This holds identically on Node.js, Deno, and Tauri.
+ *
+ * The intersection narrows `SecretKey | undefined` ∩ `SecretKey` → `SecretKey`,
+ * so the common case keeps a non-optional `secretKey` while options types stay
+ * fully shared.
+ */
+export type IrohNodeWithSecret = IrohNode & { readonly secretKey: SecretKey };

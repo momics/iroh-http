@@ -43,14 +43,26 @@ node instance.
 interface IrohNode {
   /** The node's Ed25519 public key (its stable network address). */
   readonly publicKey: PublicKey;
-  /** The node's Ed25519 secret key. */
-  readonly secretKey: SecretKey;
+  /**
+   * The node's Ed25519 secret key — present only when a `key` was supplied to
+   * `createNode`. When omitted, the identity is generated natively and never
+   * surfaced to JS, so this is `undefined` (identically on Node.js, Deno, and
+   * Tauri). `createNode({ key })` narrows the return type to
+   * `IrohNodeWithSecret`, where `secretKey` is non-optional.
+   */
+  readonly secretKey: SecretKey | undefined;
 
   /** Send an HTTP request to a peer. */
   fetch(
     input: string | URL,
     init?: IrohFetchInit,
   ): Promise<Response>;
+  // Self-requests: when `input` targets this node's own id, the request is
+  // routed in-process to this node's own `serve()` service instead of dialing
+  // over QUIC (iroh forbids self-dial). This requires an active `serve()`;
+  // otherwise the fetch rejects with a clear "no active server" error. The
+  // handler observes `peer-id == own id`. Loopback skips the wire (no
+  // QUIC/TLS, compression, or per-connection server limits). See ADR-015.
 
   /** Start serving HTTP requests from peers. */
   serve(handler: ServeHandler): ServeHandle;
@@ -196,7 +208,11 @@ Returned by `node.serve()`. Controls the running server.
 
 ```ts
 interface ServeHandle {
+  /** Resolves when the serve loop terminates (via `close()`, `node.close()`, an aborted signal, or a fatal error). */
+  readonly finished: Promise<void>;
+  /** Stop this server (leaving the node alive); resolves once the loop drains. */
   close(): Promise<void>;
+  /** Alias for `close()` enabling `await using`. */
   [Symbol.asyncDispose](): Promise<void>;
 }
 ```
@@ -219,8 +235,12 @@ interface ServeOptions {
   maxConnectionsPerPeer?: number;
   /** Per-request timeout in ms. Default: 60 000. 0 = disabled. */
   requestTimeout?: number;
-  /** Max request body size in bytes. Default: 16 777 216 (16 MiB). */
-  maxRequestBodyBytes?: number;
+  /** Reject bodies larger than this many wire (compressed) bytes.
+   *  Default: 16 777 216 (16 MiB). */
+  maxRequestBodyWireBytes?: number;
+  /** Reject bodies larger than this many decoded bytes (after decompression).
+   *  Default: 16 777 216 (16 MiB). */
+  maxRequestBodyDecodedBytes?: number;
   /** Max total QUIC connections. Unlimited by default. */
   maxTotalConnections?: number;
   /** Max consecutive accept errors before shutdown. Default: 5. */
@@ -625,6 +645,12 @@ Handles are slotmap keys (generational), not plain indices.
 fetch(endpoint, peer, path, method, headers, body_reader?) → FfiResponse
 ```
 
+When `peer` equals the endpoint's own node id, `fetch` routes the request
+in-process to the node's own serve service (ADR-015) rather than dialing over
+QUIC, which iroh refuses for self-connections. This requires an active
+`serve()`; otherwise it returns a `CONNECTION_FAILED` error explaining the
+missing server.
+
 A dedicated `connect`/`raw_connect` FFI symbol no longer exists; bidirectional connections go through the session API (`session_connect`, `session_create_bidi_stream`, etc., see below).
 
 ### Serve
@@ -766,7 +792,8 @@ Configured via `NodeOptions` or `ServeOptions`. See [server-limits.md](features/
 | `maxConcurrency` | Request flood | 408 Request Timeout |
 | `maxConnectionsPerPeer` | Connection flood | Closed at QUIC level |
 | `requestTimeout` | Slow request | 408 Request Timeout |
-| `maxRequestBodyBytes` | Oversized body | 413 Content Too Large |
+| `maxRequestBodyWireBytes` | Oversized/compressed body | 413 Content Too Large |
+| `maxRequestBodyDecodedBytes` | Compression bomb | 413 Content Too Large |
 | `maxHeaderBytes` | Header flood | 431 Request Header Fields Too Large |
 
 ### WebTransport

@@ -72,19 +72,6 @@ impl IrohEndpoint {
         &self.inner.transport.node_id_str
     }
 
-    /// The node's raw secret key bytes (32 bytes).
-    ///
-    /// # Security
-    ///
-    /// **These 32 bytes are the irrecoverable private key for this node.**
-    /// Anyone who obtains them can impersonate this node permanently.
-    /// Never log, print, or include in error payloads. Encrypt at rest.
-    /// Zeroize after use.
-    #[must_use]
-    pub fn secret_key_bytes(&self) -> [u8; 32] {
-        self.inner.transport.ep.secret_key().to_bytes()
-    }
-
     // ── Handle store ─────────────────────────────────────────────────────────
 
     /// Per-endpoint handle store.
@@ -98,6 +85,45 @@ impl IrohEndpoint {
         if !ttl.is_zero() {
             self.inner.ffi.handles.sweep(ttl);
         }
+    }
+
+    // ── Local serve service (self-request loopback) ──────────────────────────
+
+    /// Register the locally-running serve service so a self-request
+    /// (`fetch()` to this node's own id) can be dispatched in-process.
+    /// Called when `serve()` starts; see ADR-015.
+    pub(crate) fn set_local_service(&self, svc: &crate::ffi::dispatcher::IrohHttpService) {
+        *self
+            .inner
+            .ffi
+            .local_service
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(svc.downgrade());
+    }
+
+    /// Clear the registered serve service. Called on serve stop / close so a
+    /// self-request after teardown fails cleanly instead of dispatching to a
+    /// dead handler. The slot holds only a weak handle, but explicit clearing
+    /// preserves immediate post-teardown errors while the serve task winds down.
+    pub(crate) fn clear_local_service(&self) {
+        *self
+            .inner
+            .ffi
+            .local_service
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
+    }
+
+    /// A clone of the locally-running serve service, if `serve()` is active.
+    /// Used by [`crate::ffi::fetch`] to route self-requests in-process.
+    pub(crate) fn local_service(&self) -> Option<crate::ffi::dispatcher::IrohHttpService> {
+        self.inner
+            .ffi
+            .local_service
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .and_then(crate::ffi::dispatcher::IrohHttpService::upgrade)
     }
 
     // ── HTTP runtime accessors ────────────────────────────────────────────────

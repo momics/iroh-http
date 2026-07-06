@@ -123,14 +123,23 @@
             <code>audio.wav</code> and <code>image.png</code> and prints its node
             ID — paste that below.
           </p>
+          <p class="hint">
+            Or host them from <em>this</em> node: open the <strong>Server</strong>
+            tab, click <strong>Start serving</strong>, then press
+            <strong>Use my node ID</strong> below. Streaming from your own ID is
+            served in-process via the self-request loopback — no network hop.
+          </p>
           <label for="files-host-input">Host node ID</label>
-          <input
-            id="files-host-input"
-            type="text"
-            placeholder="paste the host's node ID&hellip;"
-            autocomplete="off"
-            spellcheck="false"
-          />
+          <div class="input-row">
+            <input
+              id="files-host-input"
+              type="text"
+              placeholder="paste the host's node ID&hellip;"
+              autocomplete="off"
+              spellcheck="false"
+            />
+            <button id="files-use-self-btn" type="button">Use my node ID</button>
+          </div>
           <p id="files-status" class="status"></p>
 
           <div class="columns">

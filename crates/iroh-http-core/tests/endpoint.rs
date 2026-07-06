@@ -44,7 +44,12 @@ async fn endpoint_deterministic_key() {
 
 #[tokio::test]
 async fn endpoint_secret_key_round_trip() {
+    // Any 32 bytes are a valid Ed25519 seed; a fixed key lets us assert that
+    // rebinding with the same key yields a deterministic node ID.
+    let key_bytes = [7u8; 32];
+
     let opts = NodeOptions {
+        key: Some(key_bytes),
         networking: NetworkingOptions {
             disabled: true,
             ..Default::default()
@@ -52,7 +57,6 @@ async fn endpoint_secret_key_round_trip() {
         ..Default::default()
     };
     let ep = IrohEndpoint::bind(opts).await.unwrap();
-    let key_bytes = ep.secret_key_bytes();
 
     // Rebinding with the same key should produce the same node ID
     let opts2 = NodeOptions {

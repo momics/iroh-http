@@ -46,7 +46,6 @@ export interface PeerConnectionEvent {
 export interface EndpointInfo {
   endpointHandle: number;
   nodeId: string;
-  keypair: Uint8Array;
 }
 
 export interface NodeAddrInfo {
@@ -240,5 +239,13 @@ export abstract class IrohAdapter {
     return Promise.reject(
       new Error("nextPathChange() not supported by this adapter"),
     );
+  }
+
+  /** Stop an active path-change subscription for a specific peer. */
+  unsubscribePathChanges(
+    _endpointHandle: number,
+    _nodeId: string,
+  ): Promise<void> {
+    return Promise.resolve();
   }
 }
