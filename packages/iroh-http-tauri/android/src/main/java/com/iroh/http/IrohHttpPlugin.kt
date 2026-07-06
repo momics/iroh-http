@@ -68,6 +68,21 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
     private fun nsd(): NsdManager? =
         activity.getSystemService(Context.NSD_SERVICE) as? NsdManager
 
+    /**
+     * Validate that a string is a canonical iroh endpoint id: a 32-byte Ed25519
+     * public key encoded as lowercase RFC 4648 base32 without padding, i.e.
+     * exactly 52 characters drawn from the `a-z` / `2-7` alphabet.
+     *
+     * Used to safely accept the DNS-SD instance name as the node-id when a
+     * desktop advertiser emits no `pk` attribute (issue #318). The advertise
+     * side truncates instance names to 63 chars, which does not truncate a
+     * 52-char id, so the recovered id is always complete.
+     */
+    private fun isValidEndpointId(s: String): Boolean {
+        if (s.length != 52) return false
+        return s.all { c -> c in 'a'..'z' || c in '2'..'7' }
+    }
+
     // ── Browse ────────────────────────────────────────────────────────────────
 
     @Command
@@ -89,14 +104,22 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
                 val session = browseMap[browseId] ?: return
                 manager.resolveService(serviceInfo, object : NsdManager.ResolveListener {
                     override fun onServiceResolved(resolved: NsdServiceInfo) {
-                        val pk = resolved.attributes["pk"]?.let { String(it) }
-                            ?: return
-                        if (pk.isEmpty()) return
+                        // Prefer the `pk` attribute (set by mobile advertisers);
+                        // fall back to the DNS-SD instance name for desktop
+                        // advertisers, which publish the base32 endpoint id there
+                        // and emit no `pk` attribute (issue #318).
+                        val pkAttr = resolved.attributes["pk"]?.let { String(it) }
+                        val nodeId = if (!pkAttr.isNullOrEmpty()) {
+                            pkAttr
+                        } else {
+                            val name = resolved.serviceName
+                            if (isValidEndpointId(name)) name else return
+                        }
 
                         val key = resolved.serviceName
-                        if (session.knownNodes[key] == pk) return
+                        if (session.knownNodes[key] == nodeId) return
 
-                        session.knownNodes[key] = pk
+                        session.knownNodes[key] = nodeId
                         val addrs = JSONArray()
                         resolved.attributes["relay"]?.let { b ->
                             val relay = String(b)
@@ -105,7 +128,7 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
 
                         val event = JSObject()
                         event.put("type", "discovered")
-                        event.put("nodeId", pk)
+                        event.put("nodeId", nodeId)
                         event.put("addrs", addrs)
                         synchronized(session.pendingEvents) { session.pendingEvents.add(event) }
                     }
