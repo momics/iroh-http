@@ -254,7 +254,6 @@ class TauriAdapter extends IrohAdapter {
         maxRequestBodyDecodedBytes:
           options.serveOptions?.maxRequestBodyDecodedBytes ?? null,
         maxTotalConnections: options.serveOptions?.maxTotalConnections ?? null,
-        maxServeErrors: options.serveOptions?.maxServeErrors ?? null,
         drainTimeout: options.serveOptions?.drainTimeout ?? null,
         loadShed: options.serveOptions?.loadShed ?? null,
         decompress: options.serveOptions?.decompress ?? null,

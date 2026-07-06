@@ -102,8 +102,6 @@ async fn endpoint_close() {
 #[tokio::test]
 async fn serve_options_defaults() {
     let opts = ServeOptions::default();
-    // max_serve_errors defaults to None (resolved to 5 at serve time).
-    assert_eq!(opts.max_serve_errors, None);
     assert_eq!(opts.max_concurrency, None);
     assert_eq!(opts.drain_timeout_ms, None);
 }

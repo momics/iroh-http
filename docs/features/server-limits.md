@@ -25,9 +25,6 @@ node.serve({
    *  decompression). Primary compression-bomb guard. Default: 16 MiB. */
   maxRequestBodyDecodedBytes: 10 * 1024 * 1024,  // 10 MB example
 
-  /** Maximum consecutive accept-loop errors before shutdown. Default: 5. */
-  maxServeErrors: 5,
-
   /** Drain timeout in ms after shutdown signal. Default: 5 000. */
   drainTimeout: 5_000,
 }, handler);
