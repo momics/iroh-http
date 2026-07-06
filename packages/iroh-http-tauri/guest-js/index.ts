@@ -7,6 +7,7 @@ import {
   classifyBindError,
   encodeBase64,
   IrohNode,
+  type IrohNodeWithSecret,
   type NodeOptions,
   normaliseRelayMode,
   type SecretKey,
@@ -445,7 +446,7 @@ function makeTauriSessionFns(epHandle: number): RawSessionFns {
       return h != null ? BigInt(h) : null;
     },
     sendDatagram: async (sessionHandle, data) => {
-      const b64 = btoa(String.fromCharCode(...data));
+      const b64 = encodeBase64(data);
       await invoke<void>(`${PLUGIN}|session_send_datagram`, {
         endpointHandle: epHandle,
         sessionHandle: Number(sessionHandle),
@@ -553,17 +554,37 @@ function normaliseDiscovery(disc?: NodeOptions["discovery"]): {
  *   restarts. Relay, discovery, and tuning are all configured here.
  * @returns A ready-to-use {@link IrohNode}.
  *
+ * SECURITY: the endpoint's private key is kept **native-held** in the Rust
+ * process and is never handed to the webview. When you pass your own `key`,
+ * `node.secretKey` returns that key (you already hold it) and the type narrows
+ * to {@link IrohNodeWithSecret}. When you omit `key`, the identity is generated
+ * natively and there is *no* mechanism to export it — `node.secretKey` is
+ * `undefined`. This matches Node.js and Deno exactly. To persist an identity,
+ * generate a key in JS (`SecretKey.generate()`), pass it to `createNode({ key })`,
+ * and store its bytes yourself.
+ *
  * @example
  * ```ts
- * import { createNode } from "@momics/iroh-http-tauri";
+ * import { createNode, SecretKey } from "@momics/iroh-http-tauri";
  *
+ * // Ephemeral identity — secretKey is undefined (native-held, never exported).
  * const node = await createNode();
+ *
+ * // Persistent identity — you own the key.
+ * const key = SecretKey.generate();
+ * const node2 = await createNode({ key });
+ * node2.secretKey; // the key you passed in
+ *
  * const server = node.serve((req) => new Response("hello"));
  * const res = await node.fetch(`httpi://${peerId}/`);
  * console.log(await res.text());
  * await node.close();
  * ```
  */
+export function createNode(
+  options: NodeOptions & { key: SecretKey | Uint8Array },
+): Promise<IrohNodeWithSecret>;
+export function createNode(options?: NodeOptions): Promise<IrohNode>;
 export async function createNode(options?: NodeOptions): Promise<IrohNode> {
   const keyBytes: string | null = options?.key
     ? encodeBase64(
@@ -584,7 +605,6 @@ export async function createNode(options?: NodeOptions): Promise<IrohNode> {
   const info = await invoke<{
     endpointHandle: number;
     nodeId: string;
-    keypair: number[];
   }>(`${PLUGIN}|create_endpoint`, {
     args: options
       ? {
@@ -630,7 +650,6 @@ export async function createNode(options?: NodeOptions): Promise<IrohNode> {
     {
       endpointHandle: Number(info.endpointHandle),
       nodeId: info.nodeId,
-      keypair: new Uint8Array(info.keypair),
     },
     options,
     nativeClosed,

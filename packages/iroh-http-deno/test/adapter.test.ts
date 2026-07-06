@@ -16,10 +16,44 @@ import {
   assertEquals,
   assertInstanceOf,
   assertThrows,
+  fail,
 } from "jsr:@std/assert@^1";
-import { createNode } from "../mod.ts";
+import { createNode, PublicKey } from "../mod.ts";
 import { generateSecretKey, publicKeyVerify, secretKeySign } from "../mod.ts";
 import { bigintToSafeNumber } from "../src/adapter.ts";
+
+async function waitFor(
+  predicate: () => Promise<boolean>,
+  message: string,
+  timeoutMs = 1_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  let last = false;
+  while (Date.now() < deadline) {
+    last = await predicate();
+    if (last) return;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  fail(`${message}; last value: ${String(last)}`);
+}
+
+async function withTimeout<T>(
+  promise: Promise<T>,
+  message: string,
+  timeoutMs = 2_000,
+): Promise<T> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timeout = setTimeout(() => reject(new Error(message)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeout !== undefined) clearTimeout(timeout);
+  }
+}
 
 // ── bigintToSafeNumber handle guard (regression #252) ────────────────────────
 
@@ -124,6 +158,56 @@ Deno.test({
   ac.abort();
   await server.close();
   await handle.finished;
+});
+
+Deno.test({
+  name: "pathChanges — abort releases native subscriptions (regression #279)",
+  sanitizeOps: false,
+}, async () => {
+  const server = await createNode({ bindAddr: "127.0.0.1:0" });
+  const client = await createNode({ bindAddr: "127.0.0.1:0" });
+  const handle = server.serve(() => new Response("ok"));
+  const { id: serverId, addrs: serverAddrs } = await server.addr();
+  await (await client.fetch(`httpi://${serverId}/warmup`, {
+    directAddrs: serverAddrs,
+  })).text();
+
+  const baselineStats = await client.stats();
+  const baselineSubscriptions = baselineStats.activePathSubscriptions;
+  const baselineWatchers = baselineStats.activePathWatchers;
+
+  try {
+    for (const cycles of [1, 10]) {
+      for (let i = 0; i < cycles; i++) {
+        const ac = new AbortController();
+        const iterator = client.pathChanges(PublicKey.fromString(serverId), {
+          signal: ac.signal,
+        })[Symbol.asyncIterator]();
+        const first = await withTimeout(
+          iterator.next(),
+          "pathChanges did not yield the active path",
+        );
+        assert(!first.done, "pathChanges should yield before teardown");
+        ac.abort();
+
+        await waitFor(
+          async () => {
+            const stats = await client.stats();
+            return stats.activePathSubscriptions <= baselineSubscriptions &&
+              stats.activePathWatchers <= baselineWatchers;
+          },
+          `path-change subscriptions should return to baseline after aborting ${
+            i + 1
+          }/${cycles} iterators`,
+          1_500,
+        );
+      }
+    }
+  } finally {
+    await client.close();
+    await server.close();
+    await handle.finished.catch(() => {});
+  }
 });
 
 // ── Load-shed 503 (depends on maxConcurrency option) ─────────────────────────

@@ -145,7 +145,7 @@ mDNS uses UDP multicast on port 5353. Common blockers:
 | `InvalidInput` | `IrohArgumentError` | Bad node ID, invalid URL scheme, invalid header | Check input format; URLs must use `httpi://` scheme |
 | `ConnectionFailed` | `IrohConnectError` | No network path, peer offline | See [connection errors](#networkerror-on-fetch--connection-refused-or-connection-failed) |
 | `Timeout` | `IrohConnectError` | Peer too slow, network timeout | Increase `requestTimeout`; retry with backoff |
-| `BodyTooLarge` | `IrohProtocolError` | Request body exceeds `maxRequestBodyBytes` | Send smaller payload or increase limit |
+| `BodyTooLarge` | `IrohProtocolError` | Request body exceeds `maxRequestBodyWireBytes` / `maxRequestBodyDecodedBytes` | Send smaller payload or increase limit |
 | `HeaderTooLarge` | `IrohProtocolError` | Header block exceeds `maxHeaderBytes` | Reduce header count/size or increase limit |
 | `PeerRejected` | `IrohConnectError` | Peer rejected connection at app layer | See [peer rejected](#networkerror--peer-rejected) |
 | `Cancelled` | `IrohAbortError` | `AbortSignal` fired or `fetch()` cancelled | Handle `AbortError` in caller; do not retry cancelled requests |
