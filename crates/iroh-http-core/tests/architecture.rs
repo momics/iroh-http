@@ -4,10 +4,12 @@
 //!    from `crate::ffi::*`. The FFI bridge wraps the pure-Rust HTTP
 //!    layer, never the reverse.
 //! 2. **Canonical root layout.** The only entries directly under
-//!    `crates/iroh-http-core/src/` are `lib.rs`, `endpoint.rs`,
-//!    `http/`, and `ffi/`. Every other file declares a side. This
-//!    prevents the kind of drift that produced the original 979-LoC
-//!    `server.rs` and 998-LoC `stream.rs`.
+//!    `crates/iroh-http-core/src/` are `lib.rs`, `endpoint/`,
+//!    `http/`, `ffi/`, and the cross-cutting utility modules extracted
+//!    in #198 (`error.rs`, `crypto.rs`, `encoding.rs`, `addr.rs`).
+//!    Every other file declares a side. This prevents the kind of
+//!    drift that produced the original 979-LoC `server.rs` and
+//!    998-LoC `stream.rs`.
 //!
 //! Slice history (TEMPORARY_EXCEPTIONS evolution):
 //!
@@ -92,14 +94,25 @@ fn walk(dir: &Path, f: &mut impl FnMut(&Path)) {
 
 /// Slice E (#187) acceptance #6: assert the canonical root layout.
 ///
-/// Only `lib.rs`, `endpoint.rs`, `http/`, and `ffi/` may live directly
-/// under `crates/iroh-http-core/src/`. Any other file or folder is a
-/// structural drift that the reviewer should have flagged. Adding new
-/// top-level modules requires editing both this allowlist *and* the
-/// epic acceptance criteria — that intentional friction is the point.
+/// Only `lib.rs`, the `http/`, `ffi/`, and `endpoint/` module trees, and the
+/// cross-cutting utility modules extracted in #198 (`error.rs`, `crypto.rs`,
+/// `encoding.rs`, `addr.rs`) may live directly under
+/// `crates/iroh-http-core/src/`. Any other file or folder is a structural
+/// drift that the reviewer should have flagged. Adding new top-level modules
+/// requires editing both this allowlist *and* the epic acceptance criteria —
+/// that intentional friction is the point.
 #[test]
 fn crate_root_has_canonical_layout() {
-    const ALLOWED: &[&str] = &["lib.rs", "endpoint", "http", "ffi"];
+    const ALLOWED: &[&str] = &[
+        "lib.rs",
+        "endpoint",
+        "http",
+        "ffi",
+        "error.rs",
+        "crypto.rs",
+        "encoding.rs",
+        "addr.rs",
+    ];
 
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let src_dir = Path::new(manifest_dir).join("src");
