@@ -70,8 +70,9 @@ fn insert_endpoint(ep: IrohEndpoint) -> u64 {
 
 use iroh_http_adapter::{
     coerce_endpoint_options, coerce_fetch_options, coerce_serve_options, core_error_to_json,
-    format_error_json, send_undeliverable_rejection, validate_header_rows, AdapterInputError,
-    RawEndpointOptions, RawFetchOptions, RawServeOptions,
+    deliver_request, format_error_json, send_undeliverable_rejection, validate_header_rows,
+    AdapterInputError, DeliverableRequest, RawEndpointOptions, RawFetchOptions, RawServeOptions,
+    RequestTransport, Undeliverable,
 };
 
 // ── Helper ────────────────────────────────────────────────────────────────────
@@ -96,48 +97,56 @@ fn err_adapter(e: AdapterInputError) -> Value {
     err_code(e.code(), e.message())
 }
 
-fn deliver_request_to_queue(handle: u64, ep: &IrohEndpoint, payload: RequestPayload) {
-    // #122: Look up the CURRENT queue from the registry instead of a captured
-    // Arc.  When serve is restarted (stopServe → serveStart), old QUIC
-    // connections may still be alive (connection pool reuse). Requests on
-    // those old connections must be delivered to the NEW queue, not the old
-    // (removed) one.
-    let req_handle = payload.req_handle;
-    let q = match serve_registry::get(handle) {
-        Some(q) => q,
-        None => {
-            tracing::warn!("iroh-http-deno: serve registry miss — responding 503");
-            let _ = send_undeliverable_rejection(ep.handles(), req_handle, "deno registry miss");
-            return;
+/// Deno request transport: enqueues each request onto the serve-registry mpsc
+/// queue polled by the Deno event loop. Registry-miss, serve-shutdown, and
+/// queue-full are Deno-local transport-reachability failures mapped to
+/// [`Undeliverable`]; [`deliver_request`] then sends the fail-closed 503 and
+/// finishes the response body (the latter fixes the pre-#315 hang).
+struct DenoTransport {
+    handle: u64,
+}
+
+impl RequestTransport for DenoTransport {
+    fn deliver(&self, req: &DeliverableRequest) -> Result<(), Undeliverable> {
+        // #122: Look up the CURRENT queue from the registry instead of a
+        // captured Arc. When serve is restarted (stopServe → serveStart), old
+        // QUIC connections may still be alive (connection pool reuse). Requests
+        // on those old connections must be delivered to the NEW queue, not the
+        // old (removed) one.
+        let q = match serve_registry::get(self.handle) {
+            Some(q) => q,
+            None => {
+                tracing::warn!("iroh-http-deno: serve registry miss — responding 503");
+                return Err(Undeliverable::new("deno registry miss"));
+            }
+        };
+        // #149: Reject immediately if this queue belongs to a stopped serve
+        // cycle. The queue stays in the registry between stopServe and the next
+        // serveStart so the request never hangs until the tower timeout.
+        if *q.shutdown_rx.borrow() {
+            tracing::warn!("iroh-http-deno: serve shutdown — responding 503");
+            return Err(Undeliverable::new("deno serve shutdown"));
         }
-    };
-    // #149: Reject immediately if this queue belongs to a stopped serve cycle.
-    // The queue stays in the registry between stopServe and the next serveStart
-    // so the request never hangs until the tower timeout.
-    if *q.shutdown_rx.borrow() {
-        tracing::warn!("iroh-http-deno: serve shutdown — responding 503");
-        let _ = send_undeliverable_rejection(ep.handles(), req_handle, "deno serve shutdown");
-        return;
+        let event = serde_json::json!({
+            "reqHandle":         req.req_handle,
+            "reqBodyHandle":     req.req_body_handle,
+            "resBodyHandle":     req.res_body_handle,
+            "isBidi":            req.is_bidi,
+            "method":            req.method,
+            "url":               req.url,
+            "headers":           req.headers,
+            "remoteNodeId":      req.remote_node_id,
+        });
+        if q.tx.try_send(event).is_err() {
+            tracing::warn!("iroh-http-deno: serve queue full — dropping request with 503");
+            return Err(Undeliverable::new("deno serve queue full"));
+        }
+        Ok(())
     }
-    let headers: Vec<Vec<String>> = payload
-        .headers
-        .into_iter()
-        .map(|(k, v)| vec![k, v])
-        .collect();
-    let event = serde_json::json!({
-        "reqHandle":         payload.req_handle,
-        "reqBodyHandle":     payload.req_body_handle,
-        "resBodyHandle":     payload.res_body_handle,
-        "isBidi":            payload.is_bidi,
-        "method":            payload.method,
-        "url":               payload.url,
-        "headers":           headers,
-        "remoteNodeId":      payload.remote_node_id,
-    });
-    if q.tx.try_send(event).is_err() {
-        tracing::warn!("iroh-http-deno: serve queue full — dropping request with 503");
-        let _ = send_undeliverable_rejection(ep.handles(), req_handle, "deno serve queue full");
-    }
+}
+
+fn deliver_request_to_queue(handle: u64, ep: &IrohEndpoint, payload: RequestPayload) {
+    deliver_request(ep.handles(), &DenoTransport { handle }, payload);
 }
 
 /// Extract and look up the endpoint from a JSON payload's `endpointHandle`.
