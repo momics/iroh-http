@@ -163,16 +163,30 @@ impl IrohEndpoint {
     /// Spawns a background watcher task the first time a given peer is subscribed.
     /// The watcher polls `peer_stats()` every 200 ms and emits on the returned
     /// channel whenever the active path changes.
+    ///
+    /// Re-subscribing to a peer that already has a live watcher reuses that
+    /// watcher: only the sender is swapped, so no additional task is spawned and
+    /// `active_path_watchers` still counts exactly one live watcher per peer.
     pub fn subscribe_path_changes(
         &self,
         node_id_str: &str,
     ) -> tokio::sync::mpsc::UnboundedReceiver<PathInfo> {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        // Replace any existing sender; old watcher exits when it detects is_closed().
-        self.inner
+        // Replace any existing sender; the running watcher (if any) picks up the
+        // new sender on its next poll. `insert` returns the previous sender when
+        // a watcher is already live for this peer.
+        let had_existing_watcher = self
+            .inner
             .session
             .path_subs
-            .insert(node_id_str.to_string(), tx);
+            .insert(node_id_str.to_string(), tx)
+            .is_some();
+
+        // A watcher already exists for this peer — reuse it. Spawning another
+        // would leak a task and over-count `active_path_watchers`.
+        if had_existing_watcher {
+            return rx;
+        }
 
         let ep = self.clone();
         let nid = node_id_str.to_string();
