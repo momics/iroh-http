@@ -109,12 +109,6 @@ export interface ServeOptions {
   maxTotalConnections?: number;
 
   /**
-   * Maximum consecutive accept-loop errors before the serve loop terminates.
-   * @default 5
-   */
-  maxServeErrors?: number;
-
-  /**
    * Milliseconds to wait for in-flight requests to drain after shutdown.
    * @default 30_000
    */
@@ -257,7 +251,6 @@ export function makeServe(
       maxRequestBodyWireBytes: options.maxRequestBodyWireBytes,
       maxRequestBodyDecodedBytes: options.maxRequestBodyDecodedBytes,
       maxTotalConnections: options.maxTotalConnections,
-      maxServeErrors: options.maxServeErrors,
       drainTimeout: options.drainTimeout,
       loadShed: options.loadShed,
       decompress: options.decompress,

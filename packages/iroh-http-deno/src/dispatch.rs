@@ -741,7 +741,6 @@ async fn serve_start(p: Value) -> Value {
             .as_u64()
             .map(|v| v as usize),
         max_total_connections: p["maxTotalConnections"].as_u64().map(|v| v as usize),
-        max_serve_errors: p["maxServeErrors"].as_u64().map(|v| v as usize),
         drain_timeout_ms: p["drainTimeout"].as_u64(),
         load_shed: p["loadShed"].as_bool(),
         decompression: p["decompress"].as_bool(),

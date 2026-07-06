@@ -1164,8 +1164,6 @@ pub struct JsServeOptions {
     pub max_request_body_decoded_bytes: Option<f64>,
     /// Maximum total QUIC connections the server will accept.  Default: unlimited.
     pub max_total_connections: Option<f64>,
-    /// Maximum serve errors before shutdown.  Default: 5.
-    pub max_serve_errors: Option<u32>,
     /// Drain timeout in milliseconds after shutdown signal.  Default: 5000.
     pub drain_timeout: Option<f64>,
     /// Enable load-shedding (reject with 503 when at capacity).
@@ -1196,7 +1194,6 @@ pub async fn raw_serve(
             max_request_body_wire_bytes: None,
             max_request_body_decoded_bytes: None,
             max_total_connections: None,
-            max_serve_errors: None,
             drain_timeout: None,
             load_shed: None,
             decompress: None,
@@ -1220,7 +1217,6 @@ pub async fn raw_serve(
                 .max_total_connections
                 .map(|v| safe_f64_to_usize(v, "maxTotalConnections", MAX_TOTAL_CONNECTIONS))
                 .transpose()?,
-            max_serve_errors: o.max_serve_errors.map(|v| v as usize),
             drain_timeout_ms: o
                 .drain_timeout
                 .map(|v| safe_f64_to_u64(v, "drainTimeout", MAX_TIMEOUT_MS))

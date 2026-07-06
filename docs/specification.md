@@ -243,8 +243,6 @@ interface ServeOptions {
   maxRequestBodyDecodedBytes?: number;
   /** Max total QUIC connections. Unlimited by default. */
   maxTotalConnections?: number;
-  /** Max consecutive accept errors before shutdown. Default: 5. */
-  maxServeErrors?: number;
   /** Drain timeout in ms after shutdown. Default: 30 000. */
   drainTimeout?: number;
   /** Reject with 503 at capacity instead of queuing. Default: true. */

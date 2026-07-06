@@ -112,7 +112,6 @@ export interface FfiServeOptions {
   maxRequestBodyWireBytes?: number;
   maxRequestBodyDecodedBytes?: number;
   maxTotalConnections?: number;
-  maxServeErrors?: number;
   drainTimeout?: number;
   loadShed?: boolean;
   /** When `false`, request bodies are forwarded raw (no decompression). @default true */

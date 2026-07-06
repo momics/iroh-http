@@ -14,8 +14,6 @@
 pub struct ServeOptions {
     /// Maximum simultaneous in-flight requests.  Default: 1024.
     pub max_concurrency: Option<usize>,
-    /// Consecutive accept-loop errors before the serve loop terminates.  Default: 5.
-    pub max_serve_errors: Option<usize>,
     /// Per-request timeout in milliseconds.  Default: 60 000.
     pub request_timeout_ms: Option<u64>,
     /// Maximum connections from a single peer.  Default: 8.
