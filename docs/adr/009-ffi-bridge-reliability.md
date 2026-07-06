@@ -1,13 +1,61 @@
 ---
 id: "009"
 title: "FFI bridge reliability under concurrent load"
-status: open
+status: accepted
 date: 2026-04-25
 area: ffi | transport
 tags: [ffi, deno, node, tauri, concurrency, race-condition, backpressure]
 ---
 
 # [009] FFI bridge reliability under concurrent load
+
+## Decision
+
+The `#119`/`#122`/`#123` stale-handle race class this exploration opened
+against has since been **closed in core**, not at the bridges:
+
+- **Option A (oneshot acknowledgment)** landed as the response-head oneshot
+  rendezvous in `FfiDispatcher::dispatch`
+  (`crates/iroh-http-core/src/ffi/dispatcher.rs`): the request task hands the
+  head slot to JS and awaits `respond()` before proceeding, so the handle
+  cannot be freed inside the timing window.
+- **Option C (ownership tokens)** landed as `ReqHeadGuard` + the `InsertGuard`
+  multi-handle allocation guards in `crates/iroh-http-core/src/ffi/handles.rs`,
+  which roll back partially-allocated handles on every dispatch exit path.
+
+With the race class closed in core, the remaining decision is about **code
+shape, not reliability**: the request-delivery preamble each bridge ran before
+handing a request to its runtime was partly duplicated (the header reshape into
+`Vec<Vec<String>>` and the fail-closed undeliverable fallback). That preamble
+is now lifted into `iroh-http-adapter` behind a `RequestTransport` trait
+(`deliver_request` + `DeliverableRequest` + `Undeliverable`, see
+[#315](https://github.com/Momics/iroh-http/issues/315)). Each bridge keeps only
+its genuinely runtime-specific byte transport:
+
+| Adapter | `RequestTransport` impl | Native failure mapped to `Undeliverable` |
+|---------|-------------------------|------------------------------------------|
+| Node    | `NodeTransport`  | `ThreadsafeFunction` enqueue status ≠ `Ok` |
+| Deno    | `DenoTransport`  | registry miss / serve shutdown / queue full |
+| Tauri   | `TauriTransport` | `Channel::send` error |
+
+This is **additive and non-breaking** per
+[005 — FFI versioning](005-ffi-versioning-compatibility.md): the seam lives
+entirely inside the adapter layer, which is internal and co-versioned with core.
+There is no JS-visible contract change — the concern raised below that "a
+callback contract change is a breaking FFI change" does not apply because the
+core `on_request` callback shape is unchanged.
+
+Folding the undeliverable fallback into the shared path also fixed a
+released-behaviour bug: on the undeliverable-503 path Node and Deno sent the
+rejection head but never finished the response body writer, so the client hung
+until the drain timeout. `deliver_request` now finishes the writer on every
+undeliverable path (regression guarded by
+`deno_delivery_undeliverable_finishes_response_body` and the shared
+`MockTransport` conformance test).
+
+Scope: unary request delivery only. Bidirectional streaming uses the separate
+session-stream API (`Session::create_bidi_stream` / `next_bidi_stream`), which
+does not run the delivery preamble and is out of scope here.
 
 ## Context
 
