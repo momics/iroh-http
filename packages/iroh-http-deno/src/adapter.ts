@@ -467,6 +467,99 @@ function takeLastStreamError(eh: bigint, handle: bigint): string {
   return `nextChunk: stream error on handle ${handle}`;
 }
 
+/**
+ * Read the next body chunk for `handle` on endpoint `eh`, applying the
+ * buffer-grow/retry protocol of `iroh_http_try_next_chunk` /
+ * `iroh_http_next_chunk`.
+ *
+ * Shared by {@link makeBridge}'s bridge object and {@link DenoAdapter} so the
+ * grow/retry semantics live in exactly one place (#313).
+ *
+ * Protocol:
+ * - #126: try the sync non-blocking read first — avoids ~100–200µs of
+ *   spawn_blocking scheduling overhead when data is already buffered.
+ * - `> 0`  → chunk of that many bytes.
+ * - `0`    → clean EOF.
+ * - `< -2` → buffer too small; the magnitude is the required size. Grow and
+ *   retry sync once.
+ * - `-1`   → hard error (endpoint gone, handle invalid, stream reset).
+ * - `-2`   → no data buffered yet; fall back to the async FFI path (which
+ *   applies the same grow-and-retry-once protocol via `iroh_http_next_chunk`).
+ */
+async function readChunk(
+  eh: bigint,
+  handle: bigint,
+): Promise<Uint8Array | null> {
+  // #126: Try sync non-blocking read first — avoids ~100–200µs of
+  // spawn_blocking scheduling overhead when data is already buffered.
+  // DENO-001: allocate a per-call buffer so concurrent reads on different
+  // handles do not share memory and corrupt each other's data.
+  const syncBuf = new Uint8Array(chunkBufHint) as Uint8Array<ArrayBuffer>;
+  const syncN = lib.symbols.iroh_http_try_next_chunk(
+    eh,
+    handle,
+    syncBuf,
+    BigInt(syncBuf.byteLength),
+  ) as number;
+
+  if (syncN > 0) {
+    // Data available — return it without entering the async FFI pool.
+    chunkBufHint = Math.min(Math.max(chunkBufHint, syncN), MAX_CHUNK_BUF);
+    return syncBuf.slice(0, syncN);
+  }
+  if (syncN === 0) return null; // EOF
+  if (syncN < -2) {
+    // Buffer too small — grow and retry sync.
+    const bigBuf = new Uint8Array(-syncN) as Uint8Array<ArrayBuffer>;
+    const retryN = lib.symbols.iroh_http_try_next_chunk(
+      eh,
+      handle,
+      bigBuf,
+      BigInt(bigBuf.byteLength),
+    ) as number;
+    if (retryN > 0) {
+      chunkBufHint = Math.min(Math.max(chunkBufHint, retryN), MAX_CHUNK_BUF);
+      return bigBuf.slice(0, retryN);
+    }
+    if (retryN === 0) return null;
+    // Fall through to async if sync retry also fails.
+  }
+  // syncN === -1 (hard error) or -2 (no data yet) — fall back to async.
+  if (syncN === -1) {
+    throw new Error(takeLastStreamError(eh, handle));
+  }
+
+  // -2: No data available yet — use the async path.
+  let buf = new Uint8Array(chunkBufHint) as Uint8Array<ArrayBuffer>;
+  let n = (await lib.symbols.iroh_http_next_chunk(
+    eh,
+    handle,
+    buf,
+    BigInt(buf.byteLength),
+  )) as number;
+  if (n < -1) {
+    // Return value encodes the required size as a negative number.
+    // Grow the buffer and retry exactly once.
+    buf = new Uint8Array(-n) as Uint8Array<ArrayBuffer>;
+    n = (await lib.symbols.iroh_http_next_chunk(
+      eh,
+      handle,
+      buf,
+      BigInt(buf.byteLength),
+    )) as number;
+  }
+  // n === -1  → hard error (endpoint gone, handle invalid, stream reset).
+  // n === 0   → clean EOF.
+  // n > 0     → chunk of n bytes.
+  if (n === -1) {
+    throw new Error(takeLastStreamError(eh, handle));
+  }
+  if (n === 0) return null;
+  // Update hint so future calls start with a better-sized buffer (capped).
+  chunkBufHint = Math.min(Math.max(chunkBufHint, n), MAX_CHUNK_BUF);
+  return buf.slice(0, n);
+}
+
 // ── Bridge implementation ─────────────────────────────────────────────────────
 
 export function makeBridge(endpointHandle: number) {
@@ -474,78 +567,10 @@ export function makeBridge(endpointHandle: number) {
   // version bits in the upper 32 bits, so we must not truncate to u32).
   const eh = BigInt(endpointHandle);
   return {
-    async nextChunk(handle: bigint): Promise<Uint8Array | null> {
-      // #126: Try sync non-blocking read first — avoids ~100–200µs of
-      // spawn_blocking scheduling overhead when data is already buffered.
-      const syncBuf = new Uint8Array(chunkBufHint) as Uint8Array<ArrayBuffer>;
-      const syncN = lib.symbols.iroh_http_try_next_chunk(
-        eh,
-        handle,
-        syncBuf,
-        BigInt(syncBuf.byteLength),
-      ) as number;
-
-      if (syncN > 0) {
-        // Data available — return it without entering the async FFI pool.
-        chunkBufHint = Math.min(Math.max(chunkBufHint, syncN), MAX_CHUNK_BUF);
-        return syncBuf.slice(0, syncN);
-      }
-      if (syncN === 0) return null; // EOF
-      if (syncN < -2) {
-        // Buffer too small — grow and retry sync.
-        const bigBuf = new Uint8Array(-syncN) as Uint8Array<ArrayBuffer>;
-        const retryN = lib.symbols.iroh_http_try_next_chunk(
-          eh,
-          handle,
-          bigBuf,
-          BigInt(bigBuf.byteLength),
-        ) as number;
-        if (retryN > 0) {
-          chunkBufHint = Math.min(
-            Math.max(chunkBufHint, retryN),
-            MAX_CHUNK_BUF,
-          );
-          return bigBuf.slice(0, retryN);
-        }
-        if (retryN === 0) return null;
-        // Fall through to async if sync retry also fails.
-      }
-      // syncN === -1 (hard error) or -2 (no data yet) — fall back to async.
-      if (syncN === -1) {
-        throw new Error(takeLastStreamError(eh, handle));
-      }
-
-      // -2: No data available yet — use the async path.
-      // DENO-001: allocate a per-call buffer so concurrent reads on different
-      // handles do not share memory and corrupt each other's data.
-      let buf = new Uint8Array(chunkBufHint) as Uint8Array<ArrayBuffer>;
-      let n = (await lib.symbols.iroh_http_next_chunk(
-        eh,
-        handle,
-        buf,
-        BigInt(buf.byteLength),
-      )) as number;
-      if (n < -1) {
-        // Return value encodes the required size as a negative number.
-        // Grow the buffer and retry exactly once.
-        buf = new Uint8Array(-n) as Uint8Array<ArrayBuffer>;
-        n = (await lib.symbols.iroh_http_next_chunk(
-          eh,
-          handle,
-          buf,
-          BigInt(buf.byteLength),
-        )) as number;
-      }
-      // n === -1  → hard error (endpoint gone, handle invalid, stream reset).
-      // n === 0   → clean EOF.
-      // n > 0     → chunk of n bytes.
-      if (n === -1) {
-        throw new Error(takeLastStreamError(eh, handle));
-      }
-      if (n === 0) return null;
-      // Update hint so future calls start with a better-sized buffer (capped).
-      chunkBufHint = Math.min(Math.max(chunkBufHint, n), MAX_CHUNK_BUF);
-      return buf.slice(0, n);
+    nextChunk(handle: bigint): Promise<Uint8Array | null> {
+      // #126: try sync non-blocking read first, then fall back to async —
+      // see the shared readChunk helper for the full grow/retry protocol.
+      return readChunk(eh, handle);
     },
     async sendChunk(handle: bigint, chunk: Uint8Array): Promise<void> {
       // Async FFI — same deadlock concern as the class method.
@@ -1241,65 +1266,10 @@ export class DenoAdapter extends IrohAdapter {
 
   // ── Body streaming ──────────────────────────────────────────────────────────
 
-  async nextChunk(handle: bigint): Promise<Uint8Array | null> {
-    const eh = BigInt(this.#eh);
-    // #126: Try sync non-blocking read first — avoids ~100–200µs of
-    // spawn_blocking scheduling overhead when data is already buffered.
-    const syncBuf = new Uint8Array(chunkBufHint) as Uint8Array<ArrayBuffer>;
-    const syncN = lib.symbols.iroh_http_try_next_chunk(
-      eh,
-      handle,
-      syncBuf,
-      BigInt(syncBuf.byteLength),
-    ) as number;
-
-    if (syncN > 0) {
-      chunkBufHint = Math.min(Math.max(chunkBufHint, syncN), MAX_CHUNK_BUF);
-      return syncBuf.slice(0, syncN);
-    }
-    if (syncN === 0) return null; // EOF
-    if (syncN < -2) {
-      // Buffer too small — grow and retry sync.
-      const bigBuf = new Uint8Array(-syncN) as Uint8Array<ArrayBuffer>;
-      const retryN = lib.symbols.iroh_http_try_next_chunk(
-        eh,
-        handle,
-        bigBuf,
-        BigInt(bigBuf.byteLength),
-      ) as number;
-      if (retryN > 0) {
-        chunkBufHint = Math.min(Math.max(chunkBufHint, retryN), MAX_CHUNK_BUF);
-        return bigBuf.slice(0, retryN);
-      }
-      if (retryN === 0) return null;
-    }
-    if (syncN === -1) {
-      throw new Error(takeLastStreamError(eh, handle));
-    }
-
-    // -2: No data yet — fall back to async path.
-    let buf = new Uint8Array(chunkBufHint) as Uint8Array<ArrayBuffer>;
-    let n = (await lib.symbols.iroh_http_next_chunk(
-      eh,
-      handle,
-      buf,
-      BigInt(buf.byteLength),
-    )) as number;
-    if (n < -1) {
-      buf = new Uint8Array(-n) as Uint8Array<ArrayBuffer>;
-      n = (await lib.symbols.iroh_http_next_chunk(
-        eh,
-        handle,
-        buf,
-        BigInt(buf.byteLength),
-      )) as number;
-    }
-    if (n === -1) {
-      throw new Error(takeLastStreamError(eh, handle));
-    }
-    if (n === 0) return null;
-    chunkBufHint = Math.min(Math.max(chunkBufHint, n), MAX_CHUNK_BUF);
-    return buf.slice(0, n);
+  nextChunk(handle: bigint): Promise<Uint8Array | null> {
+    // #126: try sync non-blocking read first, then fall back to async —
+    // see the shared readChunk helper for the full grow/retry protocol.
+    return readChunk(BigInt(this.#eh), handle);
   }
 
   async sendChunk(handle: bigint, chunk: Uint8Array): Promise<void> {
