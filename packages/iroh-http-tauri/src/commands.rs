@@ -15,8 +15,8 @@ use crate::state;
 
 use iroh_http_adapter::{
     coerce_endpoint_options, coerce_fetch_options, coerce_serve_options, core_error_to_json,
-    format_error_json, send_undeliverable_rejection, validate_header_rows, RawEndpointOptions,
-    RawFetchOptions, RawServeOptions,
+    deliver_request, format_error_json, validate_header_rows, DeliverableRequest, RawEndpointOptions,
+    RawFetchOptions, RawServeOptions, RequestTransport, Undeliverable,
 };
 
 // ── Endpoint ──────────────────────────────────────────────────────────────────
@@ -566,6 +566,32 @@ pub struct ServeEventPayload {
     pub remote_node_id: String,
 }
 
+/// Tauri request transport: hands each request to the frontend over an IPC
+/// [`Channel`]. A `send` failure means the frontend will never see the request,
+/// which [`deliver_request`] turns into the fail-closed 503.
+struct TauriTransport {
+    channel: Channel<ServeEventPayload>,
+}
+
+impl RequestTransport for TauriTransport {
+    fn deliver(&self, req: &DeliverableRequest) -> Result<(), Undeliverable> {
+        let event = ServeEventPayload {
+            req_handle: req.req_handle,
+            req_body_handle: req.req_body_handle,
+            res_body_handle: req.res_body_handle,
+            is_bidi: req.is_bidi,
+            method: req.method.clone(),
+            url: req.url.clone(),
+            headers: req.headers.clone(),
+            remote_node_id: req.remote_node_id.clone(),
+        };
+        self.channel.send(event).map_err(|e| {
+            tracing::warn!("iroh-http-tauri: channel send error: {e}; responding 503");
+            Undeliverable::new(format!("tauri channel send failed: {e}"))
+        })
+    }
+}
+
 /// Server-side configuration passed at `serve()` time.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -629,40 +655,13 @@ pub async fn serve(
     // Clone ep so the request-dispatch closure can close orphaned requests on
     // channel failure without capturing the outer ep.
     let ep_for_closure = ep.clone();
+    let transport = TauriTransport { channel };
 
     let handle = iroh_http_core::ffi_serve_with_callback(
         ep.clone(),
         serve_opts,
         move |payload: RequestPayload| {
-            let ch = channel.clone();
-            let req_handle = payload.req_handle;
-            let res_body_handle = payload.res_body_handle;
-            let headers: Vec<Vec<String>> = payload
-                .headers
-                .into_iter()
-                .map(|(k, v)| vec![k, v])
-                .collect();
-            let event = ServeEventPayload {
-                req_handle,
-                req_body_handle: payload.req_body_handle,
-                res_body_handle,
-                is_bidi: payload.is_bidi,
-                method: payload.method,
-                url: payload.url,
-                headers,
-                remote_node_id: payload.remote_node_id,
-            };
-            if let Err(e) = ch.send(event) {
-                tracing::warn!("iroh-http-tauri: channel send error: {e}; responding 503");
-                // The JS side will never see this request — close it fail-closed so
-                // the client receives a 503 instead of a hung connection.
-                let _ = send_undeliverable_rejection(
-                    ep_for_closure.handles(),
-                    req_handle,
-                    format_args!("tauri channel send failed: {e}"),
-                );
-                let _ = ep_for_closure.handles().finish_body(res_body_handle);
-            }
+            deliver_request(ep_for_closure.handles(), &transport, payload);
         },
         conn_event_fn,
     );
