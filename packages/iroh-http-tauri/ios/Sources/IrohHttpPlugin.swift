@@ -105,6 +105,21 @@ class IrohHttpPlugin: Plugin {
         return result
     }
 
+    /// Validate that a string is a canonical iroh endpoint id: a 32-byte
+    /// Ed25519 public key encoded as lowercase RFC 4648 base32 without padding,
+    /// i.e. exactly 52 characters drawn from the `a-z` / `2-7` alphabet.
+    ///
+    /// Used to safely accept the DNS-SD instance name as the node-id when a
+    /// desktop advertiser emits no `pk` TXT (issue #318). The advertise side
+    /// truncates instance names to 63 chars, which does not truncate a 52-char
+    /// id, so the recovered id is always complete.
+    private func isValidEndpointId(_ s: String) -> Bool {
+        guard s.count == 52 else { return false }
+        return s.allSatisfy { c in
+            (c >= "a" && c <= "z") || (c >= "2" && c <= "7")
+        }
+    }
+
     // MARK: - Browse Commands
 
     @objc public func mdns_browse_start(_ invoke: Invoke) throws {
@@ -156,18 +171,37 @@ class IrohHttpPlugin: Plugin {
                     }
                 }
             }
-            guard let pk = txt["pk"], !pk.isEmpty else { continue }
-            currentPks.insert(pk)
+
+            // The DNS-SD instance name doubles as the node-id fallback: desktop
+            // advertisers (iroh swarm-discovery) publish the base32 endpoint id
+            // as the instance name and emit no `pk` TXT (issue #318).
+            var instanceName: String? = nil
+            if case .service(let name, _, _, _) = result.endpoint {
+                instanceName = name
+            }
+
+            // Resolve the node-id: prefer the `pk` TXT (set by mobile
+            // advertisers), then fall back to the instance name for desktop
+            // advertisers. Reject records where neither yields a valid id.
+            let nodeId: String
+            if let pk = txt["pk"], !pk.isEmpty {
+                nodeId = pk
+            } else if let name = instanceName, isValidEndpointId(name) {
+                nodeId = name
+            } else {
+                continue
+            }
+            currentPks.insert(nodeId)
 
             var addrs: [String] = []
             if let relay = txt["relay"], !relay.isEmpty { addrs.append(relay) }
 
-            if case .service(let name, _, _, _) = result.endpoint {
-                if session.knownNodes[name] != pk {
-                    session.knownNodes[name] = pk
+            if let name = instanceName {
+                if session.knownNodes[name] != nodeId {
+                    session.knownNodes[name] = nodeId
                     session.pendingEvents.append([
                         "type": "discovered",
-                        "nodeId": pk,
+                        "nodeId": nodeId,
                         "addrs": addrs,
                     ])
                 }
