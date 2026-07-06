@@ -263,15 +263,16 @@ jobs:
               # Use specific filenames (not globs) to exclude lock files like
               # package-lock.json and yarn.lock whose "version" entries are
               # dependency versions, not the package's own version.
-              # Exclude non-published fixture trees (examples/, tests/) — their
-              # manifests carry their own version field but are never released,
-              # so adding a new fixture is not a version bump.
+              # Exclude non-published fixture trees (examples/, tests/, bench/) —
+              # their manifests carry their own version field but are never
+              # released, so adding a new fixture or benchmark crate is not a
+              # version bump.
               VERSION_DIFF=$(git diff-tree --no-commit-id -r -p "$sha" -- \
                 'Cargo.toml' '*/Cargo.toml' \
                 'package.json' '*/package.json' \
                 'deno.json' '*/deno.json' \
                 'deno.jsonc' '*/deno.jsonc' \
-                ':(exclude)examples/**' ':(exclude)tests/**' 2>/dev/null \
+                ':(exclude)examples/**' ':(exclude)tests/**' ':(exclude)bench/**' 2>/dev/null \
                 | grep -E '^\+(version = "|[[:space:]]*"version": ")[0-9]' || true)
               [[ -z "$VERSION_DIFF" ]] && continue
 

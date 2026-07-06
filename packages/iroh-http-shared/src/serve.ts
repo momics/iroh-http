@@ -140,10 +140,28 @@ export interface ServeOptions {
  */
 export interface ServeHandle {
   /**
-   * Resolves when the serve loop terminates — either because `node.close()`
-   * was called, `signal` was aborted, or a fatal error occurred.
+   * Resolves when the serve loop terminates — either because `close()` or
+   * `node.close()` was called, `signal` was aborted, or a fatal error occurred.
    */
   readonly finished: Promise<void>;
+
+  /**
+   * Stop **this** server: signals the serve loop to stop accepting new
+   * connections and drain in-flight requests (graceful shutdown), leaving the
+   * node itself alive so other work can continue.
+   *
+   * Resolves once the loop has fully terminated — it is equivalent to calling
+   * the stop and then awaiting {@link ServeHandle.finished}. Safe to call more
+   * than once; subsequent calls simply await the same shutdown.
+   */
+  close(): Promise<void>;
+
+  /**
+   * Alias for {@link ServeHandle.close} enabling `await using server = ...`
+   * (explicit resource management). Stops this server when the enclosing scope
+   * exits.
+   */
+  [Symbol.asyncDispose](): Promise<void>;
 }
 
 /**
@@ -187,6 +205,7 @@ export function makeServe(
   endpointHandle: number,
   onNodeClose: Promise<void>,
   onPeerEvent?: (event: PeerConnectionEvent) => void,
+  maxChunkSizeBytes?: number,
 ): ServeFn {
   // #114: guard against starting two polling loops on the same endpoint.
   let serveRunning = false;
@@ -198,6 +217,10 @@ export function makeServe(
       );
     }
     serveRunning = true;
+
+    // #277: ensure the underlying stopServe() is only issued once even if
+    // close(), Symbol.asyncDispose, and/or an aborted signal all fire.
+    let stopRequested = false;
 
     // Parse overloaded arguments.
     let handler: ServeHandler;
@@ -292,7 +315,9 @@ export function makeServe(
 
         const bodyStream = res.body ?? emptyStream();
         const doPipe = async () => {
-          await pipeToWriter(adapter, bodyStream, payload.resBodyHandle);
+          await pipeToWriter(adapter, bodyStream, payload.resBodyHandle, {
+            maxChunkSizeBytes,
+          });
         };
 
         // #123: When the handler failed, the error-recovery body is short
@@ -359,6 +384,8 @@ export function makeServe(
     });
 
     const doStop = (): void => {
+      if (stopRequested) return;
+      stopRequested = true;
       adapter.stopServe(endpointHandle);
       // Rust will drain the loop and then loopDone resolves; we do NOT resolve
       // finished ourselves here.
@@ -375,7 +402,18 @@ export function makeServe(
       }
     }
 
-    return { finished };
+    // #277: close() stops THIS server (not the whole node) by triggering the
+    // same stop path as an aborted signal, then resolves once the loop drains.
+    const close = (): Promise<void> => {
+      doStop();
+      return finished;
+    };
+
+    return {
+      finished,
+      close,
+      [Symbol.asyncDispose]: close,
+    };
   }) as ServeFn;
 }
 

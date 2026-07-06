@@ -627,5 +627,6 @@ module.exports.sessionRecvDatagram = nativeBinding.sessionRecvDatagram
 module.exports.sessionSendDatagram = nativeBinding.sessionSendDatagram
 module.exports.startTransportEvents = nativeBinding.startTransportEvents
 module.exports.stopServe = nativeBinding.stopServe
+module.exports.unsubscribePathChanges = nativeBinding.unsubscribePathChanges
 module.exports.waitEndpointClosed = nativeBinding.waitEndpointClosed
 module.exports.waitServeStop = nativeBinding.waitServeStop

@@ -41,6 +41,7 @@ import {
   sessionSendDatagram as napiSessionSendDatagram,
   startTransportEvents as napiStartTransportEvents,
   stopServe as napiStopServe,
+  unsubscribePathChanges as napiUnsubscribePathChanges,
   waitEndpointClosed as napiWaitEndpointClosed,
   waitServeStop as napiWaitServeStop,
 } from "./index.js";
@@ -48,6 +49,7 @@ import {
 import {
   classifyBindError,
   IrohNode,
+  type IrohNodeWithSecret,
   type NodeAddrInfo,
   type NodeOptions,
   normaliseRelayMode,
@@ -348,6 +350,8 @@ class NodeAdapter extends IrohAdapter {
       poolSize: Number(s.poolSize),
       activeConnections: Number(s.activeConnections),
       activeRequests: Number(s.activeRequests),
+      activePathSubscriptions: Number(s.activePathSubscriptions),
+      activePathWatchers: Number(s.activePathWatchers),
     };
   }
 
@@ -403,6 +407,14 @@ class NodeAdapter extends IrohAdapter {
     if (json === null || json === undefined) return null;
     return JSON.parse(json) as PathInfo;
   }
+
+  override unsubscribePathChanges(
+    endpointHandle: number,
+    nodeId: string,
+  ): Promise<void> {
+    napiUnsubscribePathChanges(endpointHandle, nodeId);
+    return Promise.resolve();
+  }
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────
@@ -420,7 +432,7 @@ function normaliseDiscovery(disc?: NodeOptions["discovery"]): {
 }
 
 export { PublicKey, SecretKey } from "@momics/iroh-http-shared";
-export type { IrohNode, NodeOptions };
+export type { IrohNode, IrohNodeWithSecret, NodeOptions };
 
 /**
  * Create an Iroh node — the entry point for peer-to-peer HTTP.
@@ -433,7 +445,10 @@ export type { IrohNode, NodeOptions };
  * @param options Optional configuration ({@link NodeOptions}). Omit `key` to
  *   generate a fresh identity; pass a saved `key` to keep a stable node ID across
  *   restarts. Relay, discovery, and tuning are all configured here.
- * @returns A ready-to-use {@link IrohNode}.
+ * @returns A ready-to-use {@link IrohNode}. When you pass a `key`, the returned
+ *   node's `secretKey` is non-optional ({@link IrohNodeWithSecret}); omit `key`
+ *   and the natively generated identity is never surfaced, so `secretKey` is
+ *   `undefined`. To persist an identity, generate a key and pass it back in.
  *
  * @example
  * ```ts
@@ -446,7 +461,13 @@ export type { IrohNode, NodeOptions };
  * await node.close();
  * ```
  */
-export async function createNode(options?: NodeOptions): Promise<IrohNode> {
+export function createNode(
+  options: NodeOptions & { key: SecretKey | Uint8Array },
+): Promise<IrohNodeWithSecret>;
+export function createNode(options?: NodeOptions): Promise<IrohNode>;
+export async function createNode(
+  options?: NodeOptions,
+): Promise<IrohNode> {
   const keyBytes = options?.key
     ? options.key instanceof Uint8Array
       ? options.key
@@ -508,7 +529,6 @@ export async function createNode(options?: NodeOptions): Promise<IrohNode> {
     {
       endpointHandle: info.endpointHandle,
       nodeId: info.nodeId,
-      keypair: info.keypair as Uint8Array,
     },
     options,
     nativeClosed,

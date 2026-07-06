@@ -32,6 +32,10 @@ pub struct EndpointStats {
     pub active_connections: usize,
     /// Number of HTTP requests currently being processed.
     pub active_requests: usize,
+    /// Number of live path-change subscriptions.
+    pub active_path_subscriptions: usize,
+    /// Number of live path-change watcher tasks.
+    pub active_path_watchers: usize,
 }
 
 /// A connection lifecycle event fired when a QUIC peer connection opens or closes.

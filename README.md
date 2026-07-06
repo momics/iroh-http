@@ -49,7 +49,7 @@ The server stack is composed from [tower-http](https://docs.rs/tower-http) layer
 |---------|-----|---------|
 | **Compression** | zstd via tower-http (request decompression + response compression) | Level 3, bodies > 1 KiB |
 | **Timeouts** | Per-request timeout layer | 60 s |
-| **Concurrency** | Semaphore-gated request limit | 64 concurrent |
+| **Concurrency** | Semaphore-gated request limit | 1024 concurrent |
 | **Load shedding** | 503 when overloaded | Automatic |
 | **Connection pool** | moka cache with single-flight connect | Per-peer reuse |
 | **Per-peer limits** | Max connections per remote node | 8 |

@@ -204,6 +204,11 @@ const lib = Deno.dlopen(
       result: "i32",
       nonblocking: false,
     },
+    iroh_http_take_last_stream_error: {
+      parameters: ["u64", "u64", "buffer", "usize"],
+      result: "i32",
+      nonblocking: false,
+    },
     iroh_http_send_chunk: {
       parameters: ["u64", "u64", "buffer", "usize"],
       result: "i32",
@@ -354,6 +359,7 @@ const METHOD_BUFS: Record<string, Uint8Array> = Object.fromEntries(
     "startTransportEvents",
     "nextTransportEvent",
     "nextPathChange",
+    "unsubscribePathChanges",
     "sessionAccept",
   ].map((m) => [m, enc.encode(m)]),
 );
@@ -442,6 +448,29 @@ export function bigintToSafeNumber(value: bigint, field = "handle"): number {
 const MAX_CHUNK_BUF = 4 * 1024 * 1024; // 4 MB
 let chunkBufHint = 65536;
 
+function takeLastStreamError(eh: bigint, handle: bigint): string {
+  let buf = new Uint8Array(1024) as Uint8Array<ArrayBuffer>;
+  let n = lib.symbols.iroh_http_take_last_stream_error(
+    eh,
+    handle,
+    buf,
+    BigInt(buf.byteLength),
+  ) as number;
+  if (n < -1) {
+    buf = new Uint8Array(-n) as Uint8Array<ArrayBuffer>;
+    n = lib.symbols.iroh_http_take_last_stream_error(
+      eh,
+      handle,
+      buf,
+      BigInt(buf.byteLength),
+    ) as number;
+  }
+  if (n > 0) {
+    return new TextDecoder().decode(buf.slice(0, n));
+  }
+  return `nextChunk: stream error on handle ${handle}`;
+}
+
 // ── Bridge implementation ─────────────────────────────────────────────────────
 
 export function makeBridge(endpointHandle: number) {
@@ -487,7 +516,7 @@ export function makeBridge(endpointHandle: number) {
       }
       // syncN === -1 (hard error) or -2 (no data yet) — fall back to async.
       if (syncN === -1) {
-        throw new Error(`nextChunk: stream error on handle ${handle}`);
+        throw new Error(takeLastStreamError(eh, handle));
       }
 
       // -2: No data available yet — use the async path.
@@ -515,7 +544,7 @@ export function makeBridge(endpointHandle: number) {
       // n === 0   → clean EOF.
       // n > 0     → chunk of n bytes.
       if (n === -1) {
-        throw new Error(`nextChunk: stream error on handle ${handle}`);
+        throw new Error(takeLastStreamError(eh, handle));
       }
       if (n === 0) return null;
       // Update hint so future calls start with a better-sized buffer (capped).
@@ -936,7 +965,6 @@ export async function createEndpointInfo(
   const res = await call<{
     endpointHandle: number;
     nodeId: string;
-    keypair: number[];
   }>("createEndpoint", {
     key: keyBytes,
     idleTimeout: options?.connections?.idleTimeoutMs ?? null,
@@ -969,7 +997,6 @@ export async function createEndpointInfo(
   return {
     endpointHandle: res.endpointHandle,
     nodeId: res.nodeId,
-    keypair: new Uint8Array(res.keypair),
   };
 }
 
@@ -1271,7 +1298,7 @@ export class DenoAdapter extends IrohAdapter {
       if (retryN === 0) return null;
     }
     if (syncN === -1) {
-      throw new Error(`nextChunk: stream error on handle ${handle}`);
+      throw new Error(takeLastStreamError(eh, handle));
     }
 
     // -2: No data yet — fall back to async path.
@@ -1292,7 +1319,7 @@ export class DenoAdapter extends IrohAdapter {
       )) as number;
     }
     if (n === -1) {
-      throw new Error(`nextChunk: stream error on handle ${handle}`);
+      throw new Error(takeLastStreamError(eh, handle));
     }
     if (n === 0) return null;
     chunkBufHint = Math.min(Math.max(chunkBufHint, n), MAX_CHUNK_BUF);
@@ -1533,6 +1560,16 @@ export class DenoAdapter extends IrohAdapter {
     nodeId: string,
   ): Promise<PathInfo | null> {
     return call<PathInfo | null>("nextPathChange", {
+      endpointHandle: this.#eh,
+      nodeId,
+    });
+  }
+
+  override async unsubscribePathChanges(
+    _endpointHandle: number,
+    nodeId: string,
+  ): Promise<void> {
+    await call<null>("unsubscribePathChanges", {
       endpointHandle: this.#eh,
       nodeId,
     });

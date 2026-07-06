@@ -20,13 +20,20 @@ import { createNode, PublicKey, SecretKey } from "@momics/iroh-http-deno";
 import { createNode, PublicKey, SecretKey } from "@momics/iroh-http-tauri";
 ```
 
-A node's own keys are also accessible directly:
+A node exposes its own secret key **only when you supplied one at creation**.
+Pass a `key` to `createNode` and the return type narrows to
+`IrohNodeWithSecret`, where `secretKey` is guaranteed present:
 
 ```ts
-const node = await createNode();
-const sk: SecretKey  = node.secretKey;   // Ed25519 secret key
+const key = SecretKey.generate();
+const node = await createNode({ key });
+const sk: SecretKey  = node.secretKey;   // Ed25519 secret key (the one you passed)
 const pk: PublicKey  = node.publicKey;   // Ed25519 public key (= node ID)
 ```
+
+Omit `key` and the identity is generated natively and never surfaced to JS, so
+`node.secretKey` is `undefined` on every adapter. To sign with a node's own
+identity, generate the key yourself and pass it in (as above).
 
 ## Sign
 

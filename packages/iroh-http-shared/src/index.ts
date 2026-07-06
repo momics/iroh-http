@@ -11,6 +11,7 @@ export type {
 } from "./IrohAdapter.js";
 export { IrohAdapter } from "./IrohAdapter.js";
 export { IrohNode } from "./IrohNode.js";
+export type { IrohNodeWithSecret } from "./IrohNode.js";
 export type { NodeOptions, RelayMode } from "./options/NodeOptions.js";
 export type {
   DiagnosticsEventDetail,

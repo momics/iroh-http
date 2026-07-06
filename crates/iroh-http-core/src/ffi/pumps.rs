@@ -16,11 +16,32 @@
 use bytes::Bytes;
 
 use super::handles::{BodyReader, BodyWriter};
+use crate::{http::body::BoxError, CoreError};
 
 // ── Shared pump helpers ───────────────────────────────────────────────────────
 
 /// Default read buffer size for QUIC stream reads.
 pub(crate) const PUMP_READ_BUF: usize = 64 * 1024;
+
+/// True if `err` (or anything in its `source()` chain) is a
+/// [`http_body_util::LengthLimitError`].
+///
+/// The tower-http `RequestBodyLimitLayer` wraps request bodies in
+/// `http_body_util::Limited`, which yields a `LengthLimitError` once the
+/// decoded byte cap is exceeded (see `http::server::stack::apply_body_limit`).
+/// That case is a genuine over-limit condition and must map to
+/// `ErrorCode::BodyTooLarge`; every other body-stream error (QUIC reset,
+/// malformed framing, decompression failure) must not.
+fn is_length_limit_error(err: &(dyn std::error::Error + 'static)) -> bool {
+    let mut cur: Option<&(dyn std::error::Error + 'static)> = Some(err);
+    while let Some(e) = cur {
+        if e.is::<http_body_util::LengthLimitError>() {
+            return true;
+        }
+        cur = e.source();
+    }
+    false
+}
 
 /// Pump raw bytes from a QUIC `RecvStream` into a `BodyWriter`.
 ///
@@ -90,7 +111,7 @@ pub(crate) async fn pump_body_to_quic_send(
 pub(crate) async fn pump_hyper_body_to_channel<B>(body: B, writer: BodyWriter)
 where
     B: http_body::Body<Data = Bytes>,
-    B::Error: std::fmt::Debug,
+    B::Error: Into<BoxError>,
 {
     let timeout = writer.drain_timeout;
     pump_hyper_body_to_channel_limited(body, writer, None, timeout, None).await;
@@ -102,7 +123,8 @@ where
 /// A slow-drip peer that stalls indefinitely will be cut off after this deadline.
 ///
 /// When a byte limit is set and the body exceeds it, `overflow_tx` is fired
-/// so the caller can return a `413 Content Too Large` response (ISS-004).
+/// so the caller can observe the overflow. The body reader also terminates
+/// with `BodyTooLarge` instead of a clean EOF.
 pub(crate) async fn pump_hyper_body_to_channel_limited<B>(
     body: B,
     writer: BodyWriter,
@@ -111,7 +133,7 @@ pub(crate) async fn pump_hyper_body_to_channel_limited<B>(
     mut overflow_tx: Option<tokio::sync::oneshot::Sender<()>>,
 ) where
     B: http_body::Body<Data = Bytes>,
-    B::Error: std::fmt::Debug,
+    B::Error: Into<BoxError>,
 {
     use http_body_util::BodyExt;
     // Box::pin gives Pin<Box<B>>: Unpin (Box<T>: Unpin ∀T), which satisfies BodyExt::frame().
@@ -126,6 +148,7 @@ pub(crate) async fn pump_hyper_body_to_channel_limited<B>(
         let frame_result = match tokio::time::timeout(frame_timeout, body.frame()).await {
             Err(_elapsed) => {
                 tracing::warn!("iroh-http: body frame read timed out after {frame_timeout:?}");
+                writer.abort(CoreError::timeout("body frame read timed out"));
                 break;
             }
             Ok(None) => break,
@@ -133,7 +156,32 @@ pub(crate) async fn pump_hyper_body_to_channel_limited<B>(
         };
         match frame_result {
             Err(e) => {
-                tracing::warn!("iroh-http: body frame error: {e:?}");
+                if overflowed {
+                    // We already aborted with `BodyTooLarge` and are draining
+                    // remaining frames. A drain-time stream error (e.g. the peer
+                    // resets after being told the body is too large) must not
+                    // overwrite the terminal size-violation error with `Internal`.
+                    break;
+                }
+                // Box the error so we can inspect the concrete type behind the
+                // body's `BoxError`. Deref (`&*boxed`) yields a trait object
+                // carrying the *concrete* vtable, so `is::<LengthLimitError>`
+                // and the `source()` walk see the real error type.
+                let boxed: BoxError = e.into();
+                if is_length_limit_error(&*boxed) {
+                    // Stack-enforced decoded-body cap (tower-http Limited):
+                    // a genuine over-limit condition.
+                    tracing::warn!("iroh-http: request body exceeded configured limit: {boxed}");
+                    writer.abort(CoreError::body_too_large(
+                        "body exceeded configured size limit",
+                    ));
+                } else {
+                    // Any other frame error (QUIC reset, malformed framing,
+                    // decompression failure) is a stream/protocol error, not a
+                    // size violation — do not mislabel it as BodyTooLarge.
+                    tracing::warn!("iroh-http: body frame error: {boxed:?}");
+                    writer.abort(CoreError::internal(format!("body stream error: {boxed}")));
+                }
                 break;
             }
             Ok(frame) => {
@@ -153,6 +201,9 @@ pub(crate) async fn pump_hyper_body_to_channel_limited<B>(
                             if let Some(tx) = overflow_tx.take() {
                                 let _ = tx.send(());
                             }
+                            writer.abort(CoreError::body_too_large(format!(
+                                "body exceeded configured size limit of {limit} bytes"
+                            )));
                             overflowed = true;
                             continue; // drain remaining frames without stalling the peer
                         }
@@ -302,6 +353,118 @@ mod tests {
         pump.await.unwrap();
 
         assert_eq!(count, 50);
+    }
+
+    /// Regression (#269/#271 review): a non-size body-stream error (e.g. QUIC
+    /// reset, malformed framing) must surface as a generic `Internal` error,
+    /// not be mislabelled as `BodyTooLarge`.
+    #[tokio::test]
+    async fn pump_non_length_error_surfaces_internal_not_body_too_large() {
+        use http_body::Frame;
+        let (writer, reader) = make_body_channel();
+        let err = std::io::Error::other("connection reset by peer");
+        let frames = futures::stream::iter(vec![
+            Ok::<_, std::io::Error>(Frame::data(Bytes::from_static(b"partial"))),
+            Err(err),
+        ]);
+        let body = StreamBody::new(frames);
+        let pump = tokio::spawn(pump_hyper_body_to_channel_limited(
+            body,
+            writer,
+            None,
+            Duration::from_secs(5),
+            None,
+        ));
+        while reader.next_chunk().await.is_some() {}
+        pump.await.unwrap();
+
+        let code = reader
+            .terminal_error
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|e| e.code);
+        assert_eq!(
+            code,
+            Some(crate::ErrorCode::Internal),
+            "non-size frame errors must not be reported as BodyTooLarge"
+        );
+    }
+
+    /// Regression (#269/#271 review): the stack-enforced decoded-body cap
+    /// (`http_body_util::Limited`, wired by `RequestBodyLimitLayer`) surfaces a
+    /// `LengthLimitError` on the generic `Err` branch, and that case *must*
+    /// still map to `BodyTooLarge`. Built through `crate::Body` so the error
+    /// type matches production (`BoxError`) exactly.
+    #[tokio::test]
+    async fn pump_length_limit_error_surfaces_body_too_large() {
+        use http_body_util::Limited;
+        let (writer, reader) = make_body_channel();
+        // 150 bytes through a 100-byte Limited body → LengthLimitError.
+        let inner = body_from_chunks(vec![FIFTY, FIFTY, FIFTY]);
+        let body = crate::Body::new(Limited::new(inner, 100));
+        let pump = tokio::spawn(pump_hyper_body_to_channel_limited(
+            body,
+            writer,
+            None,
+            Duration::from_secs(5),
+            None,
+        ));
+        while reader.next_chunk().await.is_some() {}
+        pump.await.unwrap();
+
+        let code = reader
+            .terminal_error
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|e| e.code);
+        assert_eq!(
+            code,
+            Some(crate::ErrorCode::BodyTooLarge),
+            "stack-enforced decoded cap (LengthLimitError) must map to BodyTooLarge"
+        );
+    }
+
+    /// Regression (#269/#271 review): once an over-limit body has been aborted
+    /// with `BodyTooLarge`, a stream error encountered while draining the
+    /// remaining frames (e.g. the peer resets after the 413) must NOT overwrite
+    /// the terminal error with `Internal`. The size-violation classification wins.
+    #[tokio::test]
+    async fn pump_drain_time_error_preserves_body_too_large() {
+        use http_body::Frame;
+        let (writer, reader) = make_body_channel();
+        // 3 × 50 = 150 bytes, limit 100: frame 3 overflows → BodyTooLarge, then
+        // frame 4 is a drain-time stream error that must not clobber it.
+        let err = std::io::Error::other("connection reset by peer");
+        let frames = futures::stream::iter(vec![
+            Ok::<_, std::io::Error>(Frame::data(Bytes::from_static(FIFTY))),
+            Ok(Frame::data(Bytes::from_static(FIFTY))),
+            Ok(Frame::data(Bytes::from_static(FIFTY))),
+            Err(err),
+        ]);
+        let body = StreamBody::new(frames);
+        let pump = tokio::spawn(pump_hyper_body_to_channel_limited(
+            body,
+            writer,
+            Some(100),
+            Duration::from_secs(5),
+            None,
+        ));
+        while reader.next_chunk().await.is_some() {}
+        pump.await.unwrap();
+
+        let code = reader
+            .terminal_error
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|e| e.code);
+        assert_eq!(
+            code,
+            Some(crate::ErrorCode::BodyTooLarge),
+            "a drain-time stream error must not overwrite the BodyTooLarge terminal error"
+        );
     }
 
     /// Cancellation: once the reader is dropped, the pump stops promptly instead
