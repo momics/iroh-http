@@ -52,6 +52,8 @@ import {
   type IrohNodeWithSecret,
   type NodeAddrInfo,
   type NodeOptions,
+  normaliseCompression,
+  normaliseDiscovery,
   normaliseRelayMode,
   type SecretKey,
 } from "@momics/iroh-http-shared";
@@ -419,18 +421,6 @@ class NodeAdapter extends IrohAdapter {
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
-function normaliseDiscovery(disc?: NodeOptions["discovery"]): {
-  dnsEnabled: boolean;
-  dnsServerUrl?: string;
-} {
-  if (!disc) return { dnsEnabled: true };
-  if (disc.dns === false) return { dnsEnabled: false };
-  if (typeof disc.dns === "object" && disc.dns !== null) {
-    return { dnsEnabled: true, dnsServerUrl: disc.dns.serverUrl };
-  }
-  return { dnsEnabled: true };
-}
-
 export { PublicKey, SecretKey } from "@momics/iroh-http-shared";
 export type { IrohNode, IrohNodeWithSecret, NodeOptions };
 
@@ -478,6 +468,7 @@ export async function createNode(
     options?.relay,
   );
   const discovery = normaliseDiscovery(options?.discovery);
+  const compression = normaliseCompression(options?.compression);
   const disableNetworkingFinal = disableNetworking ||
     (options?.disableNetworking ?? false);
   const bindAddrs = options?.bindAddr
@@ -503,14 +494,8 @@ export async function createNode(
         proxyUrl: options.proxy?.url,
         proxyFromEnv: options.proxy?.fromEnv,
         keylog: options.debug?.keylog,
-        compressionLevel: typeof options.compression === "object"
-          ? options.compression.level
-          : options.compression
-          ? 3
-          : undefined,
-        compressionMinBodyBytes: typeof options.compression === "object"
-          ? options.compression.minBodyBytes
-          : undefined,
+        compressionLevel: compression.level,
+        compressionMinBodyBytes: compression.minBodyBytes,
         maxHeaderBytes: options.limits?.maxHeaderBytes,
       }
       : undefined,

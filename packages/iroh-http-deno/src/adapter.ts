@@ -29,11 +29,14 @@ import type {
   TransportEventPayload,
 } from "@momics/iroh-http-shared/adapter";
 import {
+  bigintToSafeNumber,
   classifyBindError,
   classifyError,
   decodeBase64,
   encodeBase64,
   isEndpointGoneError,
+  normaliseCompression,
+  normaliseDiscovery,
   normaliseRelayMode,
 } from "@momics/iroh-http-shared";
 import { download } from "@denosaurs/plug";
@@ -365,18 +368,11 @@ const METHOD_BUFS: Record<string, Uint8Array> = Object.fromEntries(
 );
 
 // ISS-032 / #252: bigint handles are slotmap u64 keys (32-bit slot + 32-bit
-// version); practical values are well within Number.MAX_SAFE_INTEGER. Convert
-// to a JS number only after asserting the safe range, throwing early rather
-// than silently corrupting resource identity. Shared by the generic `call()`
-// path and the `rawFetch` fast-path so both fail loudly and identically.
-export function bigintToSafeNumber(value: bigint, field = "handle"): number {
-  if (value < 0n || value > BigInt(Number.MAX_SAFE_INTEGER)) {
-    throw new RangeError(
-      `[iroh-http] ${field} value ${value} exceeds safe integer range and cannot be safely serialised`,
-    );
-  }
-  return Number(value);
-}
+// version); practical values are well within Number.MAX_SAFE_INTEGER. The
+// safe-range guard now lives in `@momics/iroh-http-shared`; it is re-exported
+// here under its original name so the generic `call()` path, the `rawFetch`
+// fast-path, and the #252 regression test keep importing it from this module.
+export { bigintToSafeNumber };
 
 /** Reusable buffer hint for estimating output size of `call()` responses. */ async function call<
   T,
@@ -930,21 +926,6 @@ export function _closeAllForTesting(): void {
   _closeAllSync();
 }
 
-/** Normalise the `discovery` option into flat fields for the Rust adapter. */
-function normaliseDiscovery(
-  disc?: import("@momics/iroh-http-shared").NodeOptions["discovery"],
-): {
-  dnsEnabled: boolean;
-  dnsServerUrl?: string;
-} {
-  if (!disc) return { dnsEnabled: true };
-  if (disc.dns === false) return { dnsEnabled: false };
-  if (typeof disc.dns === "object" && disc.dns !== null) {
-    return { dnsEnabled: true, dnsServerUrl: disc.dns.serverUrl };
-  }
-  return { dnsEnabled: true };
-}
-
 export async function createEndpointInfo(
   options?: NodeOptions,
 ): Promise<EndpointInfo> {
@@ -958,6 +939,7 @@ export async function createEndpointInfo(
     options?.relay,
   );
   const discovery = normaliseDiscovery(options?.discovery);
+  const compression = normaliseCompression(options?.compression);
   const bindAddrs = options?.bindAddr
     ? Array.isArray(options.bindAddr) ? options.bindAddr : [options.bindAddr]
     : null;
@@ -982,14 +964,8 @@ export async function createEndpointInfo(
     proxyUrl: options?.proxy?.url ?? null,
     proxyFromEnv: options?.proxy?.fromEnv ?? null,
     keylog: options?.debug?.keylog ?? null,
-    compressionLevel: typeof options?.compression === "object"
-      ? (options.compression.level ?? null)
-      : options?.compression
-      ? 3
-      : null,
-    compressionMinBodyBytes: typeof options?.compression === "object"
-      ? (options.compression.minBodyBytes ?? null)
-      : null,
+    compressionLevel: compression.level ?? null,
+    compressionMinBodyBytes: compression.minBodyBytes ?? null,
     maxHeaderBytes: options?.limits?.maxHeaderBytes ?? null,
   }).catch((e: unknown) => {
     throw classifyBindError(e);

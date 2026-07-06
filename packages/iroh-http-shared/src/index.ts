@@ -60,8 +60,19 @@ export {
   IrohStreamError,
   isEndpointGoneError,
 } from "./errors.js";
-export { decodeBase64, encodeBase64, normaliseRelayMode } from "./utils.js";
-export type { NormalisedRelay } from "./utils.js";
+export {
+  bigintToSafeNumber,
+  decodeBase64,
+  encodeBase64,
+  normaliseCompression,
+  normaliseDiscovery,
+  normaliseRelayMode,
+} from "./utils.js";
+export type {
+  NormalisedCompression,
+  NormalisedDiscovery,
+  NormalisedRelay,
+} from "./utils.js";
 
 export function ticketNodeId(ticket: string): string {
   try {

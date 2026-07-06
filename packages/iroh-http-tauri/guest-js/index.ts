@@ -4,11 +4,14 @@
 
 import { Channel, invoke } from "@tauri-apps/api/core";
 import {
+  bigintToSafeNumber,
   classifyBindError,
   encodeBase64,
   IrohNode,
   type IrohNodeWithSecret,
   type NodeOptions,
+  normaliseCompression,
+  normaliseDiscovery,
   normaliseRelayMode,
   type SecretKey,
 } from "@momics/iroh-http-shared";
@@ -42,21 +45,6 @@ interface TauriRequestPayload {
   remoteNodeId: string;
 }
 
-/**
- * Convert an opaque u64 resource handle (slotmap key: 32-bit slot + 32-bit
- * generation) to a JS number for IPC, rejecting values outside the safe
- * integer range rather than silently rounding and addressing the wrong
- * resource. Mirrors the Deno adapter's `bigintToSafeNumber` guard (#252).
- */
-function u64Handle(value: bigint, field = "handle"): number {
-  if (value < 0n || value > BigInt(Number.MAX_SAFE_INTEGER)) {
-    throw new RangeError(
-      `[iroh-http-tauri] ${field} value ${value} exceeds safe integer range and cannot be safely serialised`,
-    );
-  }
-  return Number(value);
-}
-
 // ── TauriAdapter ──────────────────────────────────────────────────────────────
 
 class TauriAdapter extends IrohAdapter {
@@ -72,7 +60,7 @@ class TauriAdapter extends IrohAdapter {
   nextChunk(handle: bigint): Promise<Uint8Array | null> {
     // Sync fast path: if data is already buffered, skip async IPC overhead.
     // Protocol: first byte is 0x01 (data follows) or 0x00 (EOF).
-    const safeHandle = u64Handle(handle);
+    const safeHandle = bigintToSafeNumber(handle);
     return invoke<ArrayBuffer>(`${PLUGIN}|try_next_chunk`, {
       endpointHandle: this.#epHandle,
       handle: safeHandle,
@@ -97,7 +85,7 @@ class TauriAdapter extends IrohAdapter {
     return invoke(`${PLUGIN}|send_chunk`, chunk, {
       headers: {
         "iroh-ep": String(this.#epHandle),
-        "iroh-handle": String(u64Handle(handle)),
+        "iroh-handle": String(bigintToSafeNumber(handle)),
       },
     });
   }
@@ -105,14 +93,14 @@ class TauriAdapter extends IrohAdapter {
   finishBody(handle: bigint): Promise<void> {
     return invoke(`${PLUGIN}|finish_body`, {
       endpointHandle: this.#epHandle,
-      handle: u64Handle(handle),
+      handle: bigintToSafeNumber(handle),
     });
   }
 
   cancelRequest(handle: bigint): Promise<void> {
     return invoke(`${PLUGIN}|cancel_request`, {
       endpointHandle: this.#epHandle,
-      handle: u64Handle(handle),
+      handle: bigintToSafeNumber(handle),
     });
   }
 
@@ -124,7 +112,7 @@ class TauriAdapter extends IrohAdapter {
   cancelFetch(token: bigint): void {
     void invoke(`${PLUGIN}|cancel_in_flight`, {
       endpointHandle: this.#epHandle,
-      token: u64Handle(token, "token"),
+      token: bigintToSafeNumber(token, "token"),
     });
   }
 
@@ -158,10 +146,10 @@ class TauriAdapter extends IrohAdapter {
         method,
         headers,
         reqBodyHandle: reqBodyHandle != null
-          ? u64Handle(reqBodyHandle, "reqBodyHandle")
+          ? bigintToSafeNumber(reqBodyHandle, "reqBodyHandle")
           : null,
         fetchToken: fetchToken != null
-          ? u64Handle(fetchToken, "fetchToken")
+          ? bigintToSafeNumber(fetchToken, "fetchToken")
           : null,
         directAddrs: directAddrs ?? null,
         timeoutMs: fetchOptions?.timeoutMs ?? null,
@@ -220,7 +208,7 @@ class TauriAdapter extends IrohAdapter {
           await invoke(`${PLUGIN}|respond_to_request`, {
             args: {
               endpointHandle: Number(endpointHandle),
-              reqHandle: u64Handle(payload.reqHandle, "reqHandle"),
+              reqHandle: bigintToSafeNumber(payload.reqHandle, "reqHandle"),
               status: head.status,
               headers: head.headers,
             },
@@ -230,7 +218,7 @@ class TauriAdapter extends IrohAdapter {
           await invoke(`${PLUGIN}|respond_to_request`, {
             args: {
               endpointHandle: Number(endpointHandle),
-              reqHandle: u64Handle(BigInt(raw.reqHandle), "reqHandle"),
+              reqHandle: bigintToSafeNumber(BigInt(raw.reqHandle), "reqHandle"),
               status: 500,
               headers: [],
             },
@@ -525,18 +513,6 @@ function installLifecycleListener(
   return () => document.removeEventListener("visibilitychange", handler);
 }
 
-function normaliseDiscovery(disc?: NodeOptions["discovery"]): {
-  dnsEnabled: boolean;
-  dnsServerUrl?: string;
-} {
-  if (!disc) return { dnsEnabled: true };
-  if (disc.dns === false) return { dnsEnabled: false };
-  if (typeof disc.dns === "object" && disc.dns !== null) {
-    return { dnsEnabled: true, dnsServerUrl: disc.dns.serverUrl };
-  }
-  return { dnsEnabled: true };
-}
-
 // ── Public API ────────────────────────────────────────────────────────────────
 
 /**
@@ -597,6 +573,7 @@ export async function createNode(options?: NodeOptions): Promise<IrohNode> {
     options?.relay,
   );
   const discovery = normaliseDiscovery(options?.discovery);
+  const compression = normaliseCompression(options?.compression);
   const bindAddrs = options?.bindAddr
     ? (Array.isArray(options.bindAddr) ? options.bindAddr : [options.bindAddr])
     : null;
@@ -623,14 +600,8 @@ export async function createNode(options?: NodeOptions): Promise<IrohNode> {
         proxyUrl: options.proxy?.url ?? null,
         proxyFromEnv: options.proxy?.fromEnv ?? null,
         keylog: options.debug?.keylog ?? null,
-        compressionLevel: typeof options.compression === "object"
-          ? options.compression.level ?? null
-          : options.compression
-          ? 3
-          : null,
-        compressionMinBodyBytes: typeof options.compression === "object"
-          ? options.compression.minBodyBytes ?? null
-          : null,
+        compressionLevel: compression.level ?? null,
+        compressionMinBodyBytes: compression.minBodyBytes ?? null,
         maxHeaderBytes: options.limits?.maxHeaderBytes ?? null,
       }
       : null,
