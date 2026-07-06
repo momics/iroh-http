@@ -66,7 +66,8 @@ use tokio::sync::Mutex as TokioMutex;
 use iroh_http_adapter::{
     core_error_to_json, format_error_json, safe_f64_to_u64 as adapter_safe_f64_to_u64,
     safe_f64_to_usize as adapter_safe_f64_to_usize, send_undeliverable_rejection,
-    validate_header_rows, AdapterInputError, MAX_BODY_BYTES as ADAPTER_MAX_BODY_BYTES,
+    validate_direct_addrs, validate_header_rows, validate_method, validate_node_id, validate_url,
+    AdapterInputError, MAX_BODY_BYTES as ADAPTER_MAX_BODY_BYTES,
     MAX_TIMEOUT_MS as ADAPTER_MAX_TIMEOUT_MS,
 };
 
@@ -86,11 +87,7 @@ fn path_change_rxs() -> &'static PathRxMap {
 
 // ── Endpoint helpers ──────────────────────────────────────────────────────────
 
-const MAX_NODE_ID_LEN: usize = 128;
 const MAX_URL_LEN: usize = 8_192;
-const MAX_METHOD_LEN: usize = 32;
-const MAX_DIRECT_ADDRS: usize = 32;
-const MAX_DIRECT_ADDR_LEN: usize = 256;
 #[cfg(feature = "discovery")]
 const MAX_MDNS_SERVICE_NAME_LEN: usize = 128;
 const MAX_TIMEOUT_MS: u64 = 300_000;
@@ -100,10 +97,6 @@ const MAX_TOTAL_CONNECTIONS: usize = 100_000;
 
 #[derive(Debug)]
 enum FfiError {
-    /// Node/public-key input failed coarse boundary validation.
-    InvalidNodeId,
-    /// URL input failed coarse boundary validation.
-    InvalidUrl,
     /// Caller-provided input exceeds a hard boundary limit.
     InputTooLarge {
         field: &'static str,
@@ -122,8 +115,6 @@ enum FfiError {
 impl FfiError {
     fn code(&self) -> &'static str {
         match self {
-            FfiError::InvalidNodeId => "INVALID_NODE_ID",
-            FfiError::InvalidUrl => "INVALID_URL",
             FfiError::InputTooLarge { .. } => "INPUT_TOO_LARGE",
             FfiError::InvalidEncoding { .. } => "INVALID_ENCODING",
             FfiError::InvalidArgument { .. } => "INVALID_ARGUMENT",
@@ -134,8 +125,6 @@ impl FfiError {
 
     fn message(&self) -> String {
         match self {
-            FfiError::InvalidNodeId => "invalid node id".to_string(),
-            FfiError::InvalidUrl => "invalid url".to_string(),
             FfiError::InputTooLarge { field, max, got } => {
                 format!("{field} exceeds max size {max} (got {got})")
             }
@@ -188,53 +177,6 @@ fn validate_bounded_string(
     }
     if value.as_bytes().contains(&0) {
         return Err(FfiError::InvalidEncoding { field });
-    }
-    Ok(())
-}
-
-fn validate_node_id_input(node_id: &str) -> std::result::Result<(), FfiError> {
-    validate_bounded_string("nodeId", node_id, MAX_NODE_ID_LEN)?;
-    if node_id.trim_start().starts_with('{') {
-        // JSON ticket / NodeAddrInfo payload is parsed by core; we only enforce
-        // boundary-level size and encoding constraints here.
-        return Ok(());
-    }
-    let valid = node_id
-        .bytes()
-        .all(|b| matches!(b, b'a'..=b'z' | b'2'..=b'7'));
-    if !valid {
-        return Err(FfiError::InvalidNodeId);
-    }
-    Ok(())
-}
-
-fn validate_url_input(url: &str) -> std::result::Result<(), FfiError> {
-    validate_bounded_string("url", url, MAX_URL_LEN).map_err(|e| match e {
-        FfiError::InvalidArgument { .. }
-        | FfiError::InputTooLarge { .. }
-        | FfiError::InvalidEncoding { .. } => e,
-        _ => FfiError::InvalidUrl,
-    })
-}
-
-fn validate_method_input(method: &str) -> std::result::Result<(), FfiError> {
-    validate_bounded_string("method", method, MAX_METHOD_LEN)
-}
-
-fn validate_direct_addrs_input(
-    direct_addrs: &Option<Vec<String>>,
-) -> std::result::Result<(), FfiError> {
-    if let Some(addrs) = direct_addrs {
-        if addrs.len() > MAX_DIRECT_ADDRS {
-            return Err(FfiError::InputTooLarge {
-                field: "directAddrs",
-                max: MAX_DIRECT_ADDRS,
-                got: addrs.len(),
-            });
-        }
-        for addr in addrs {
-            validate_bounded_string("directAddr", addr, MAX_DIRECT_ADDR_LEN)?;
-        }
     }
     Ok(())
 }
@@ -880,7 +822,7 @@ pub async fn next_path_change(
 ) -> napi::Result<Option<String>> {
     let rxs = path_change_rxs();
 
-    validate_node_id_input(&node_id).map_err(ffi_invalid_arg)?;
+    validate_node_id(&node_id).map_err(ffi_adapter_invalid_arg)?;
     let ep = get_endpoint(endpoint_handle)?;
 
     let key = (endpoint_handle, node_id.clone());
@@ -917,7 +859,7 @@ pub async fn next_path_change(
 /// Unsubscribe from path changes for a specific peer.
 #[napi]
 pub fn unsubscribe_path_changes(endpoint_handle: u32, node_id: String) -> napi::Result<()> {
-    validate_node_id_input(&node_id).map_err(ffi_invalid_arg)?;
+    validate_node_id(&node_id).map_err(ffi_adapter_invalid_arg)?;
     let ep = get_endpoint(endpoint_handle)?;
     if let Some((_, sub)) = path_change_rxs().remove(&(endpoint_handle, node_id.clone())) {
         sub.notify.notify_waiters();
@@ -1071,10 +1013,10 @@ pub async fn raw_fetch(
     max_response_body_bytes: Option<f64>,
 ) -> napi::Result<JsFfiResponse> {
     let ep = get_endpoint(endpoint_handle)?;
-    validate_node_id_input(&node_id).map_err(ffi_invalid_arg)?;
-    validate_url_input(&url).map_err(ffi_invalid_arg)?;
-    validate_method_input(&method).map_err(ffi_invalid_arg)?;
-    validate_direct_addrs_input(&direct_addrs).map_err(ffi_invalid_arg)?;
+    validate_node_id(&node_id).map_err(ffi_adapter_invalid_arg)?;
+    validate_url(&url).map_err(ffi_adapter_invalid_arg)?;
+    validate_method(&method).map_err(ffi_adapter_invalid_arg)?;
+    validate_direct_addrs(&direct_addrs).map_err(ffi_adapter_invalid_arg)?;
 
     let pairs = validate_header_rows(headers).map_err(ffi_adapter_invalid_arg)?;
 
@@ -1348,8 +1290,8 @@ pub async fn session_connect(
     direct_addrs: Option<Vec<String>>,
 ) -> napi::Result<u64> {
     let ep = get_endpoint(endpoint_handle)?;
-    validate_node_id_input(&node_id).map_err(ffi_invalid_arg)?;
-    validate_direct_addrs_input(&direct_addrs).map_err(ffi_invalid_arg)?;
+    validate_node_id(&node_id).map_err(ffi_adapter_invalid_arg)?;
+    validate_direct_addrs(&direct_addrs).map_err(ffi_adapter_invalid_arg)?;
     let addrs =
         parse_direct_addrs(&direct_addrs).map_err(|e| napi::Error::new(Status::InvalidArg, e))?;
     let session = iroh_http_core::Session::connect(ep, &node_id, addrs.as_deref())
@@ -1609,22 +1551,22 @@ mod tests {
 
     #[test]
     fn validate_node_id_accepts_base32ish_input() {
-        let result = validate_node_id_input("abcdefghijklmnopqrstuvwxyz234567");
+        let result = validate_node_id("abcdefghijklmnopqrstuvwxyz234567");
         assert!(result.is_ok());
     }
 
     #[test]
     fn validate_node_id_rejects_invalid_chars() {
-        let result = validate_node_id_input("bad-node-id!");
-        assert!(matches!(result, Err(FfiError::InvalidNodeId)));
+        let result = validate_node_id("bad-node-id!");
+        assert!(matches!(result, Err(AdapterInputError::InvalidNodeId)));
     }
 
     #[test]
     fn validate_url_rejects_null_byte() {
-        let result = validate_url_input("httpi://peer/\x00x");
+        let result = validate_url("httpi://peer/\x00x");
         assert!(matches!(
             result,
-            Err(FfiError::InvalidEncoding { field: "url" })
+            Err(AdapterInputError::InvalidEncoding { field: "url" })
         ));
     }
 

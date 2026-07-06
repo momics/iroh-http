@@ -70,8 +70,8 @@ fn insert_endpoint(ep: IrohEndpoint) -> u64 {
 
 use iroh_http_adapter::{
     core_error_to_json, format_error_json, safe_f64_to_u64, safe_f64_to_usize,
-    send_undeliverable_rejection, validate_header_rows, AdapterInputError, MAX_BODY_BYTES,
-    MAX_TIMEOUT_MS,
+    send_undeliverable_rejection, validate_direct_addrs, validate_header_rows, validate_method,
+    validate_node_id, validate_url, AdapterInputError, MAX_BODY_BYTES, MAX_TIMEOUT_MS,
 };
 
 // ── Helper ────────────────────────────────────────────────────────────────────
@@ -653,6 +653,18 @@ async fn raw_fetch_impl(args: RawFetchPayload) -> Value {
         Ok(pairs) => pairs,
         Err(e) => return err_adapter(e),
     };
+    if let Err(e) = validate_node_id(&args.node_id) {
+        return err_adapter(e);
+    }
+    if let Err(e) = validate_url(&args.url) {
+        return err_adapter(e);
+    }
+    if let Err(e) = validate_method(&args.method) {
+        return err_adapter(e);
+    }
+    if let Err(e) = validate_direct_addrs(&args.direct_addrs) {
+        return err_adapter(e);
+    }
     let reader = args
         .req_body_handle
         .and_then(|h| ep.handles().claim_pending_reader(h));

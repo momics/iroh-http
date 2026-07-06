@@ -20,6 +20,16 @@ pub const MAX_HEADER_VALUE_LEN: usize = 8_192;
 pub const MAX_TIMEOUT_MS: u64 = 300_000;
 /// Maximum adapter-level body cap in bytes.
 pub const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
+/// Maximum node-id / ticket string length in bytes accepted at an adapter boundary.
+pub const MAX_NODE_ID_LEN: usize = 128;
+/// Maximum request URL length in bytes accepted at an adapter boundary.
+pub const MAX_URL_LEN: usize = 8_192;
+/// Maximum HTTP method length in bytes accepted at an adapter boundary.
+pub const MAX_METHOD_LEN: usize = 32;
+/// Maximum number of direct addresses accepted at an adapter boundary.
+pub const MAX_DIRECT_ADDRS: usize = 32;
+/// Maximum length of a single direct address string in bytes.
+pub const MAX_DIRECT_ADDR_LEN: usize = 256;
 
 const UNDELIVERABLE_STATUS: u16 = 503;
 const UNDELIVERABLE_HEADERS: [(&str, &str); 1] = [("content-length", "0")];
@@ -51,6 +61,10 @@ pub fn send_undeliverable_rejection(
 /// Adapter-boundary input validation error.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AdapterInputError {
+    /// Node/public-key input failed coarse boundary validation.
+    InvalidNodeId,
+    /// URL input failed coarse boundary validation.
+    InvalidUrl,
     /// Caller-provided input exceeds a hard boundary limit.
     InputTooLarge {
         field: &'static str,
@@ -67,6 +81,8 @@ impl AdapterInputError {
     /// Stable JSON error code used by JS/TS adapters.
     pub fn code(&self) -> &'static str {
         match self {
+            AdapterInputError::InvalidNodeId => "INVALID_NODE_ID",
+            AdapterInputError::InvalidUrl => "INVALID_URL",
             AdapterInputError::InputTooLarge { .. } => "INPUT_TOO_LARGE",
             AdapterInputError::InvalidEncoding { .. } => "INVALID_ENCODING",
             AdapterInputError::InvalidArgument { .. } => "INVALID_ARGUMENT",
@@ -76,6 +92,8 @@ impl AdapterInputError {
     /// Human-readable validation message.
     pub fn message(&self) -> String {
         match self {
+            AdapterInputError::InvalidNodeId => "invalid node id".to_string(),
+            AdapterInputError::InvalidUrl => "invalid url".to_string(),
             AdapterInputError::InputTooLarge { field, max, got } => {
                 format!("{field} exceeds max size {max} (got {got})")
             }
@@ -120,6 +138,53 @@ pub fn validate_header_rows(
         pairs.push((name.clone(), value.clone()));
     }
     Ok(pairs)
+}
+
+/// Validate a caller-supplied node id (base32 public key or JSON ticket).
+///
+/// A payload that begins with `{` (after leading whitespace) is treated as a
+/// JSON ticket / `NodeAddrInfo` blob and parsed by core; only boundary-level
+/// size and encoding constraints are enforced here.  Otherwise the string must
+/// be lowercase base32 (`a-z`, `2-7`).
+pub fn validate_node_id(node_id: &str) -> Result<(), AdapterInputError> {
+    validate_bounded_string("nodeId", node_id, MAX_NODE_ID_LEN)?;
+    if node_id.trim_start().starts_with('{') {
+        return Ok(());
+    }
+    let valid = node_id
+        .bytes()
+        .all(|b| matches!(b, b'a'..=b'z' | b'2'..=b'7'));
+    if !valid {
+        return Err(AdapterInputError::InvalidNodeId);
+    }
+    Ok(())
+}
+
+/// Validate a caller-supplied request URL against boundary size/encoding limits.
+pub fn validate_url(url: &str) -> Result<(), AdapterInputError> {
+    validate_bounded_string("url", url, MAX_URL_LEN)
+}
+
+/// Validate a caller-supplied HTTP method against boundary size/encoding limits.
+pub fn validate_method(method: &str) -> Result<(), AdapterInputError> {
+    validate_bounded_string("method", method, MAX_METHOD_LEN)
+}
+
+/// Validate the optional list of caller-supplied direct addresses.
+pub fn validate_direct_addrs(direct_addrs: &Option<Vec<String>>) -> Result<(), AdapterInputError> {
+    if let Some(addrs) = direct_addrs {
+        if addrs.len() > MAX_DIRECT_ADDRS {
+            return Err(AdapterInputError::InputTooLarge {
+                field: "directAddrs",
+                max: MAX_DIRECT_ADDRS,
+                got: addrs.len(),
+            });
+        }
+        for addr in addrs {
+            validate_bounded_string("directAddr", addr, MAX_DIRECT_ADDR_LEN)?;
+        }
+    }
+    Ok(())
 }
 
 /// Validate and convert an f64 option to a non-negative u64.
@@ -386,5 +451,88 @@ mod tests {
                 })
             ));
         }
+    }
+
+    #[test]
+    fn validate_node_id_accepts_base32_and_ticket() {
+        assert_eq!(validate_node_id("abcdefghijklmnopqrstuvwxyz234567"), Ok(()));
+        // JSON ticket / NodeAddrInfo blob bypasses the base32 charset check.
+        assert_eq!(validate_node_id("  {\"nodeId\":\"x\"}"), Ok(()));
+    }
+
+    #[test]
+    fn validate_node_id_rejects_bad_charset_and_bounds() {
+        assert_eq!(
+            validate_node_id("bad-node-id!"),
+            Err(AdapterInputError::InvalidNodeId)
+        );
+        assert!(matches!(
+            validate_node_id(""),
+            Err(AdapterInputError::InvalidArgument {
+                field: "nodeId",
+                ..
+            })
+        ));
+        let long = "a".repeat(MAX_NODE_ID_LEN + 1);
+        assert!(matches!(
+            validate_node_id(&long),
+            Err(AdapterInputError::InputTooLarge {
+                field: "nodeId",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn validate_url_enforces_bounds_and_encoding() {
+        assert_eq!(validate_url("httpi://peer/path"), Ok(()));
+        assert!(matches!(
+            validate_url("httpi://peer/\0x"),
+            Err(AdapterInputError::InvalidEncoding { field: "url" })
+        ));
+        let long = "u".repeat(MAX_URL_LEN + 1);
+        assert!(matches!(
+            validate_url(&long),
+            Err(AdapterInputError::InputTooLarge { field: "url", .. })
+        ));
+    }
+
+    #[test]
+    fn validate_method_enforces_bounds() {
+        assert_eq!(validate_method("POST"), Ok(()));
+        let long = "M".repeat(MAX_METHOD_LEN + 1);
+        assert!(matches!(
+            validate_method(&long),
+            Err(AdapterInputError::InputTooLarge {
+                field: "method",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn validate_direct_addrs_enforces_count_and_element_bounds() {
+        assert_eq!(validate_direct_addrs(&None), Ok(()));
+        assert_eq!(
+            validate_direct_addrs(&Some(vec!["127.0.0.1:1234".to_string()])),
+            Ok(())
+        );
+        let too_many = vec!["1.2.3.4:5".to_string(); MAX_DIRECT_ADDRS + 1];
+        assert!(matches!(
+            validate_direct_addrs(&Some(too_many)),
+            Err(AdapterInputError::InputTooLarge {
+                field: "directAddrs",
+                max: MAX_DIRECT_ADDRS,
+                ..
+            })
+        ));
+        let long = "a".repeat(MAX_DIRECT_ADDR_LEN + 1);
+        assert!(matches!(
+            validate_direct_addrs(&Some(vec![long])),
+            Err(AdapterInputError::InputTooLarge {
+                field: "directAddr",
+                ..
+            })
+        ));
     }
 }

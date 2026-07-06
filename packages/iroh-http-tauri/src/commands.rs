@@ -15,7 +15,8 @@ use crate::state;
 
 use iroh_http_adapter::{
     core_error_to_json, format_error_json, safe_f64_to_u64, safe_f64_to_usize,
-    send_undeliverable_rejection, validate_header_rows, MAX_BODY_BYTES, MAX_TIMEOUT_MS,
+    send_undeliverable_rejection, validate_direct_addrs, validate_header_rows, validate_method,
+    validate_node_id, validate_url, MAX_BODY_BYTES, MAX_TIMEOUT_MS,
 };
 
 // ── Endpoint ──────────────────────────────────────────────────────────────────
@@ -497,6 +498,10 @@ pub async fn fetch(args: RawFetchArgs) -> Result<FfiResponsePayload, String> {
     })?;
 
     let pairs = validate_header_rows(args.headers).map_err(|e| e.to_json())?;
+    validate_node_id(&args.node_id).map_err(|e| e.to_json())?;
+    validate_url(&args.url).map_err(|e| e.to_json())?;
+    validate_method(&args.method).map_err(|e| e.to_json())?;
+    validate_direct_addrs(&args.direct_addrs).map_err(|e| e.to_json())?;
 
     let req_body_reader = args
         .req_body_handle

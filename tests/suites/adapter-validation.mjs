@@ -81,6 +81,38 @@ export function adapterValidationTests({
     }
   });
 
+  test("adapter validation rejects invalid fetch inputs", async () => {
+    const node = await createNode({ disableNetworking: true });
+    try {
+      const { id } = await node.addr();
+      const validUrl = `httpi://${id}/validation`;
+      // Invalid node id: digit "0" is outside the base32 alphabet (a-z, 2-7).
+      await assertThrows(async () => {
+        await node.fetch("httpi://peer0/validation");
+      }, "invalid node id");
+      // Over-long method (max 32 bytes).
+      await assertThrows(async () => {
+        await node.fetch(validUrl, { method: "M".repeat(33) });
+      }, "over-long method");
+      // Too many direct addresses (max 32).
+      await assertThrows(async () => {
+        await node.fetch(validUrl, {
+          directAddrs: Array.from({ length: 33 }, () => "127.0.0.1:1"),
+        });
+      }, "too many direct addrs");
+      // Over-long direct address (max 256 bytes).
+      await assertThrows(async () => {
+        await node.fetch(validUrl, { directAddrs: ["1".repeat(257)] });
+      }, "over-long direct addr");
+      // Over-long URL (max 8192 bytes).
+      await assertThrows(async () => {
+        await node.fetch(`httpi://${id}/${"p".repeat(8300)}`);
+      }, "over-long url");
+    } finally {
+      await node.close();
+    }
+  });
+
   test("adapter validation accepts valid fetch headers and numeric knobs", async () => {
     const node = await createNode({ disableNetworking: true });
     let handle;
