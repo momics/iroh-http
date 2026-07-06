@@ -1,0 +1,102 @@
+name: Coverage
+
+# Non-blocking code coverage for the Rust workspace (primarily iroh-http-core),
+# measured with cargo-llvm-cov. Phase 1: this is a baseline report only — it is a
+# standalone workflow (not part of the required `CI` checks) and every coverage
+# step is `continue-on-error: true`, so it can never fail a pull request or block
+# a merge. The report is printed to the job summary and uploaded as a workflow
+# artifact (lcov + text summary). No third-party upload integrations or secrets.
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - 'docs/**'
+      - '**.md'
+      - '.github/ISSUE_TEMPLATE/**'
+      - '.github/skills/**'
+      - '.vscode/**'
+      - 'CHANGELOG.md'
+      - 'CONTRIBUTING.md'
+      - 'SECURITY.md'
+      - 'LICENSE*'
+  pull_request:
+    branches: [main]
+    paths-ignore:
+      - 'docs/**'
+      - '**.md'
+      - '.github/ISSUE_TEMPLATE/**'
+      - '.github/skills/**'
+      - '.vscode/**'
+      - 'CHANGELOG.md'
+      - 'CONTRIBUTING.md'
+      - 'SECURITY.md'
+      - 'LICENSE*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: coverage-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  # ── Baseline Rust coverage — non-blocking (never a required check) ────────────
+  coverage:
+    name: Rust coverage (llvm-cov)
+    runs-on: ubuntu-latest
+    # Belt-and-braces: even if a coverage step errors, the job is reported as a
+    # success so it never gates a PR while we establish a baseline in phase 1.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+
+      - name: cargo llvm-cov (lcov + summary)
+        continue-on-error: true
+        run: |
+          # Generate an lcov report for external tooling and a human-readable
+          # summary for the job log. Scoped to the workspace crates
+          # (iroh-http-core, iroh-http-discovery, …); the Tauri crate keeps its
+          # own out-of-workspace Cargo.lock and is not included here.
+          cargo llvm-cov --workspace --lcov --output-path lcov.info
+          cargo llvm-cov --workspace --summary-only | tee coverage-summary.txt
+
+      - name: Publish coverage summary to job summary
+        if: always()
+        continue-on-error: true
+        run: |
+          {
+            echo '## Rust coverage (cargo-llvm-cov)'
+            echo ''
+            echo 'Non-blocking baseline report — see the `coverage-report` artifact for the full lcov data.'
+            echo ''
+            echo '```'
+            cat coverage-summary.txt 2>/dev/null || echo 'No coverage summary was produced.'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload coverage report
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-report
+          path: |
+            lcov.info
+            coverage-summary.txt
+          retention-days: 30
+          if-no-files-found: warn
