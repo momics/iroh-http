@@ -115,6 +115,16 @@ Core's `serve()` accepts an `on_request: Arc<dyn Fn(RequestPayload) + Send + Syn
 
 Each adapter is responsible for surfacing errors from its callback mechanism. The core does not observe whether the callback succeeded.
 
+#### Request-delivery seam (`RequestTransport`)
+
+The shared part of each adapter's `on_request` closure lives once in `iroh-http-adapter` behind the `RequestTransport` seam (ADR-009, #315). Core already acquires the request-body reader / response-body writer, measures header bytes, and fires `on_request` with a `RequestPayload`; the only parts that were duplicated across the three bridges — the header reshape into `Vec<Vec<String>>` and the fail-closed undeliverable fallback — are owned by the adapter:
+
+- `DeliverableRequest::from_payload` performs the single header reshape.
+- `RequestTransport::deliver(&DeliverableRequest) -> Result<(), Undeliverable>` is the **only** per-adapter surface. Each bridge maps its native send failure (Node `ThreadsafeFunction` enqueue status; Deno registry-miss / shutdown / queue-full; Tauri `Channel::send`) to `Undeliverable`. It is a generic bound (`T`, monomorphised), not `dyn`, so `#![deny(unsafe_code)]` stays clean.
+- `deliver_request<T>(handles, transport, payload)` reshapes once, delivers, and on `Err` emits the 503 rejection **and** finishes the response body writer exactly once. Finishing the writer is required: core builds the response body from a reader that yields until the writer is finished/dropped, so an undeliverable request that only sent the rejection head would hang until the drain timeout.
+
+Each bridge's `on_request` closure therefore collapses to a single `deliver_request(...)` call. The seam covers **unary** request delivery only; bidirectional streaming uses the separate session-stream API (`Session::create_bidi_stream` / `next_bidi_stream`).
+
 ### iroh-http-shared (TypeScript)
 
 Shared TypeScript layer consumed by all JS/TS adapters:

@@ -65,8 +65,9 @@ use tokio::sync::Mutex as TokioMutex;
 
 use iroh_http_adapter::{
     coerce_endpoint_options, coerce_fetch_options, coerce_serve_options, core_error_to_json,
-    format_error_json, send_undeliverable_rejection, validate_direct_addrs, validate_header_rows,
-    validate_node_id, AdapterInputError, RawEndpointOptions, RawFetchOptions, RawServeOptions,
+    deliver_request, format_error_json, validate_direct_addrs, validate_header_rows,
+    validate_node_id, AdapterInputError, DeliverableRequest, RawEndpointOptions, RawFetchOptions,
+    RawServeOptions, RequestTransport, Undeliverable,
 };
 
 struct PathSub {
@@ -711,6 +712,50 @@ pub struct JsConnectionEvent {
     pub connected: bool,
 }
 
+/// Node request transport: enqueues each request onto the JS thread via a
+/// `ThreadsafeFunction`. A non-`Ok` enqueue status means the JS handler will
+/// never see the request, which [`deliver_request`] turns into a fail-closed
+/// 503 (and finishes the response body so the client doesn't hang — ISS-019 /
+/// #315).
+struct NodeTransport {
+    tsfn: Arc<ThreadsafeFunction<JsCallArgs, (), JsCallArgs, Status, false>>,
+}
+
+impl RequestTransport for NodeTransport {
+    fn deliver(&self, req: &DeliverableRequest) -> std::result::Result<(), Undeliverable> {
+        let js_args = JsCallArgs {
+            req_handle: BigInt {
+                sign_bit: false,
+                words: vec![req.req_handle],
+            },
+            req_body_handle: BigInt {
+                sign_bit: false,
+                words: vec![req.req_body_handle],
+            },
+            res_body_handle: BigInt {
+                sign_bit: false,
+                words: vec![req.res_body_handle],
+            },
+            is_bidi: req.is_bidi,
+            method: req.method.clone(),
+            url: req.url.clone(),
+            remote_node_id: req.remote_node_id.clone(),
+            headers: req.headers.clone(),
+        };
+        let status = self
+            .tsfn
+            .call(js_args, ThreadsafeFunctionCallMode::NonBlocking);
+        if status == napi::Status::Ok {
+            Ok(())
+        } else {
+            tracing::warn!("iroh-http-node: TSFN enqueue failed ({status:?}), responding 503");
+            Err(Undeliverable::new(format!(
+                "node TSFN enqueue failed: {status:?}"
+            )))
+        }
+    }
+}
+
 /// Register a push callback for transport-level events.
 ///
 /// Spawns a Tokio task that drains the endpoint's event channel and calls
@@ -1112,47 +1157,12 @@ pub async fn raw_serve(
         });
 
     let ep_clone = ep.clone();
+    let transport = NodeTransport { tsfn };
     let handle = iroh_http_core::ffi_serve_with_callback(
         ep.clone(),
         serve_opts,
         move |payload: RequestPayload| {
-            let tsfn = Arc::clone(&tsfn);
-            let ep_ref = ep_clone.clone();
-            let req_handle = payload.req_handle;
-            let js_args = JsCallArgs {
-                req_handle: BigInt {
-                    sign_bit: false,
-                    words: vec![payload.req_handle],
-                },
-                req_body_handle: BigInt {
-                    sign_bit: false,
-                    words: vec![payload.req_body_handle],
-                },
-                res_body_handle: BigInt {
-                    sign_bit: false,
-                    words: vec![payload.res_body_handle],
-                },
-                is_bidi: payload.is_bidi,
-                method: payload.method,
-                url: payload.url,
-                remote_node_id: payload.remote_node_id,
-                headers: payload
-                    .headers
-                    .into_iter()
-                    .map(|(k, v)| vec![k, v])
-                    .collect(),
-            };
-            // ISS-019: check TSFN enqueue status; on failure respond with 503
-            // immediately so the request doesn't stall until timeout.
-            let status = tsfn.call(js_args, ThreadsafeFunctionCallMode::NonBlocking);
-            if status != napi::Status::Ok {
-                tracing::warn!("iroh-http-node: TSFN enqueue failed ({status:?}), responding 503");
-                let _ = send_undeliverable_rejection(
-                    ep_ref.handles(),
-                    req_handle,
-                    format_args!("node TSFN enqueue failed: {status:?}"),
-                );
-            }
+            deliver_request(ep_clone.handles(), &transport, payload);
         },
         conn_event_fn,
     );
