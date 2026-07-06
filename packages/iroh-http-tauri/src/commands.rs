@@ -1406,3 +1406,109 @@ pub async fn start_transport_events(
     });
     Ok(())
 }
+
+// ── Path-change subscriptions ─────────────────────────────────────────────────
+
+/// One live path-change subscription for a `(endpoint, peer)` pair.
+///
+/// Mirrors the `PathSub` used by the Node (`src/lib.rs`) and Deno
+/// (`src/dispatch.rs`) adapters: it wraps the core watcher's receiver and a
+/// `Notify` used to wake a blocked `next_path_change` when the frontend
+/// unsubscribes.
+struct PathSub {
+    rx: tokio::sync::Mutex<
+        tokio::sync::mpsc::UnboundedReceiver<iroh_http_core::endpoint::PathInfo>,
+    >,
+    notify: tokio::sync::Notify,
+}
+
+type PathRxMap =
+    std::sync::Mutex<std::collections::HashMap<(u64, String), std::sync::Arc<PathSub>>>;
+
+fn path_change_rxs() -> &'static PathRxMap {
+    static PATH_CHANGE_RXS: std::sync::OnceLock<PathRxMap> = std::sync::OnceLock::new();
+    PATH_CHANGE_RXS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Subscribe to path changes for a specific peer and return the next change.
+///
+/// Returns the next `PathInfo` as soon as the peer's active path changes, or
+/// `null` when the subscription ends (endpoint closed or `unsubscribe`).
+/// Call repeatedly to receive successive changes; the endpoint de-duplicates
+/// watcher tasks so concurrent calls for the same peer share one Rust task.
+/// Mirrors `next_path_change` in the Node and Deno adapters, wiring to
+/// `IrohEndpoint::subscribe_path_changes` in `iroh-http-core`.
+#[command]
+pub async fn next_path_change(
+    endpoint_handle: u64,
+    node_id: String,
+) -> Result<Option<iroh_http_core::endpoint::PathInfo>, String> {
+    let ep = state::get_endpoint(endpoint_handle).ok_or_else(|| {
+        format_error_json(
+            "INVALID_HANDLE",
+            format!("invalid endpoint handle: {endpoint_handle}"),
+        )
+    })?;
+
+    let key = (endpoint_handle, node_id.clone());
+    let rx_arc = {
+        let mut map = path_change_rxs()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        map.entry(key.clone())
+            .or_insert_with(|| {
+                let rx = ep.subscribe_path_changes(&node_id);
+                std::sync::Arc::new(PathSub {
+                    rx: tokio::sync::Mutex::new(rx),
+                    notify: tokio::sync::Notify::new(),
+                })
+            })
+            .clone()
+    };
+
+    let mut rx = rx_arc.rx.lock().await;
+    let result = tokio::select! {
+        path = rx.recv() => path,
+        () = rx_arc.notify.notified() => None,
+    };
+    match result {
+        None => {
+            drop(rx);
+            let mut map = path_change_rxs()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if map
+                .get(&key)
+                .is_some_and(|existing| std::sync::Arc::ptr_eq(existing, &rx_arc))
+            {
+                map.remove(&key);
+            }
+            Ok(None)
+        }
+        Some(path) => Ok(Some(path)),
+    }
+}
+
+/// Stop an active path-change subscription for a specific peer.
+///
+/// Wakes any blocked `next_path_change` call for the peer and tears down the
+/// core watcher. Mirrors `unsubscribe_path_changes` in the Node and Deno
+/// adapters.
+#[command]
+pub fn unsubscribe_path_changes(endpoint_handle: u64, node_id: String) -> Result<(), String> {
+    let ep = state::get_endpoint(endpoint_handle).ok_or_else(|| {
+        format_error_json(
+            "INVALID_HANDLE",
+            format!("invalid endpoint handle: {endpoint_handle}"),
+        )
+    })?;
+    if let Some(sub) = path_change_rxs()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(&(endpoint_handle, node_id.clone()))
+    {
+        sub.notify.notify_waiters();
+    }
+    ep.unsubscribe_path_changes(&node_id);
+    Ok(())
+}

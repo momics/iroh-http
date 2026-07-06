@@ -499,6 +499,18 @@
           "markdownDescription": "Denies the next_chunk command without any pre-configured scope."
         },
         {
+          "description": "Enables the next_path_change command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-next-path-change",
+          "markdownDescription": "Enables the next_path_change command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the next_path_change command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-next-path-change",
+          "markdownDescription": "Denies the next_path_change command without any pre-configured scope."
+        },
+        {
           "description": "Enables the node_addr command without any pre-configured scope.",
           "type": "string",
           "const": "allow-node-addr",
@@ -787,6 +799,18 @@
           "markdownDescription": "Denies the try_next_chunk command without any pre-configured scope."
         },
         {
+          "description": "Enables the unsubscribe_path_changes command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-unsubscribe-path-changes",
+          "markdownDescription": "Enables the unsubscribe_path_changes command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the unsubscribe_path_changes command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-unsubscribe-path-changes",
+          "markdownDescription": "Denies the unsubscribe_path_changes command without any pre-configured scope."
+        },
+        {
           "description": "Enables the wait_endpoint_closed command without any pre-configured scope.",
           "type": "string",
           "const": "allow-wait-endpoint-closed",
@@ -823,10 +847,10 @@
           "markdownDescription": "Enables low-level key operations — generate keypairs, sign with a secret key, and verify public key signatures.\n#### This permission set includes:\n\n- `allow-generate-secret-key`\n- `allow-secret-key-sign`\n- `allow-public-key-verify`"
         },
         {
-          "description": "Node lifecycle and introspection. Covers createNode() and close(). Add iroh-http:fetch and/or iroh-http:serve for HTTP capability.\n#### This default permission set includes:\n\n- `allow-create-endpoint`\n- `allow-close-endpoint`\n- `allow-wait-endpoint-closed`\n- `allow-ping`\n- `allow-node-addr`\n- `allow-node-ticket`\n- `allow-home-relay`\n- `allow-peer-info`\n- `allow-peer-stats`\n- `allow-endpoint-stats`\n- `allow-start-transport-events`",
+          "description": "Node lifecycle and introspection. Covers createNode() and close(). Add iroh-http:fetch and/or iroh-http:serve for HTTP capability.\n#### This default permission set includes:\n\n- `allow-create-endpoint`\n- `allow-close-endpoint`\n- `allow-wait-endpoint-closed`\n- `allow-ping`\n- `allow-node-addr`\n- `allow-node-ticket`\n- `allow-home-relay`\n- `allow-peer-info`\n- `allow-peer-stats`\n- `allow-endpoint-stats`\n- `allow-start-transport-events`\n- `allow-next-path-change`\n- `allow-unsubscribe-path-changes`",
           "type": "string",
           "const": "default",
-          "markdownDescription": "Node lifecycle and introspection. Covers createNode() and close(). Add iroh-http:fetch and/or iroh-http:serve for HTTP capability.\n#### This default permission set includes:\n\n- `allow-create-endpoint`\n- `allow-close-endpoint`\n- `allow-wait-endpoint-closed`\n- `allow-ping`\n- `allow-node-addr`\n- `allow-node-ticket`\n- `allow-home-relay`\n- `allow-peer-info`\n- `allow-peer-stats`\n- `allow-endpoint-stats`\n- `allow-start-transport-events`"
+          "markdownDescription": "Node lifecycle and introspection. Covers createNode() and close(). Add iroh-http:fetch and/or iroh-http:serve for HTTP capability.\n#### This default permission set includes:\n\n- `allow-create-endpoint`\n- `allow-close-endpoint`\n- `allow-wait-endpoint-closed`\n- `allow-ping`\n- `allow-node-addr`\n- `allow-node-ticket`\n- `allow-home-relay`\n- `allow-peer-info`\n- `allow-peer-stats`\n- `allow-endpoint-stats`\n- `allow-start-transport-events`\n- `allow-next-path-change`\n- `allow-unsubscribe-path-changes`"
         },
         {
           "description": "Enables node.fetch() — send HTTP requests to remote peers. Includes all internal body-streaming primitives required for fetch to function.\n#### This permission set includes:\n\n- `allow-fetch`\n- `allow-create-fetch-token`\n- `allow-cancel-in-flight`\n- `allow-cancel-request`\n- `allow-create-body-writer`\n- `allow-next-chunk`\n- `allow-try-next-chunk`\n- `allow-send-chunk`\n- `allow-finish-body`",

@@ -51,6 +51,8 @@ fn main() {
         "mdns_advertise_close",
         // Transport / path-change events (bundled into iroh-http:default)
         "start_transport_events",
+        "next_path_change",
+        "unsubscribe_path_changes",
     ])
     .android_path("android")
     .ios_path("ios")

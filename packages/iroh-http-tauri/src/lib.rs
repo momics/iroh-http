@@ -139,6 +139,8 @@ impl<R: Runtime> PluginBuilder<R> {
             commands::session_recv_datagram,
             commands::session_max_datagram_size,
             commands::start_transport_events,
+            commands::next_path_change,
+            commands::unsubscribe_path_changes,
         ]);
 
         // Register the `httpi://` scheme protocol before `.build()` — Tauri
