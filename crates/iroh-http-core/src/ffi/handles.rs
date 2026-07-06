@@ -202,6 +202,16 @@ impl http_body::Body for BodyReader {
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<Frame<Bytes>, Self::Error>>> {
         let this = self.get_mut();
+        if this.pending.is_none() {
+            if let Ok(mut rx) = this.rx.try_lock() {
+                match rx.try_recv() {
+                    Ok(data) => return Poll::Ready(Some(Ok(Frame::data(data)))),
+                    Err(mpsc::error::TryRecvError::Disconnected) => return Poll::Ready(None),
+                    Err(mpsc::error::TryRecvError::Empty) => {}
+                }
+            }
+        }
+
         let fut = this.pending.get_or_insert_with(|| {
             Box::pin(recv_with_cancel(this.rx.clone(), this.cancel.clone()))
         });
@@ -219,10 +229,16 @@ impl BodyWriter {
     /// Send one chunk.  Returns `Err` if the reader has been dropped or if
     /// the drain timeout expires (JS not reading fast enough).
     pub async fn send_chunk(&self, chunk: Bytes) -> Result<(), String> {
-        tokio::time::timeout(self.drain_timeout, self.tx.send(chunk))
-            .await
-            .map_err(|_| "drain timeout: body reader is too slow".to_string())?
-            .map_err(|_| "body reader dropped".to_string())
+        match self.tx.try_send(chunk) {
+            Ok(()) => Ok(()),
+            Err(mpsc::error::TrySendError::Closed(_)) => Err("body reader dropped".to_string()),
+            Err(mpsc::error::TrySendError::Full(chunk)) => {
+                tokio::time::timeout(self.drain_timeout, self.tx.send(chunk))
+                    .await
+                    .map_err(|_| "drain timeout: body reader is too slow".to_string())?
+                    .map_err(|_| "body reader dropped".to_string())
+            }
+        }
     }
 
     /// Mark the channel as ending with an error. The writer must then be
@@ -232,6 +248,25 @@ impl BodyWriter {
             .terminal_error
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = Some(error);
+    }
+}
+
+async fn send_chunk_with_fast_path(
+    tx: &mpsc::Sender<Bytes>,
+    chunk: Bytes,
+    drain_timeout: Duration,
+) -> Result<(), CoreError> {
+    match tx.try_send(chunk) {
+        Ok(()) => Ok(()),
+        Err(mpsc::error::TrySendError::Closed(_)) => {
+            Err(CoreError::internal("body reader dropped"))
+        }
+        Err(mpsc::error::TrySendError::Full(chunk)) => {
+            tokio::time::timeout(drain_timeout, tx.send(chunk))
+                .await
+                .map_err(|_| CoreError::timeout("drain timeout: body reader is too slow"))?
+                .map_err(|_| CoreError::internal("body reader dropped"))
+        }
     }
 }
 
@@ -696,19 +731,13 @@ impl HandleStore {
         };
         let max = self.config.max_chunk_size;
         if chunk.len() <= max {
-            tokio::time::timeout(timeout, tx.send(chunk))
-                .await
-                .map_err(|_| CoreError::timeout("drain timeout: body reader is too slow"))?
-                .map_err(|_| CoreError::internal("body reader dropped"))
+            send_chunk_with_fast_path(&tx, chunk, timeout).await
         } else {
             // Split into max-size pieces.
             let mut offset = 0;
             while offset < chunk.len() {
                 let end = offset.saturating_add(max).min(chunk.len());
-                tokio::time::timeout(timeout, tx.send(chunk.slice(offset..end)))
-                    .await
-                    .map_err(|_| CoreError::timeout("drain timeout: body reader is too slow"))?
-                    .map_err(|_| CoreError::internal("body reader dropped"))?;
+                send_chunk_with_fast_path(&tx, chunk.slice(offset..end), timeout).await?;
                 offset = end;
             }
             Ok(())

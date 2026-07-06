@@ -15,7 +15,8 @@
 
 use bytes::Bytes;
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use iroh_http_core::{make_body_channel, IrohEndpoint, NetworkingOptions, NodeOptions};
+use http_body_util::BodyExt;
+use iroh_http_core::{make_body_channel, Body, IrohEndpoint, NetworkingOptions, NodeOptions};
 
 fn local_opts() -> NodeOptions {
     NodeOptions {
@@ -167,6 +168,33 @@ fn bench_streaming(c: &mut Criterion) {
             }
         });
     });
+
+    group.finish();
+}
+
+// ── bench 5: BodyReader as http_body::Body ──────────────────────────────────
+
+fn bench_body_reader_http_body(c: &mut Criterion) {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let mut group = c.benchmark_group("channel/body_reader_http_body");
+
+    for size in [1_024usize, 64 * 1_024, 1_024 * 1_024] {
+        group.throughput(Throughput::Bytes(size as u64));
+        group.bench_with_input(BenchmarkId::from_parameter(size), &size, |b, &sz| {
+            let chunk = Bytes::from(vec![0x42u8; sz]);
+            b.to_async(&rt).iter(|| {
+                let chunk = chunk.clone();
+                async move {
+                    let (writer, reader) = make_body_channel();
+                    writer.send_chunk(chunk).await.unwrap();
+                    drop(writer);
+
+                    let collected = Body::new(reader).collect().await.unwrap().to_bytes();
+                    assert_eq!(collected.len(), sz);
+                }
+            });
+        });
+    }
 
     group.finish();
 }
@@ -349,6 +377,7 @@ criterion_group!(
     bench_handle_store_channel,
     bench_handle_lifecycle,
     bench_streaming,
+    bench_body_reader_http_body,
     bench_raw_quic_stream,
     bench_http_over_quic,
 );
