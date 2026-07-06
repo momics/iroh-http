@@ -42,7 +42,12 @@ function decodeBase64Current(s) {
 }
 
 function decodeBase64Optimised(s) {
-  return Buffer.from(s, "base64");
+  const buf = Buffer.from(s, "base64");
+  // Mirror the shipped implementation: copy pool-backed views (small inputs)
+  // into an exactly-sized array; return larger, exact-backed buffers as-is.
+  return buf.byteOffset === 0 && buf.buffer.byteLength === buf.byteLength
+    ? buf
+    : new Uint8Array(buf);
 }
 
 function singleChunkStream(data) {
