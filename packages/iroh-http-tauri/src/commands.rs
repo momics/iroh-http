@@ -14,10 +14,9 @@ use tauri::Manager;
 use crate::state;
 
 use iroh_http_adapter::{
-    core_error_to_json, format_error_json, safe_f64_to_u64, safe_f64_to_usize,
-    send_undeliverable_rejection, validate_compression_level, validate_direct_addrs,
-    validate_header_rows, validate_method, validate_node_id, validate_url, MAX_BODY_BYTES,
-    MAX_HEADER_BYTES, MAX_TIMEOUT_MS, MAX_TOTAL_CONNECTIONS,
+    coerce_endpoint_options, coerce_fetch_options, coerce_serve_options, core_error_to_json,
+    format_error_json, send_undeliverable_rejection, validate_header_rows, RawEndpointOptions,
+    RawFetchOptions, RawServeOptions,
 };
 
 // ── Endpoint ──────────────────────────────────────────────────────────────────
@@ -67,6 +66,15 @@ pub async fn create_endpoint<R: tauri::Runtime>(
 ) -> Result<EndpointInfoPayload, String> {
     let opts = args
         .map(|a| -> Result<NodeOptions, String> {
+            let endpoint = coerce_endpoint_options(RawEndpointOptions {
+                idle_timeout_ms: a.idle_timeout,
+                pool_idle_timeout_ms: a.pool_idle_timeout_ms,
+                handle_ttl_ms: a.handle_ttl,
+                sweep_interval_ms: a.sweep_interval,
+                max_header_bytes: a.max_header_bytes,
+                compression_level: a.compression_level,
+            })
+            .map_err(|e| e.to_json())?;
             Ok(NodeOptions {
                 key: match a.key {
                     Some(k) => {
@@ -84,11 +92,7 @@ pub async fn create_endpoint<R: tauri::Runtime>(
                     relay_mode: a.relay_mode,
                     relays: a.relays.unwrap_or_default(),
                     bind_addrs: a.bind_addrs.unwrap_or_default(),
-                    idle_timeout_ms: a
-                        .idle_timeout
-                        .map(|v| safe_f64_to_u64(v, "idleTimeout", MAX_TIMEOUT_MS))
-                        .transpose()
-                        .map_err(|e| e.to_json())?,
+                    idle_timeout_ms: endpoint.idle_timeout_ms,
                     proxy_url: a.proxy_url,
                     proxy_from_env: a.proxy_from_env.unwrap_or(false),
                     disabled: a.disable_networking.unwrap_or(false),
@@ -99,49 +103,27 @@ pub async fn create_endpoint<R: tauri::Runtime>(
                 },
                 pool: PoolOptions {
                     max_connections: a.max_pooled_connections,
-                    idle_timeout_ms: a
-                        .pool_idle_timeout_ms
-                        .map(|v| safe_f64_to_u64(v, "poolIdleTimeoutMs", MAX_TIMEOUT_MS))
-                        .transpose()
-                        .map_err(|e| e.to_json())?,
+                    idle_timeout_ms: endpoint.pool_idle_timeout_ms,
                 },
                 streaming: StreamingOptions {
                     channel_capacity: a.channel_capacity,
                     max_chunk_size_bytes: a.max_chunk_size_bytes,
                     drain_timeout_ms: None,
-                    handle_ttl_ms: a
-                        .handle_ttl
-                        .map(|v| safe_f64_to_u64(v, "handleTtl", MAX_TIMEOUT_MS))
-                        .transpose()
-                        .map_err(|e| e.to_json())?,
-                    sweep_interval_ms: a
-                        .sweep_interval
-                        .map(|v| safe_f64_to_u64(v, "sweepInterval", MAX_TIMEOUT_MS))
-                        .transpose()
-                        .map_err(|e| e.to_json())?,
+                    handle_ttl_ms: endpoint.handle_ttl_ms,
+                    sweep_interval_ms: endpoint.sweep_interval_ms,
                 },
                 capabilities: Vec::new(),
                 keylog: a.keylog.unwrap_or(false),
-                max_header_size: a
-                    .max_header_bytes
-                    .map(|v| safe_f64_to_usize(v, "maxHeaderBytes", MAX_HEADER_BYTES))
-                    .transpose()
-                    .map_err(|e| e.to_json())?,
+                max_header_size: endpoint.max_header_bytes,
                 max_response_body_bytes: None,
                 compression: if a.compression_min_body_bytes.is_some()
                     || a.compression_level.is_some()
                 {
-                    // ISS-020: validate compression level range before cast.
-                    let level = a
-                        .compression_level
-                        .map(validate_compression_level)
-                        .transpose()
-                        .map_err(|e| e.to_json())?;
                     Some(iroh_http_core::CompressionOptions {
                         min_body_bytes: a
                             .compression_min_body_bytes
                             .unwrap_or(iroh_http_core::CompressionOptions::DEFAULT_MIN_BODY_BYTES),
-                        level,
+                        level: endpoint.compression_level,
                     })
                 } else {
                     None
@@ -524,34 +506,30 @@ pub async fn fetch(args: RawFetchArgs) -> Result<FfiResponsePayload, String> {
         )
     })?;
 
-    let pairs = validate_header_rows(args.headers).map_err(|e| e.to_json())?;
-    validate_node_id(&args.node_id).map_err(|e| e.to_json())?;
-    validate_url(&args.url).map_err(|e| e.to_json())?;
-    validate_method(&args.method).map_err(|e| e.to_json())?;
-    validate_direct_addrs(&args.direct_addrs).map_err(|e| e.to_json())?;
+    let opts = coerce_fetch_options(RawFetchOptions {
+        node_id: args.node_id,
+        url: args.url,
+        method: args.method,
+        direct_addrs: args.direct_addrs,
+        headers: args.headers,
+        timeout_ms: args.timeout_ms,
+        max_response_body_bytes: args.max_response_body_bytes,
+    })
+    .map_err(|e| e.to_json())?;
 
     let req_body_reader = args
         .req_body_handle
         .and_then(|h| ep.handles().claim_pending_reader(h));
 
-    let addrs = parse_direct_addrs(&args.direct_addrs)?;
-    let timeout = args
-        .timeout_ms
-        .map(|ms| safe_f64_to_u64(ms, "timeoutMs", MAX_TIMEOUT_MS))
-        .transpose()
-        .map_err(|e| e.to_json())?
-        .map(std::time::Duration::from_millis);
-    let max_response_body_bytes = args
-        .max_response_body_bytes
-        .map(|b| safe_f64_to_usize(b, "maxResponseBodyBytes", MAX_BODY_BYTES))
-        .transpose()
-        .map_err(|e| e.to_json())?;
+    let addrs = parse_direct_addrs(&opts.direct_addrs)?;
+    let timeout = opts.timeout_ms.map(std::time::Duration::from_millis);
+    let max_response_body_bytes = opts.max_response_body_bytes;
     let res = iroh_http_core::fetch(
         &ep,
-        &args.node_id,
-        &args.url,
-        &args.method,
-        &pairs,
+        &opts.node_id,
+        &opts.url,
+        &opts.method,
+        &opts.headers,
         req_body_reader,
         args.fetch_token,
         addrs.as_deref(),
@@ -618,34 +596,22 @@ pub async fn serve(
         )
     })?;
 
+    let serve = coerce_serve_options(RawServeOptions {
+        request_timeout_ms: args.request_timeout,
+        max_request_body_wire_bytes: args.max_request_body_wire_bytes,
+        max_request_body_decoded_bytes: args.max_request_body_decoded_bytes,
+        max_total_connections: args.max_total_connections,
+        drain_timeout_ms: args.drain_timeout,
+    })
+    .map_err(|e| e.to_json())?;
     let serve_opts = iroh_http_core::ServeOptions {
         max_concurrency: args.max_concurrency,
         max_connections_per_peer: args.max_connections_per_peer,
-        request_timeout_ms: args
-            .request_timeout
-            .map(|v| safe_f64_to_u64(v, "requestTimeout", MAX_TIMEOUT_MS))
-            .transpose()
-            .map_err(|e| e.to_json())?,
-        max_request_body_wire_bytes: args
-            .max_request_body_wire_bytes
-            .map(|v| safe_f64_to_usize(v, "maxRequestBodyWireBytes", MAX_BODY_BYTES))
-            .transpose()
-            .map_err(|e| e.to_json())?,
-        max_request_body_decoded_bytes: args
-            .max_request_body_decoded_bytes
-            .map(|v| safe_f64_to_usize(v, "maxRequestBodyDecodedBytes", MAX_BODY_BYTES))
-            .transpose()
-            .map_err(|e| e.to_json())?,
-        max_total_connections: args
-            .max_total_connections
-            .map(|v| safe_f64_to_usize(v, "maxTotalConnections", MAX_TOTAL_CONNECTIONS))
-            .transpose()
-            .map_err(|e| e.to_json())?,
-        drain_timeout_ms: args
-            .drain_timeout
-            .map(|v| safe_f64_to_u64(v, "drainTimeout", MAX_TIMEOUT_MS))
-            .transpose()
-            .map_err(|e| e.to_json())?,
+        request_timeout_ms: serve.request_timeout_ms,
+        max_request_body_wire_bytes: serve.max_request_body_wire_bytes,
+        max_request_body_decoded_bytes: serve.max_request_body_decoded_bytes,
+        max_total_connections: serve.max_total_connections,
+        drain_timeout_ms: serve.drain_timeout_ms,
         load_shed: args.load_shed,
         decompression: args.decompress,
     };
