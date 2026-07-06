@@ -5,7 +5,7 @@
  * and Tauri adapter code.
  */
 
-import type { RelayMode } from "./options/NodeOptions.js";
+import type { NodeOptions, RelayMode } from "./options/NodeOptions.js";
 
 // ── Relay mode normalisation ──────────────────────────────────────────────────
 
@@ -37,6 +37,78 @@ export function normaliseRelayMode(
   }
   // "default" or undefined: use Iroh's public relay servers
   return { relayMode: undefined, relays: null, disableNetworking: false };
+}
+
+// ── Discovery normalisation ───────────────────────────────────────────────────
+
+export interface NormalisedDiscovery {
+  dnsEnabled: boolean;
+  dnsServerUrl?: string;
+}
+
+/**
+ * Normalise the `discovery` option into the flat DNS fields the Rust adapter
+ * expects. DNS-SD is on by default; `dns: false` disables it, and an object
+ * form supplies a custom resolver URL.
+ */
+export function normaliseDiscovery(
+  disc?: NodeOptions["discovery"],
+): NormalisedDiscovery {
+  if (!disc) return { dnsEnabled: true };
+  if (disc.dns === false) return { dnsEnabled: false };
+  if (typeof disc.dns === "object" && disc.dns !== null) {
+    return { dnsEnabled: true, dnsServerUrl: disc.dns.serverUrl };
+  }
+  return { dnsEnabled: true };
+}
+
+// ── Compression normalisation ─────────────────────────────────────────────────
+
+export interface NormalisedCompression {
+  level: number | undefined;
+  minBodyBytes: number | undefined;
+}
+
+/**
+ * Normalise the `compression` option into flat `level`/`minBodyBytes` fields.
+ * `true` selects the default zstd level (3); an object passes its tuning
+ * through untouched; a falsy value leaves both fields unset (`undefined`).
+ *
+ * Callers that serialise to JSON (Deno FFI, Tauri IPC) map the `undefined`
+ * results to `null`; the Node napi bridge treats `undefined` as absent.
+ */
+export function normaliseCompression(
+  compression?: NodeOptions["compression"],
+): NormalisedCompression {
+  if (typeof compression === "object" && compression !== null) {
+    return {
+      level: compression.level,
+      minBodyBytes: compression.minBodyBytes,
+    };
+  }
+  return {
+    level: compression ? 3 : undefined,
+    minBodyBytes: undefined,
+  };
+}
+
+// ── u64 handle guard ──────────────────────────────────────────────────────────
+
+/**
+ * Convert an opaque u64 resource handle (slotmap key: 32-bit slot + 32-bit
+ * generation) to a JS number, rejecting values outside the safe integer range
+ * rather than silently rounding and addressing the wrong resource.
+ *
+ * Shared by the Deno FFI adapter (imported as `bigintToSafeNumber`) and the
+ * Tauri IPC bridge. Regression coverage: #252.
+ */
+export function bigintToSafeNumber(value: bigint, field = "handle"): number {
+  if (value < 0n || value > BigInt(Number.MAX_SAFE_INTEGER)) {
+    throw new RangeError(
+      `[iroh-http] ${field} value ${value} exceeds safe integer range and cannot be safely serialised`,
+    );
+  }
+  return Number(value);
 }
 
 // ── Base64 encoding ───────────────────────────────────────────────────────────
