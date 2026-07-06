@@ -169,9 +169,10 @@ export class IrohNode extends EventTarget {
    *
    * Each incoming request is delivered to `handler` as a web-standard `Request`
    * augmented with a `Peer-Id` header carrying the authenticated caller's public
-   * key. The returned {@link ServeHandle} exposes `finished`, which resolves when
-   * the serve loop stops — via `node.close()`, an aborted `options.signal`, or a
-   * fatal error.
+   * key. The returned {@link ServeHandle} exposes `close()`, which stops this
+   * server (leaving the node alive), and `finished`, which resolves when the
+   * serve loop stops — via `close()`, `node.close()`, an aborted
+   * `options.signal`, or a fatal error.
    *
    * @remarks
    * **Security:** this opens a *public* endpoint — any peer that knows this
@@ -182,7 +183,8 @@ export class IrohNode extends EventTarget {
    * @param options Serve tuning (error handler, shutdown signal, concurrency and
    *   body-size limits). May be omitted to use defaults.
    * @param handler Async function mapping a `Request` to a `Response`.
-   * @returns A {@link ServeHandle} whose `finished` promise settles on shutdown.
+   * @returns A {@link ServeHandle} whose `close()` stops this server and whose
+   *   `finished` promise settles on shutdown.
    *
    * ```ts
    * const server = node.serve((req) => {
@@ -191,7 +193,8 @@ export class IrohNode extends EventTarget {
    *   }
    *   return Response.json({ ok: true });
    * });
-   * await server.finished;
+   * // Later, stop just this server without closing the node:
+   * await server.close();
    * ```
    */
   serve(handler: ServeHandler): ServeHandle;

@@ -279,4 +279,46 @@ export function lifecycleTests({ createNode, test, assert, assertEqual, assertNo
       await node.close();
     }
   });
+
+  test("serve handle close() stops that server and resolves finished", async () => {
+    const node = await createNode();
+    try {
+      const handle = node.serve({}, () => new Response("ok"));
+      // close() stops THIS server and resolves once the loop has drained.
+      await handle.close();
+      await assertResolves(handle.finished);
+      // Since this server stopped, serve() may be started again on the node.
+      const again = node.serve({}, () => new Response("again"));
+      await again.close();
+    } finally {
+      await node.close();
+    }
+  });
+
+  test("serve handle close() is idempotent", async () => {
+    const node = await createNode();
+    try {
+      const handle = node.serve({}, () => new Response("ok"));
+      await handle.close();
+      // A second close() must not throw and must resolve.
+      await assertResolves(handle.close());
+    } finally {
+      await node.close();
+    }
+  });
+
+  test("serve handle supports Symbol.asyncDispose", async () => {
+    const node = await createNode();
+    try {
+      let finished;
+      {
+        const handle = node.serve({}, () => new Response("ok"));
+        finished = handle.finished;
+        await handle[Symbol.asyncDispose]();
+      }
+      await assertResolves(finished);
+    } finally {
+      await node.close();
+    }
+  });
 }

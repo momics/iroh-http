@@ -208,7 +208,11 @@ Returned by `node.serve()`. Controls the running server.
 
 ```ts
 interface ServeHandle {
+  /** Resolves when the serve loop terminates (via `close()`, `node.close()`, an aborted signal, or a fatal error). */
+  readonly finished: Promise<void>;
+  /** Stop this server (leaving the node alive); resolves once the loop drains. */
   close(): Promise<void>;
+  /** Alias for `close()` enabling `await using`. */
   [Symbol.asyncDispose](): Promise<void>;
 }
 ```
