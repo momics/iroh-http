@@ -137,6 +137,17 @@ pub async fn create_endpoint<R: tauri::Runtime>(
         .await
         .map_err(|e| core_error_to_json(&e))?;
 
+    // #310: on mobile, register the in-process AddressLookup on this endpoint so
+    // iroh's dialer resolves natively-discovered peers by node-id (desktop gets
+    // this from iroh-http-discovery's MdnsAddressLookup). Same `add()` call
+    // desktop makes. Missing state (scheme/discovery not configured) is a no-op.
+    #[cfg(mobile)]
+    if let Some(lookup) = app.try_state::<mobile_address_lookup::MobileAddressLookup>() {
+        if let Ok(services) = ep.raw().address_lookup() {
+            services.add(lookup.inner().clone());
+        }
+    }
+
     let node_id = ep.node_id().to_string();
     let handle = state::insert_endpoint(ep);
 
@@ -1212,6 +1223,7 @@ pub async fn mdns_next_event(
 #[cfg(mobile)]
 pub async fn mdns_next_event<R: tauri::Runtime>(
     state: tauri::State<'_, crate::mobile_mdns::MobileMdns<R>>,
+    lookup: tauri::State<'_, crate::mobile_address_lookup::MobileAddressLookup>,
     browse_handle: u64,
 ) -> Result<Option<PeerDiscoveryEventPayload>, String> {
     use std::collections::{HashMap, VecDeque};
@@ -1221,7 +1233,8 @@ pub async fn mdns_next_event<R: tauri::Runtime>(
     // Each browse_handle gets its own queue.
     let buffer = mobile_mdns_buffer();
 
-    // Return a buffered event if available.
+    // Return a buffered event if available. These were already fed into the
+    // AddressLookup when first polled (below), so we do not re-apply here.
     {
         let mut map = buffer.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(queue) = map.get_mut(&browse_handle) {
@@ -1239,6 +1252,14 @@ pub async fn mdns_next_event<R: tauri::Runtime>(
     let mut events = state
         .browse_poll(browse_handle)
         .map_err(|e| format_error_json("INVALID_HANDLE", e))?;
+
+    // #310: feed every freshly polled event into the in-process AddressLookup so
+    // iroh's dialer can resolve discovered peers by node-id, regardless of how
+    // fast the JS side drains events. `discovered` upserts addrs; `expired`
+    // evicts. This is what gives mobile `fetch(nodeId)` auto-dial parity.
+    for ev in &events {
+        lookup.apply_event(&ev.kind, &ev.node_id, &ev.addrs);
+    }
 
     let first = events.drain(..1.min(events.len())).next();
 
