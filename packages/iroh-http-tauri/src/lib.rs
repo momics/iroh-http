@@ -3,6 +3,8 @@
 mod commands;
 mod state;
 
+pub mod mobile_address_lookup;
+
 #[cfg(test)]
 mod tests;
 
@@ -172,6 +174,11 @@ impl<R: Runtime> PluginBuilder<R> {
                     // ISS-009: return recoverable error instead of panicking on init failure.
                     let mdns = mobile_mdns::init(app, _api).map_err(|e| e.into())?;
                     app.manage(mdns);
+                    // #310: manage the in-process AddressLookup that feeds
+                    // natively-discovered peers to iroh's dialer. Registered on
+                    // each endpoint in `create_endpoint`, updated by the browse
+                    // event pump in `mdns_next_event`.
+                    app.manage(mobile_address_lookup::MobileAddressLookup::new());
                 }
                 Ok(())
             })

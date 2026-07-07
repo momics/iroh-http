@@ -11,6 +11,13 @@ links = "tauri-plugin-iroh-http"
 
 [workspace]
 
+# This crate is its own standalone workspace (not a member of the repo-root
+# workspace). Pin `iroh` here so `[dependencies]` can inherit it with
+# `workspace = true` — the same `"1.0"` requirement the repo root pins — keeping
+# this crate's iroh locked to the same version as iroh-http-core / -adapter.
+[workspace.dependencies]
+iroh = "1.0"
+
 # staticlib = iOS, cdylib = Android, rlib = desktop / tests
 [lib]
 crate-type = ["staticlib", "cdylib", "rlib"]
@@ -22,6 +29,13 @@ discovery = ["iroh-http-discovery/mdns"]
 [dependencies]
 iroh-http-core = { path = "../../crates/iroh-http-core", version = "0.5.2" }
 iroh-http-adapter = { path = "../../crates/iroh-http-adapter", version = "0.5.2" }
+# iroh: the mobile AddressLookup bridge implements
+# `iroh::address_lookup::AddressLookup` in-process. Inherited from
+# `[workspace.dependencies]` above so it stays locked to the same iroh as
+# iroh-http-core / -adapter. n0-future supplies the `BoxStream` /
+# `stream::once` used by `resolve()`; pinned to the version iroh 1.0.x uses.
+iroh = { workspace = true }
+n0-future = "0.3"
 slab = "0.4"
 bytes = "1"
 base64 = "0.22"
