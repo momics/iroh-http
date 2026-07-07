@@ -9,13 +9,14 @@ set -euo pipefail
 #   npm run release -- 0.4.0
 #
 # Steps:
-#   1. Determine target version
+#   1. Determine target version (and check required tools up front)
 #   2. Show unreleased commits since last tag
 #   3. Run npm run ci — exits immediately on any failure
 #   4. Bump all manifests (Cargo.toml, package.json, deno.jsonc, adapter.ts)
-#   5. Show diff and ask to confirm
-#   6. Commit and tag vX.Y.Z
-#   7. Ask whether to push (pushing triggers GitHub Actions build + publish)
+#   5. Prepend the release section to CHANGELOG.md via git-cliff
+#   6. Show diff and ask to confirm
+#   7. Commit and tag vX.Y.Z (version bump + changelog in one commit)
+#   8. Ask whether to push (pushing triggers GitHub Actions build + publish)
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
@@ -67,6 +68,14 @@ fi
 TAG="v$VERSION"
 echo "  Target:          ${BOLD}$TAG${NC}"
 
+# Fail fast on missing tools before the long CI run, so a release can't get
+# halfway (bumped + CI-passed) only to stall on a missing changelog generator.
+if ! command -v git-cliff >/dev/null 2>&1; then
+  fail "git-cliff not found — required to regenerate CHANGELOG.md"
+  echo "     Install: brew install git-cliff   (or: cargo install git-cliff)"
+  exit 1
+fi
+
 # ── 2. Unreleased commits ─────────────────────────────────────────────────────
 
 section "Unreleased commits"
@@ -103,7 +112,20 @@ fi
 section "Version bump → $VERSION"
 bash "$ROOT/scripts/version.sh" "$VERSION"
 
-# ── 5. Review ─────────────────────────────────────────────────────────────────
+# ── 5. Changelog ──────────────────────────────────────────────────────────────
+# Prepend the new release section to CHANGELOG.md. --unreleased scopes it to
+# commits since the last tag; --prepend leaves prior sections untouched (no
+# history rewrite). Uses git-cliff's default config — the same one CI uses for
+# the GitHub Release body (build.yml: `git cliff --latest`) — so the in-repo
+# changelog and the published release notes stay identical. This runs after
+# version.sh (which leaves the tree dirty), so `git add -u` below commits the
+# changelog and the version bump together in the single `chore: release` commit.
+
+section "Changelog → $TAG"
+git cliff --tag "$TAG" --unreleased --prepend "$ROOT/CHANGELOG.md"
+ok "Prepended $TAG section to CHANGELOG.md"
+
+# ── 6. Review ─────────────────────────────────────────────────────────────────
 
 echo ""
 git diff --stat
@@ -112,12 +134,12 @@ ask "Commit and tag $TAG? [y/N] "
 read -r CONFIRM
 
 if [[ ! "$CONFIRM" =~ ^[Yy]$ ]]; then
-  warn "Aborted — reverting version bump"
+  warn "Aborted — reverting version bump + changelog"
   git checkout -- .
   exit 0
 fi
 
-# ── 6. Commit + tag ───────────────────────────────────────────────────────────
+# ── 7. Commit + tag ───────────────────────────────────────────────────────────
 
 section "Commit + tag"
 
@@ -128,7 +150,7 @@ ok "Committed"
 git tag "$TAG" -m "Release $TAG"
 ok "Tagged $TAG"
 
-# ── 7. Push ───────────────────────────────────────────────────────────────────
+# ── 8. Push ───────────────────────────────────────────────────────────────────
 
 echo ""
 ask "Push main + $TAG to origin now? [y/N] "
