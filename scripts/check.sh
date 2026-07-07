@@ -42,6 +42,12 @@ echo "  → test:tauri"
 npm run test:tauri --silent
 ok "tests (tauri)"
 
+# test:tauri:guest imports from @momics/iroh-http-shared/dist, so build it first
+# to avoid stale-dist failures after a rebase that changes the shared surface (#321).
+echo "  → build:shared"
+npm run build:shared --silent
+ok "shared"
+
 echo "  → test:tauri:guest"
 npm run test:tauri:guest --silent
 ok "tests (tauri guest-js)"
