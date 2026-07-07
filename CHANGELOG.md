@@ -1,3 +1,107 @@
+## [0.6.0] - 2026-07-07
+
+### 🚀 Features
+
+- *(ci)* Add workflow_dispatch tag input to re-benchmark a release (#253)
+- *(tauri)* Make httpi:// scheme response cap configurable
+- *(example)* Stream peer-hosted audio and images over httpi:// (#265)
+- *(core)* Route self-requests via in-process loopback (#267)
+- *(shared)* Add ServeHandle.close() and Symbol.asyncDispose
+- *(adapter)* Unify fetch header/numeric validation across Node/Deno/Tauri
+- *(adapter)* Unify fetch input validation across adapters
+- *(adapter)* Unify serve/endpoint numeric caps across adapters
+- *(adapter)* Unify compressionLevel validation + fix drainTimeout doc
+- *(tauri)* Mobile AddressLookup bridge for iroh peer auto-dial (#310)
+
+### 🐛 Bug Fixes
+
+- *(ci)* Create local bench-results branch from FETCH_HEAD in bench archival
+- Guard u64 handle precision loss at Deno rawFetch and Tauri FFI boundary (#254)
+- *(tauri)* Drain pending handler promises on serve shutdown (#256)
+- *(deno)* Drain serve teardown ops so leak sanitizer stays green (#257)
+- *(shared,core)* Strip URL fragments and abort request stream on body-pipe failure
+- *(core)* Log request path without query string
+- *(core)* Enforce negotiated ALPN and bound request-head reads
+- *(deno)* Verify native binary integrity before dlopen
+- *(ci)* Pin publish to the artifact commit and verify on manual dispatch
+- *(tauri)* Cap buffered httpi:// scheme handler response size
+- *(shared)* Only skip finishBody on error for request uploads
+- *(tauri)* Guard datagram base64 encode against oversize spread
+- *(shared)* Redact SecretKey.toString() and add explicit secret-export methods
+- *(core)* Surface stream error instead of clean EOF on over-limit bodies
+- *(core)* Unsubscribe path-change watcher when iteration stops
+- *(tauri)* Stop returning raw secret key from create_endpoint (#275)
+- *(core)* Store local_service as a Weak to break the endpoint cycle (#282)
+- *(core)* Distinguish body stream errors from BodyTooLarge
+- *(shared)* Refine createNode secretKey typing and validate chunk size
+- *(core)* Preserve BodyTooLarge across drain-time stream errors
+- *(core)* Reuse watcher on repeated subscribe_path_changes (#298)
+- *(tauri)* Add path-change subscription parity (#314)
+- *(tauri)* Mobile mDNS browse falls back to instance name for node-id (#318)
+- *(ci)* Build iroh-http-shared before tauri guest tests in check.sh (#321)
+
+### 💼 Other
+
+- *(node)* Regenerate napi loader from pinned CLI baseline
+- *(deps)* Bump crossbeam-epoch to 0.9.20 (RUSTSEC-2026-0204)
+- *(release)* Generate CHANGELOG.md during release via git-cliff
+
+### 🚜 Refactor
+
+- *(deno)* Use @denosaurs/plug for native lib download/cache
+- *(adapter)* Route undeliverable-request 503s through a shared helper
+- *(core)* Centralize fetch cancel/timeout/token cleanup (#281, #283, #284)
+- *(shared)* [**breaking**] Expose secretKey only when a key is supplied
+- *(core)* [**breaking**] Remove Endpoint::secret_key_bytes raw-key accessor
+- *(core)* Extract error/crypto/encoding/addr types out of lib.rs (#198)
+- *(core)* Remove inert maxServeErrors option (#278)
+- *(adapter)* Consolidate fetch/serve coercion behind coerce_* seam (#289)
+- *(shared)* Unify JS option normalisers into iroh-http-shared (#312)
+- *(deno)* Consolidate FFI chunk-read grow/retry into one readChunk (#313)
+- *(adapter)* Add RequestTransport seam and deliver_request (#315)
+- *(tauri)* Route request delivery through RequestTransport (#315)
+- *(node)* Route request delivery through RequestTransport (#315)
+- *(deno)* Route request delivery through RequestTransport (#315)
+- *(tauri)* Inherit iroh via workspace dependency (#310)
+
+### 📚 Documentation
+
+- *(adr-012)* Record bench-results branch, drop GitHub Pages references (#263)
+- Correct maxRequestBodyBytes default and clarify wire vs decoded cap
+- *(tauri)* Document native-held key and crypto permission on createNode
+- Use real request-body limit option names
+- Fix contradictory maxConcurrency default (64 → 1024)
+- *(adr)* Accept ADR-009 and document RequestTransport seam (#315)
+- *(adr)* Accept ADR-016 — mDNS discovery is iroh-only, not general DNS-SD (#310)
+
+### ⚡ Performance
+
+- *(deno)* Parse rawFetch payload once on the warm fetch path (#286)
+- *(shared)* Honor configured maxChunkSizeBytes in pipeToWriter (#287)
+- *(shared)* Harden Node Buffer.from base64 fast path (#280)
+
+### 🎨 Styling
+
+- Apply deno fmt to tauri README and example main.ts
+
+### 🧪 Testing
+
+- *(core)* Add resilience tests — backpressure, leak, disconnect, accept flood (#258)
+- *(tauri)* Rename inner test module to fix clippy::module_inception
+- *(core)* Add coverage for untested FFI bridge modules (#261)
+- *(deno)* Type withTimeout handle as ReturnType<typeof setTimeout>
+- *(core)* Add regression for path-watcher leak/over-count (#298)
+- *(deno)* Add regression for undeliverable response body hang (#315)
+
+### ⚙️ Miscellaneous Tasks
+
+- *(core)* Use is_some() in channel bench drain loop (#259)
+- *(examples)* Add peer allowlist and harden tauri example
+- *(node)* Regenerate index.js bindings to match package version 0.5.2
+- *(tauri)* Run compliance suites via WebDriver on Linux CI (#262)
+- Exclude bench crates from version-bump policy
+- *(node)* Restore napi loader boilerplate from main
+- Add non-blocking cargo-llvm-cov coverage job (#206)
 ## [0.5.2] - 2026-06-26
 
 ### 🚀 Features
