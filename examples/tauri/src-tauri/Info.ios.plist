@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!--
+	  iOS gates all local-network access (mDNS/Bonjour browse + advertise via
+	  NWBrowser / NWListener) behind an explicit user permission. Without the
+	  usage description the OS denies the browser with NWError -65555 (NoAuth)
+	  and browsing silently restarts.
+	-->
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Discover and connect to nearby iroh-http peers on your local network.</string>
+	<!--
+	  Every Bonjour service type the app browses or advertises must be declared
+	  statically here, otherwise NWBrowser is denied even after permission is
+	  granted. The default iroh-http service name "iroh-http" maps to the DNS-SD
+	  type "_iroh-http._udp". Add an entry for each custom serviceName you use.
+	-->
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_iroh-http._udp</string>
+	</array>
+</dict>
+</plist>

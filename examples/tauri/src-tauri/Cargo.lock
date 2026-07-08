@@ -2519,7 +2519,7 @@ dependencies = [
 
 [[package]]
 name = "iroh-http-adapter"
-version = "0.5.2"
+version = "0.6.0"
 dependencies = [
  "iroh-http-core",
  "serde_json",
@@ -2527,7 +2527,7 @@ dependencies = [
 
 [[package]]
 name = "iroh-http-core"
-version = "0.5.2"
+version = "0.6.0"
 dependencies = [
  "base32",
  "bytes",
@@ -2555,12 +2555,23 @@ dependencies = [
 
 [[package]]
 name = "iroh-http-discovery"
-version = "0.5.2"
+version = "0.6.0"
 dependencies = [
  "futures",
  "iroh",
  "iroh-mdns-address-lookup",
  "tokio",
+]
+
+[[package]]
+name = "iroh-http-tauri-example"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-iroh-http",
 ]
 
 [[package]]
@@ -5364,17 +5375,6 @@ checksum = "61c41af27dd6d1e27b1b16b489db798443478cef1f06a660c96db617ba5de3b1"
 
 [[package]]
 name = "tauri"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "tauri 2.10.3",
- "tauri-build",
- "tauri-plugin-iroh-http",
-]
-
-[[package]]
-name = "tauri"
 version = "2.10.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "da77cc00fb9028caf5b5d4650f75e31f1ef3693459dfca7f7e506d1ecef0ba2d"
@@ -5506,17 +5506,20 @@ dependencies = [
 
 [[package]]
 name = "tauri-plugin-iroh-http"
-version = "0.5.2"
+version = "0.6.0"
 dependencies = [
  "base64 0.22.1",
  "bytes",
+ "iroh",
  "iroh-http-adapter",
  "iroh-http-core",
  "iroh-http-discovery",
+ "n0-future",
+ "rustls",
  "serde",
  "serde_json",
  "slab",
- "tauri 2.10.3",
+ "tauri",
  "tauri-plugin",
  "tokio",
  "tracing",

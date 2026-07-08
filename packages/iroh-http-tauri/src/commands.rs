@@ -142,7 +142,7 @@ pub async fn create_endpoint<R: tauri::Runtime>(
     // this from iroh-http-discovery's MdnsAddressLookup). Same `add()` call
     // desktop makes. Missing state (scheme/discovery not configured) is a no-op.
     #[cfg(mobile)]
-    if let Some(lookup) = app.try_state::<mobile_address_lookup::MobileAddressLookup>() {
+    if let Some(lookup) = app.try_state::<crate::mobile_address_lookup::MobileAddressLookup>() {
         if let Ok(services) = ep.raw().address_lookup() {
             services.add(lookup.inner().clone());
         }
@@ -1091,12 +1091,12 @@ pub fn generate_secret_key() -> Result<String, String> {
 
 use std::sync::{Mutex, OnceLock};
 
-#[cfg(feature = "discovery")]
+#[cfg(all(feature = "discovery", not(mobile)))]
 use std::sync::Arc;
-#[cfg(feature = "discovery")]
+#[cfg(all(feature = "discovery", not(mobile)))]
 use tokio::sync::Mutex as TokioMutex;
 
-#[cfg(feature = "discovery")]
+#[cfg(all(feature = "discovery", not(mobile)))]
 type BrowseHandle = Arc<TokioMutex<iroh_http_discovery::BrowseSession>>;
 
 /// ISS-017: shared mobile mDNS event buffer, accessible from both
@@ -1119,13 +1119,25 @@ fn mobile_mdns_buffer() -> &'static Mutex<
     BUFFER.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
 }
 
-#[cfg(feature = "discovery")]
+/// Set of browse handles that are still open. The native mDNS poll
+/// (`browse_poll`) is non-blocking and, once a session is stopped, resolves
+/// with an empty event list rather than an error. `mdns_next_event` long-polls
+/// that layer, so it consults this set to detect closure and terminate with
+/// `None` (stream finished) instead of spinning forever after
+/// `mdns_browse_close`.
+#[cfg(mobile)]
+fn mobile_active_browses() -> &'static Mutex<std::collections::HashSet<u64>> {
+    static S: OnceLock<Mutex<std::collections::HashSet<u64>>> = OnceLock::new();
+    S.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+}
+
+#[cfg(all(feature = "discovery", not(mobile)))]
 fn browse_slab() -> &'static Mutex<slab::Slab<BrowseHandle>> {
     static S: OnceLock<Mutex<slab::Slab<BrowseHandle>>> = OnceLock::new();
     S.get_or_init(|| Mutex::new(slab::Slab::new()))
 }
 
-#[cfg(feature = "discovery")]
+#[cfg(all(feature = "discovery", not(mobile)))]
 fn advertise_slab() -> &'static Mutex<slab::Slab<iroh_http_discovery::AdvertiseSession>> {
     static S: OnceLock<Mutex<slab::Slab<iroh_http_discovery::AdvertiseSession>>> = OnceLock::new();
     S.get_or_init(|| Mutex::new(slab::Slab::new()))
@@ -1172,13 +1184,21 @@ pub async fn mdns_browse(_endpoint_handle: u64, _service_name: String) -> Result
 #[command]
 #[cfg(mobile)]
 pub async fn mdns_browse<R: tauri::Runtime>(
+    _app: tauri::AppHandle<R>,
     state: tauri::State<'_, crate::mobile_mdns::MobileMdns<R>>,
     _endpoint_handle: u64,
     service_name: String,
 ) -> Result<u64, String> {
-    state
+    let browse_id = state
         .browse_start(&service_name)
-        .map_err(|e| format_error_json("REFUSED", e))
+        .map_err(|e| format_error_json("REFUSED", e))?;
+    // Mark the session active so `mdns_next_event` knows to keep long-polling
+    // until `mdns_browse_close` retires the handle.
+    mobile_active_browses()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(browse_id);
+    Ok(browse_id)
 }
 
 /// Poll the next discovery event from a browse session.
@@ -1222,60 +1242,84 @@ pub async fn mdns_next_event(
 #[command]
 #[cfg(mobile)]
 pub async fn mdns_next_event<R: tauri::Runtime>(
+    _app: tauri::AppHandle<R>,
     state: tauri::State<'_, crate::mobile_mdns::MobileMdns<R>>,
     lookup: tauri::State<'_, crate::mobile_address_lookup::MobileAddressLookup>,
     browse_handle: u64,
 ) -> Result<Option<PeerDiscoveryEventPayload>, String> {
-    use std::collections::{HashMap, VecDeque};
-    use std::sync::{Mutex, OnceLock};
-
-    // TAURI-013: Buffer surplus events from browse_poll so they are not lost.
-    // Each browse_handle gets its own queue.
+    // The native NWBrowser / NsdManager layer is poll-based and non-blocking:
+    // `browse_poll` returns `[]` whenever nothing has been discovered *yet*.
+    // The shared JS async iterator, however, treats a `null` event as
+    // "stream ended" — matching the desktop `next_event().await` contract,
+    // where `None` only ever means the browse session finished. Returning
+    // `Ok(None)` on an empty poll would therefore make `node.browse()` stop
+    // immediately on the very first call, before any peer had a chance to
+    // appear (the browse UI flips straight back to "start browsing").
+    //
+    // Long-poll instead: keep re-polling with a short delay until an event is
+    // available or the session is closed, so `None` retains its cross-platform
+    // "finished" meaning. Closure is detected via `mobile_active_browses`
+    // because the native poll resolves empty (not an error) after stop.
     let buffer = mobile_mdns_buffer();
 
-    // Return a buffered event if available. These were already fed into the
-    // AddressLookup when first polled (below), so we do not re-apply here.
-    {
-        let mut map = buffer.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(queue) = map.get_mut(&browse_handle) {
-            if let Some(ev) = queue.pop_front() {
-                return Ok(Some(PeerDiscoveryEventPayload {
-                    is_active: ev.kind == "discovered",
-                    node_id: ev.node_id,
-                    addrs: ev.addrs,
-                }));
+    loop {
+        // 1. Drain any event buffered by a previous poll first.
+        {
+            let mut map = buffer.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(queue) = map.get_mut(&browse_handle) {
+                if let Some(ev) = queue.pop_front() {
+                    return Ok(Some(PeerDiscoveryEventPayload {
+                        is_active: ev.kind == "discovered",
+                        node_id: ev.node_id,
+                        addrs: ev.addrs,
+                    }));
+                }
             }
         }
+
+        // 2. Stop long-polling once the session has been closed.
+        let active = mobile_active_browses()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(&browse_handle);
+        if !active {
+            return Ok(None);
+        }
+
+        // 3. Poll the native layer for freshly discovered / expired peers.
+        let mut events = state
+            .browse_poll(browse_handle)
+            .map_err(|e| format_error_json("INVALID_HANDLE", e))?;
+
+        // #310: feed every freshly polled event into the in-process AddressLookup so
+        // iroh's dialer can resolve discovered peers by node-id, regardless of how
+        // fast the JS side drains events. `discovered` upserts addrs; `expired`
+        // evicts. This is what gives mobile `fetch(nodeId)` auto-dial parity.
+        for ev in &events {
+            lookup.apply_event(&ev.kind, &ev.node_id, &ev.addrs);
+        }
+
+        let first = events.drain(..1.min(events.len())).next();
+
+        // Buffer remaining events.
+        if !events.is_empty() {
+            let mut map = buffer.lock().unwrap_or_else(|e| e.into_inner());
+            map.entry(browse_handle)
+                .or_default()
+                .extend(events);
+        }
+
+        if let Some(ev) = first {
+            return Ok(Some(PeerDiscoveryEventPayload {
+                is_active: ev.kind == "discovered",
+                node_id: ev.node_id,
+                addrs: ev.addrs,
+            }));
+        }
+
+        // 4. Nothing discovered yet — wait briefly, then poll again.
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
     }
-
-    // No buffered events — poll native layer.
-    let mut events = state
-        .browse_poll(browse_handle)
-        .map_err(|e| format_error_json("INVALID_HANDLE", e))?;
-
-    // #310: feed every freshly polled event into the in-process AddressLookup so
-    // iroh's dialer can resolve discovered peers by node-id, regardless of how
-    // fast the JS side drains events. `discovered` upserts addrs; `expired`
-    // evicts. This is what gives mobile `fetch(nodeId)` auto-dial parity.
-    for ev in &events {
-        lookup.apply_event(&ev.kind, &ev.node_id, &ev.addrs);
-    }
-
-    let first = events.drain(..1.min(events.len())).next();
-
-    // Buffer remaining events.
-    if !events.is_empty() {
-        let mut map = buffer.lock().unwrap_or_else(|e| e.into_inner());
-        map.entry(browse_handle)
-            .or_insert_with(VecDeque::new)
-            .extend(events);
-    }
-
-    Ok(first.map(|ev| PeerDiscoveryEventPayload {
-        is_active: ev.kind == "discovered",
-        node_id: ev.node_id,
-        addrs: ev.addrs,
-    }))
 }
 
 /// Close a browse session, stopping mDNS discovery.
@@ -1294,9 +1338,16 @@ pub fn mdns_browse_close(browse_handle: u64) {
 #[command]
 #[cfg(mobile)]
 pub fn mdns_browse_close<R: tauri::Runtime>(
+    _app: tauri::AppHandle<R>,
     state: tauri::State<'_, crate::mobile_mdns::MobileMdns<R>>,
     browse_handle: u64,
 ) {
+    // Retire the handle first so any in-flight `mdns_next_event` long-poll
+    // observes the closure and returns `None` (stream finished).
+    mobile_active_browses()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&browse_handle);
     let _ = state.browse_stop(browse_handle);
     // ISS-017: clear stale buffered events for the closed browse session.
     mobile_mdns_buffer()
@@ -1343,6 +1394,7 @@ pub fn mdns_advertise(_endpoint_handle: u64, _service_name: String) -> Result<u6
 #[command]
 #[cfg(mobile)]
 pub fn mdns_advertise<R: tauri::Runtime>(
+    _app: tauri::AppHandle<R>,
     state: tauri::State<'_, crate::mobile_mdns::MobileMdns<R>>,
     endpoint_handle: u64,
     service_name: String,
@@ -1378,6 +1430,7 @@ pub fn mdns_advertise_close(advertise_handle: u64) {
 #[command]
 #[cfg(mobile)]
 pub fn mdns_advertise_close<R: tauri::Runtime>(
+    _app: tauri::AppHandle<R>,
     state: tauri::State<'_, crate::mobile_mdns::MobileMdns<R>>,
     advertise_handle: u64,
 ) {
