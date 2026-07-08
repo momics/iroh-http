@@ -70,6 +70,31 @@ npm run tauri ios init   # regenerate the Xcode project so the framework applies
 Without this, the Xcode link step fails with missing `_kSCNetwork*` /
 `_kSCProp*` symbols.
 
+If you use mDNS discovery (`node.browse()` / `node.advertise()`), iOS also gates
+local-network access behind a user permission. Declare it and every Bonjour
+service type you use in `src-tauri/Info.ios.plist`, which Tauri merges into the
+generated iOS `Info.plist`:
+
+```xml
+<!-- src-tauri/Info.ios.plist -->
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>NSLocalNetworkUsageDescription</key>
+  <string>Discover and connect to nearby peers on your local network.</string>
+  <key>NSBonjourServices</key>
+  <array>
+    <!-- "_<serviceName>._udp"; the default serviceName is "iroh-http" -->
+    <string>_iroh-http._udp</string>
+  </array>
+</dict>
+</plist>
+```
+
+Without these, `NWBrowser` is denied with `NWError -65555 (NoAuth)` and browsing
+silently restarts. Each custom `serviceName` needs its own `_<name>._udp` entry.
+
 ## Quick start
 
 ```ts
