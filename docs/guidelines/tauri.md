@@ -4,6 +4,8 @@ Applies to: `iroh-http-tauri` (Rust plugin + guest JS).
 
 For engineering values and invariants, see [principles.md](../principles.md).
 For JS/TS conventions on the guest side, see [javascript.md](javascript.md).
+For local-network discovery on devices, see
+[Mobile mDNS / DNS-SD setup](mobile-mdns-setup.md).
 
 ---
 

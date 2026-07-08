@@ -101,3 +101,10 @@ Appropriate for embedded targets, air-gapped networks, and integration tests.
 > **Feature flag:** mDNS browse and advertise require the `mdns` compile-time
 > feature in all Rust adapters.
 
+## Mobile setup (iOS & Android)
+
+Tauri apps must declare local-network permissions and Bonjour service types
+before mDNS works on a device. See
+[Mobile mDNS / DNS-SD setup](../guidelines/mobile-mdns-setup.md) for the exact
+iOS `Info.plist` and Android `AndroidManifest.xml` entries.
+
