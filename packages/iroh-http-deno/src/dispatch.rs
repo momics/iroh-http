@@ -1076,7 +1076,7 @@ async fn mdns_next_event_dispatch(_p: Value) -> Value {
         match event {
             None => ok(json!(null)),
             Some(ev) => ok(json!({
-                "isActive": ev.is_active,
+                "type": if ev.is_active { "discovered" } else { "expired" },
                 "nodeId": ev.node_id,
                 "addrs": ev.addrs,
             })),
