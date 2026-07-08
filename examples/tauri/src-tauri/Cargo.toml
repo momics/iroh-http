@@ -1,7 +1,7 @@
 [workspace]
 
 [package]
-name = "tauri"
+name = "iroh-http-tauri-example"
 version = "0.1.0"
 description = "A Tauri App"
 authors = ["you"]
