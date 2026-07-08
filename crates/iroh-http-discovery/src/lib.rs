@@ -89,7 +89,10 @@ const TXT_RELAY: &str = "relay";
 /// 63-byte DNS label limit and is rejected by `mdns-sd`.
 #[cfg(feature = "mdns")]
 fn node_id_label(id: &iroh::EndpointId) -> String {
-    base32::encode(base32::Alphabet::Rfc4648Lower { padding: false }, id.as_bytes())
+    base32::encode(
+        base32::Alphabet::Rfc4648Lower { padding: false },
+        id.as_bytes(),
+    )
 }
 
 /// Validate a service name and build the fully-qualified DNS-SD service type
@@ -419,8 +422,10 @@ mod tests {
     #[test]
     fn instance_from_fullname_extracts_base32_label() {
         let full = "abcdef234567._iroh-http._udp.local.";
-        assert_eq!(instance_from_fullname(full).as_deref(), Some("abcdef234567"));
+        assert_eq!(
+            instance_from_fullname(full).as_deref(),
+            Some("abcdef234567")
+        );
         assert_eq!(instance_from_fullname("._iroh-http._udp.local."), None);
     }
 }
-

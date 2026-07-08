@@ -18,7 +18,9 @@ use iroh_http_discovery::start_advertise;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let service = std::env::args().nth(1).unwrap_or_else(|| "iroh-http".into());
+    let service = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "iroh-http".into());
 
     let ep = Endpoint::builder(iroh::endpoint::presets::Minimal)
         .relay_mode(RelayMode::Disabled)

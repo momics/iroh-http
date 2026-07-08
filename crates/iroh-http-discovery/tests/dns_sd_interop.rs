@@ -42,7 +42,9 @@ async fn advertised_node_is_discovered_over_dns_sd() {
     let _advertise = start_advertise(&adv_ep, service).expect("start advertise");
 
     let browse_ep = minimal_endpoint().await;
-    let mut session = start_browse(&browse_ep, service).await.expect("start browse");
+    let mut session = start_browse(&browse_ep, service)
+        .await
+        .expect("start browse");
 
     let discovered = tokio::time::timeout(Duration::from_secs(15), async {
         loop {

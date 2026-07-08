@@ -10,7 +10,9 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
 use iroh::{
-    address_lookup::{AddressLookup, EndpointData, EndpointInfo, Error as AddressLookupError, Item},
+    address_lookup::{
+        AddressLookup, EndpointData, EndpointInfo, Error as AddressLookupError, Item,
+    },
     EndpointId, RelayUrl, TransportAddr,
 };
 use n0_future::{boxed::BoxStream, stream};
@@ -152,7 +154,10 @@ mod tests {
             .unwrap();
         assert!(resolve_one(&lookup, id).await.is_some());
         lookup.remove(&id.to_string());
-        assert!(lookup.resolve(id).is_none(), "removed node must not resolve");
+        assert!(
+            lookup.resolve(id).is_none(),
+            "removed node must not resolve"
+        );
     }
 
     #[test]
