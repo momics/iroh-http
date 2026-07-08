@@ -105,7 +105,7 @@ Full API details for sessions, crypto, and mDNS: [docs/api-overview.md](docs/api
 | Package | What it does |
 |---------|--------------|
 | [`iroh-http-core`](crates/iroh-http-core/) | Rust. QUIC transport, HTTP/1.1 framing, connection pool, server stack. |
-| [`iroh-http-discovery`](crates/iroh-http-discovery/) | Rust. mDNS peer discovery via Iroh's `Discovery` trait. |
+| [`iroh-http-discovery`](crates/iroh-http-discovery/) | Rust. Standard DNS-SD (mDNS) peer discovery for the local network. |
 | [`iroh-http-adapter`](crates/iroh-http-adapter/) | Rust. Shared FFI error envelope for all adapters. |
 | [`iroh-http-shared`](packages/iroh-http-shared/) | TypeScript. `IrohNode` class, stream helpers, error hierarchy. No native deps. |
 | [`iroh-http-node`](packages/iroh-http-node/) | Node.js native addon (napi-rs). |

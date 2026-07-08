@@ -95,6 +95,10 @@ generated iOS `Info.plist`:
 Without these, `NWBrowser` is denied with `NWError -65555 (NoAuth)` and browsing
 silently restarts. Each custom `serviceName` needs its own `_<name>._udp` entry.
 
+For the full iOS + Android setup (including the Android `AndroidManifest.xml`
+entries), see the
+[Mobile mDNS / DNS-SD setup guide](../../docs/guidelines/mobile-mdns-setup.md).
+
 ## Quick start
 
 ```ts

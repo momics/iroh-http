@@ -1,8 +1,13 @@
 # iroh-http-discovery
 
-Optional mDNS local network discovery for [iroh-http](https://github.com/momics/iroh-http).
+Optional local-network peer discovery for [iroh-http](https://github.com/momics/iroh-http).
 
-Implements [Iroh's](https://iroh.computer) `Discovery` trait using mDNS, allowing nodes to find each other on the same local network without relay servers.
+Implements standard [DNS-SD](https://datatracker.ietf.org/doc/html/rfc6763) over
+mDNS (via [`mdns-sd`](https://crates.io/crates/mdns-sd)), publishing `PTR` + `SRV`
++ `TXT` + `A`/`AAAA` records so nodes find each other on the same local network
+without relay servers. Because it speaks the same wire format as Apple's
+mDNSResponder (`NWBrowser`) and Android's `NsdManager`, desktop nodes are
+discoverable from mobile.
 
 > **Note:** This crate is included automatically when you use the platform adapters with default features. You only need to depend on it directly if you are building a custom Rust integration on top of `iroh-http-core`.
 > - **Node.js** → [`@momics/iroh-http-node`](https://www.npmjs.com/package/@momics/iroh-http-node)

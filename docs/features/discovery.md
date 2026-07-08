@@ -103,6 +103,12 @@ Appropriate for embedded targets, air-gapped networks, and integration tests.
 
 ## Mobile setup (iOS & Android)
 
+Discovery speaks standard [DNS-SD](https://datatracker.ietf.org/doc/html/rfc6763)
+over mDNS (`PTR` + `SRV` + `TXT` + `A`/`AAAA`), so a desktop node is browsable
+by Apple's `NWBrowser` and Android's `NsdManager` — see
+[ADR-017](../adr/017-standard-dns-sd-discovery.md) for why this wire format was
+chosen.
+
 Tauri apps must declare local-network permissions and Bonjour service types
 before mDNS works on a device. See
 [Mobile mDNS / DNS-SD setup](../guidelines/mobile-mdns-setup.md) for the exact
