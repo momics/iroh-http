@@ -1,5 +1,10 @@
 import type { EndpointStats, PathInfo, PeerStats } from "./observability.js";
-import type { PeerDiscoveryEvent } from "./discovery.js";
+import type {
+  DnsSdProtocol,
+  PeerDiscoveryEvent,
+  ServiceConfig,
+  ServiceRecord,
+} from "./discovery.js";
 import type { TransportEventPayload } from "./observability.js";
 import type { RawSessionFns } from "./session.js";
 
@@ -204,6 +209,28 @@ export abstract class IrohAdapter {
     );
   }
   mdnsAdvertiseClose(_advertiseHandle: number): void {/* no-op */}
+
+  // ── Optional: generic DNS-SD ────────────────────────────────────────────────
+  dnsSdAdvertise(_config: ServiceConfig): Promise<number> {
+    return Promise.reject(
+      new Error(`dnsSdAdvertise() not supported by this adapter`),
+    );
+  }
+  dnsSdAdvertiseClose(_advertiseHandle: number): void {/* no-op */}
+  dnsSdBrowse(
+    _serviceName: string,
+    _protocol?: DnsSdProtocol,
+  ): Promise<number> {
+    return Promise.reject(
+      new Error(`dnsSdBrowse() not supported by this adapter`),
+    );
+  }
+  dnsSdNextRecord(_browseHandle: number): Promise<ServiceRecord | null> {
+    return Promise.reject(
+      new Error(`dnsSdNextRecord() not supported by this adapter`),
+    );
+  }
+  dnsSdBrowseClose(_browseHandle: number): void {/* no-op */}
 
   // ── Optional: transport events ──────────────────────────────────────────────
   // Transport events are delivered via a Rust-driven push mechanism: the

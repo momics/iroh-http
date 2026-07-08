@@ -20,6 +20,27 @@ export declare function closeEndpoint(endpointHandle: number, force?: boolean | 
  */
 export declare function createEndpoint(options?: JsNodeOptions | undefined | null): Promise<JsEndpointInfo>
 
+/** Advertise a generic DNS-SD service. Returns an advertise handle. */
+export declare function dnsSdAdvertise(config: JsServiceConfig): Promise<number>
+
+/** Stop a generic DNS-SD advertisement. */
+export declare function dnsSdAdvertiseClose(advertiseHandle: number): void
+
+/**
+ * Browse for a generic DNS-SD service. Returns a browse handle for polling
+ * records via `dnsSdNextRecord`.
+ */
+export declare function dnsSdBrowse(serviceName: string, protocol?: string | undefined | null): Promise<number>
+
+/** Close a generic DNS-SD browse session. */
+export declare function dnsSdBrowseClose(browseHandle: number): void
+
+/**
+ * Poll the next record from a generic DNS-SD browse session.
+ * Returns `null` when the session is closed.
+ */
+export declare function dnsSdNextRecord(browseHandle: number): Promise<JsServiceRecord | null>
+
 /** Snapshot of current endpoint statistics (point-in-time). */
 export declare function endpointStats(endpointHandle: number): JsEndpointStats
 
@@ -236,6 +257,40 @@ export interface JsServeOptions {
    * bodies.  Set to `false` to receive raw wire bytes (proxy use-cases).
    */
   decompress?: boolean
+}
+
+/** A service to advertise via generic DNS-SD (no iroh endpoint involved). */
+export interface JsServiceConfig {
+  /** Bare service name, e.g. `"my-app"` → `_my-app._udp.local.`. */
+  serviceName: string
+  /** DNS-SD instance label. */
+  instanceName: string
+  /** SRV port peers connect to. */
+  port: number
+  /** Extra IP addresses to advertise (local interface addrs added auto). */
+  addrs: Array<string>
+  /** TXT key/value properties. */
+  txt: Record<string, string>
+  /** `"udp"` (default) or `"tcp"`. */
+  protocol?: string
+}
+
+/** A fully-resolved DNS-SD service record returned by `dnsSdNextRecord`. */
+export interface JsServiceRecord {
+  /** `true` = appeared/updated; `false` = expired. */
+  isActive: boolean
+  /** Service type and domain, e.g. `_my-app._udp.local.`. */
+  serviceType: string
+  /** Service instance label. */
+  instanceName: string
+  /** Host name (absent on expiry). */
+  host?: string
+  /** SRV port (`0` on expiry). */
+  port: number
+  /** Resolved socket addresses (empty on expiry). */
+  addrs: Array<string>
+  /** All TXT key/value properties (empty on expiry). */
+  txt: Record<string, string>
 }
 
 /**

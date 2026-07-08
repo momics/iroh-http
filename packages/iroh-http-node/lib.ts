@@ -5,6 +5,11 @@
 import {
   closeEndpoint,
   createEndpoint,
+  dnsSdAdvertise as napiDnsSdAdvertise,
+  dnsSdAdvertiseClose as napiDnsSdAdvertiseClose,
+  dnsSdBrowse as napiDnsSdBrowse,
+  dnsSdBrowseClose as napiDnsSdBrowseClose,
+  dnsSdNextRecord as napiDnsSdNextRecord,
   endpointStats as napiEndpointStats,
   homeRelay as napiHomeRelay,
   jsAllocBodyWriter,
@@ -73,6 +78,11 @@ import type {
   PathInfo,
   PeerDiscoveryEvent,
   PeerStats,
+} from "@momics/iroh-http-shared";
+import type {
+  DnsSdProtocol,
+  ServiceConfig,
+  ServiceRecord,
 } from "@momics/iroh-http-shared";
 
 // ── Graceful shutdown tracking ─────────────────────────────────────────────────
@@ -385,6 +395,45 @@ class NodeAdapter extends IrohAdapter {
   }
   mdnsAdvertiseClose(advertiseHandle: number): void {
     napiMdnsAdvertiseClose(advertiseHandle);
+  }
+
+  // ── Generic DNS-SD ──────────────────────────────────────────────────────────
+  async dnsSdAdvertise(config: ServiceConfig): Promise<number> {
+    return napiDnsSdAdvertise({
+      serviceName: config.serviceName,
+      instanceName: config.instanceName,
+      port: config.port,
+      addrs: config.addrs ?? [],
+      txt: config.txt ?? {},
+      protocol: config.protocol,
+    });
+  }
+  dnsSdAdvertiseClose(advertiseHandle: number): void {
+    napiDnsSdAdvertiseClose(advertiseHandle);
+  }
+  async dnsSdBrowse(
+    serviceName: string,
+    protocol?: DnsSdProtocol,
+  ): Promise<number> {
+    return napiDnsSdBrowse(serviceName, protocol);
+  }
+  async dnsSdNextRecord(
+    browseHandle: number,
+  ): Promise<ServiceRecord | null> {
+    const rec = await napiDnsSdNextRecord(browseHandle);
+    if (!rec) return null;
+    return {
+      isActive: rec.isActive,
+      serviceType: rec.serviceType,
+      instanceName: rec.instanceName,
+      host: rec.host ?? undefined,
+      port: rec.port,
+      addrs: rec.addrs,
+      txt: rec.txt,
+    };
+  }
+  dnsSdBrowseClose(browseHandle: number): void {
+    napiDnsSdBrowseClose(browseHandle);
   }
 
   // ── Transport events ────────────────────────────────────────────────────────

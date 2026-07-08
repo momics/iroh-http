@@ -15,6 +15,11 @@ import type {
   PeerDiscoveryEvent,
   PeerStats,
 } from "@momics/iroh-http-shared";
+import type {
+  DnsSdProtocol,
+  ServiceConfig,
+  ServiceRecord,
+} from "@momics/iroh-http-shared";
 import { IrohAdapter } from "@momics/iroh-http-shared/adapter";
 import type {
   AllocBodyWriterFn,
@@ -1098,6 +1103,33 @@ export const denoDiscoveryFns = {
       () => {},
     );
   },
+  dnsSdAdvertise: async (config: ServiceConfig) => {
+    return call<number>("dnsSdAdvertise", {
+      serviceName: config.serviceName,
+      instanceName: config.instanceName,
+      port: config.port,
+      addrs: config.addrs ?? [],
+      txt: config.txt ?? {},
+      protocol: config.protocol,
+    });
+  },
+  dnsSdAdvertiseClose: (advertiseHandle: number) => {
+    call<Record<never, never>>("dnsSdAdvertiseClose", { advertiseHandle })
+      .catch(
+        () => {},
+      );
+  },
+  dnsSdBrowse: async (serviceName: string, protocol?: DnsSdProtocol) => {
+    return call<number>("dnsSdBrowse", { serviceName, protocol });
+  },
+  dnsSdNextRecord: async (browseHandle: number) => {
+    return call<ServiceRecord | null>("dnsSdNextRecord", { browseHandle });
+  },
+  dnsSdBrowseClose: (browseHandle: number) => {
+    call<Record<never, never>>("dnsSdBrowseClose", { browseHandle }).catch(
+      () => {},
+    );
+  },
 };
 
 // ── Session functions ─────────────────────────────────────────────────────────
@@ -1443,6 +1475,45 @@ export class DenoAdapter extends IrohAdapter {
 
   override mdnsAdvertiseClose(advertiseHandle: number): void {
     call<Record<never, never>>("mdnsAdvertiseClose", { advertiseHandle }).catch(
+      () => {},
+    );
+  }
+
+  // ── Generic DNS-SD ────────────────────────────────────────────────
+
+  override dnsSdAdvertise(config: ServiceConfig): Promise<number> {
+    return call<number>("dnsSdAdvertise", {
+      serviceName: config.serviceName,
+      instanceName: config.instanceName,
+      port: config.port,
+      addrs: config.addrs ?? [],
+      txt: config.txt ?? {},
+      protocol: config.protocol,
+    });
+  }
+
+  override dnsSdAdvertiseClose(advertiseHandle: number): void {
+    call<Record<never, never>>("dnsSdAdvertiseClose", { advertiseHandle })
+      .catch(
+        () => {},
+      );
+  }
+
+  override dnsSdBrowse(
+    serviceName: string,
+    protocol?: DnsSdProtocol,
+  ): Promise<number> {
+    return call<number>("dnsSdBrowse", { serviceName, protocol });
+  }
+
+  override dnsSdNextRecord(
+    browseHandle: number,
+  ): Promise<ServiceRecord | null> {
+    return call<ServiceRecord | null>("dnsSdNextRecord", { browseHandle });
+  }
+
+  override dnsSdBrowseClose(browseHandle: number): void {
+    call<Record<never, never>>("dnsSdBrowseClose", { browseHandle }).catch(
       () => {},
     );
   }

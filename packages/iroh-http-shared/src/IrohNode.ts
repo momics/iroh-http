@@ -1,5 +1,6 @@
 import { PublicKey, resolveNodeId } from "./PublicKey.js";
 import { SecretKey } from "./SecretKey.js";
+import { DnsSd } from "./DnsSd.js";
 import { type FetchFn, makeFetch } from "./fetch.js";
 import {
   makeServe,
@@ -60,6 +61,7 @@ export class IrohNode extends EventTarget {
   #resolveClose!: (info: WebTransportCloseInfo) => void;
   #fetchFn: FetchFn;
   #serveFn: ServeFn;
+  #dnsSd?: DnsSd;
 
   private constructor(
     guard: symbol,
@@ -423,6 +425,25 @@ export class IrohNode extends EventTarget {
         }
       });
     }
+  }
+
+  /**
+   * Generic DNS-SD advertise/browse bound to this node's native binding.
+   *
+   * Use it to announce and discover arbitrary local services (not just iroh
+   * nodes) with full control over instance name, port, TXT records, and
+   * protocol. iroh-http's own {@link IrohNode.advertise} / {@link IrohNode.browse}
+   * are thin specialisations of this same engine.
+   *
+   * ```ts
+   * const ac = new AbortController();
+   * for await (const rec of node.dnsSd.browse({ serviceName: "my-app", signal: ac.signal })) {
+   *   console.log(rec.instanceName, rec.addrs, rec.txt);
+   * }
+   * ```
+   */
+  get dnsSd(): DnsSd {
+    return (this.#dnsSd ??= new DnsSd(this.#adapter));
   }
 
   /**

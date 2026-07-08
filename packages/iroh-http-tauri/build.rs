@@ -49,6 +49,12 @@ fn main() {
         "mdns_browse_close",
         "mdns_advertise",
         "mdns_advertise_close",
+        // Generic DNS-SD (iroh-http:dns-sd)
+        "dns_sd_advertise",
+        "dns_sd_advertise_close",
+        "dns_sd_browse",
+        "dns_sd_next_record",
+        "dns_sd_browse_close",
         // Transport / path-change events (bundled into iroh-http:default)
         "start_transport_events",
         "next_path_change",

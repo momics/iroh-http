@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-dns-sd-advertise"
+description = "Enables the dns_sd_advertise command without any pre-configured scope."
+commands.allow = ["dns_sd_advertise"]
+
+[[permission]]
+identifier = "deny-dns-sd-advertise"
+description = "Denies the dns_sd_advertise command without any pre-configured scope."
+commands.deny = ["dns_sd_advertise"]

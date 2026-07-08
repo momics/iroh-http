@@ -1437,6 +1437,234 @@ pub fn mdns_advertise_close<R: tauri::Runtime>(
     let _ = state.advertise_stop(advertise_handle);
 }
 
+// ── Generic DNS-SD (desktop only) ─────────────────────────────────────────────
+
+#[cfg(all(feature = "discovery", not(mobile)))]
+type GenericBrowseHandle = Arc<TokioMutex<iroh_http_discovery::ServiceBrowseSession>>;
+
+#[cfg(all(feature = "discovery", not(mobile)))]
+fn generic_browse_slab() -> &'static Mutex<slab::Slab<GenericBrowseHandle>> {
+    static S: OnceLock<Mutex<slab::Slab<GenericBrowseHandle>>> = OnceLock::new();
+    S.get_or_init(|| Mutex::new(slab::Slab::new()))
+}
+
+/// A generic DNS-SD service to advertise, mirroring the shared `ServiceConfig`.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServiceConfigPayload {
+    pub service_name: String,
+    pub instance_name: String,
+    pub port: u16,
+    #[serde(default)]
+    pub addrs: Vec<String>,
+    #[serde(default)]
+    pub txt: std::collections::HashMap<String, String>,
+    #[serde(default)]
+    pub protocol: Option<String>,
+}
+
+/// A resolved DNS-SD service record, mirroring the shared `ServiceRecord`.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServiceRecordPayload {
+    pub is_active: bool,
+    pub service_type: String,
+    pub instance_name: String,
+    pub host: Option<String>,
+    pub port: u16,
+    pub addrs: Vec<String>,
+    pub txt: std::collections::HashMap<String, String>,
+}
+
+#[cfg(all(feature = "discovery", not(mobile)))]
+fn parse_protocol(p: Option<&str>) -> Result<iroh_http_discovery::Protocol, String> {
+    match p.unwrap_or("udp") {
+        "udp" => Ok(iroh_http_discovery::Protocol::Udp),
+        "tcp" => Ok(iroh_http_discovery::Protocol::Tcp),
+        other => Err(format_error_json(
+            "INVALID_INPUT",
+            format!("invalid protocol: {other:?}"),
+        )),
+    }
+}
+
+/// Advertise a generic DNS-SD service (not tied to an iroh endpoint).
+#[command]
+#[cfg(all(feature = "discovery", not(mobile)))]
+pub async fn dns_sd_advertise(config: ServiceConfigPayload) -> Result<u64, String> {
+    let protocol = parse_protocol(config.protocol.as_deref())?;
+    let addrs = config
+        .addrs
+        .iter()
+        .map(|s| {
+            s.parse::<std::net::IpAddr>()
+                .map_err(|e| format_error_json("INVALID_INPUT", format!("invalid address: {e}")))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let service_config = iroh_http_discovery::ServiceConfig {
+        service_name: config.service_name,
+        instance_name: config.instance_name,
+        port: config.port,
+        addrs,
+        txt: config.txt.into_iter().collect(),
+        protocol,
+    };
+    let session = iroh_http_discovery::advertise(service_config)
+        .map_err(|e| format_error_json("REFUSED", e))?;
+    let handle = advertise_slab()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(session) as u64;
+    Ok(handle)
+}
+
+#[command]
+#[cfg(all(not(feature = "discovery"), not(mobile)))]
+pub async fn dns_sd_advertise(_config: ServiceConfigPayload) -> Result<u64, String> {
+    Err(format_error_json(
+        "UNKNOWN",
+        "discovery feature not enabled in this build",
+    ))
+}
+
+#[command]
+#[cfg(mobile)]
+pub async fn dns_sd_advertise(_config: ServiceConfigPayload) -> Result<u64, String> {
+    Err(format_error_json(
+        "UNKNOWN",
+        "generic DNS-SD is not supported on mobile",
+    ))
+}
+
+/// Stop a generic DNS-SD advertisement.
+#[command]
+#[cfg(not(mobile))]
+pub fn dns_sd_advertise_close(advertise_handle: u64) {
+    #[cfg(feature = "discovery")]
+    {
+        let mut slab = advertise_slab().lock().unwrap_or_else(|e| e.into_inner());
+        if slab.contains(advertise_handle as usize) {
+            slab.remove(advertise_handle as usize);
+        }
+    }
+}
+
+#[command]
+#[cfg(mobile)]
+pub fn dns_sd_advertise_close(_advertise_handle: u64) {}
+
+/// Browse for a generic DNS-SD service.
+#[command]
+#[cfg(all(feature = "discovery", not(mobile)))]
+pub async fn dns_sd_browse(service_name: String, protocol: Option<String>) -> Result<u64, String> {
+    let protocol = parse_protocol(protocol.as_deref())?;
+    let config = iroh_http_discovery::BrowseConfig {
+        service_name,
+        protocol,
+    };
+    let session =
+        iroh_http_discovery::browse(config).map_err(|e| format_error_json("REFUSED", e))?;
+    let handle = generic_browse_slab()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(Arc::new(TokioMutex::new(session))) as u64;
+    Ok(handle)
+}
+
+#[command]
+#[cfg(all(not(feature = "discovery"), not(mobile)))]
+pub async fn dns_sd_browse(
+    _service_name: String,
+    _protocol: Option<String>,
+) -> Result<u64, String> {
+    Err(format_error_json(
+        "UNKNOWN",
+        "discovery feature not enabled in this build",
+    ))
+}
+
+#[command]
+#[cfg(mobile)]
+pub async fn dns_sd_browse(
+    _service_name: String,
+    _protocol: Option<String>,
+) -> Result<u64, String> {
+    Err(format_error_json(
+        "UNKNOWN",
+        "generic DNS-SD is not supported on mobile",
+    ))
+}
+
+/// Poll the next record from a generic DNS-SD browse session.
+#[command]
+#[cfg(all(feature = "discovery", not(mobile)))]
+pub async fn dns_sd_next_record(
+    browse_handle: u64,
+) -> Result<Option<ServiceRecordPayload>, String> {
+    let session = {
+        generic_browse_slab()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(browse_handle as usize)
+            .cloned()
+    }
+    .ok_or_else(|| {
+        format_error_json(
+            "INVALID_HANDLE",
+            format!("invalid browse handle: {browse_handle}"),
+        )
+    })?;
+    let record = session.lock().await.next_record().await;
+    Ok(record.map(|r| ServiceRecordPayload {
+        is_active: r.is_active,
+        service_type: r.service_type,
+        instance_name: r.instance_name,
+        host: r.host,
+        port: r.port,
+        addrs: r.addrs.iter().map(|a| a.to_string()).collect(),
+        txt: r.txt.into_iter().collect(),
+    }))
+}
+
+#[command]
+#[cfg(all(not(feature = "discovery"), not(mobile)))]
+pub async fn dns_sd_next_record(
+    _browse_handle: u64,
+) -> Result<Option<ServiceRecordPayload>, String> {
+    Err(format_error_json(
+        "UNKNOWN",
+        "discovery feature not enabled in this build",
+    ))
+}
+
+#[command]
+#[cfg(mobile)]
+pub async fn dns_sd_next_record(
+    _browse_handle: u64,
+) -> Result<Option<ServiceRecordPayload>, String> {
+    Err(format_error_json(
+        "UNKNOWN",
+        "generic DNS-SD is not supported on mobile",
+    ))
+}
+
+/// Close a generic DNS-SD browse session.
+#[command]
+#[cfg(not(mobile))]
+pub fn dns_sd_browse_close(browse_handle: u64) {
+    #[cfg(feature = "discovery")]
+    {
+        let mut slab = generic_browse_slab().lock().unwrap_or_else(|e| e.into_inner());
+        if slab.contains(browse_handle as usize) {
+            slab.remove(browse_handle as usize);
+        }
+    }
+}
+
+#[command]
+#[cfg(mobile)]
+pub fn dns_sd_browse_close(_browse_handle: u64) {}
+
 // ── Transport events ──────────────────────────────────────────────────────────
 
 /// Subscribe to transport-level events (pool hits/misses, path changes, sweeps).

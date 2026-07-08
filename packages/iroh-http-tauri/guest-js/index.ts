@@ -26,11 +26,14 @@ import {
 } from "@momics/iroh-http-shared/adapter";
 import type { RawSessionFns } from "@momics/iroh-http-shared/adapter";
 import type {
+  DnsSdProtocol,
   EndpointStats,
   NodeAddrInfo,
   PathInfo,
   PeerDiscoveryEvent,
   PeerStats,
+  ServiceConfig,
+  ServiceRecord,
 } from "@momics/iroh-http-shared";
 
 const PLUGIN = "plugin:iroh-http";
@@ -352,6 +355,51 @@ class TauriAdapter extends IrohAdapter {
   mdnsAdvertiseClose(advertiseHandle: number): void {
     void invoke(`${PLUGIN}|mdns_advertise_close`, {
       advertiseHandle: Number(advertiseHandle),
+    });
+  }
+
+  // ── Generic DNS-SD ─────────────────────────────────────────────
+
+  async dnsSdAdvertise(config: ServiceConfig): Promise<number> {
+    return invoke<number>(`${PLUGIN}|dns_sd_advertise`, {
+      config: {
+        serviceName: config.serviceName,
+        instanceName: config.instanceName,
+        port: config.port,
+        addrs: config.addrs ?? [],
+        txt: config.txt ?? {},
+        protocol: config.protocol,
+      },
+    });
+  }
+
+  dnsSdAdvertiseClose(advertiseHandle: number): void {
+    void invoke(`${PLUGIN}|dns_sd_advertise_close`, {
+      advertiseHandle: Number(advertiseHandle),
+    });
+  }
+
+  async dnsSdBrowse(
+    serviceName: string,
+    protocol?: DnsSdProtocol,
+  ): Promise<number> {
+    return invoke<number>(`${PLUGIN}|dns_sd_browse`, {
+      serviceName,
+      protocol,
+    });
+  }
+
+  async dnsSdNextRecord(
+    browseHandle: number,
+  ): Promise<ServiceRecord | null> {
+    return invoke<ServiceRecord | null>(`${PLUGIN}|dns_sd_next_record`, {
+      browseHandle: Number(browseHandle),
+    });
+  }
+
+  dnsSdBrowseClose(browseHandle: number): void {
+    void invoke(`${PLUGIN}|dns_sd_browse_close`, {
+      browseHandle: Number(browseHandle),
     });
   }
 

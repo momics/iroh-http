@@ -186,6 +186,136 @@ Denies the create_fetch_token command without any pre-configured scope.
 <tr>
 <td>
 
+`iroh-http:allow-dns-sd-advertise`
+
+</td>
+<td>
+
+Enables the dns_sd_advertise command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`iroh-http:deny-dns-sd-advertise`
+
+</td>
+<td>
+
+Denies the dns_sd_advertise command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`iroh-http:allow-dns-sd-advertise-close`
+
+</td>
+<td>
+
+Enables the dns_sd_advertise_close command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`iroh-http:deny-dns-sd-advertise-close`
+
+</td>
+<td>
+
+Denies the dns_sd_advertise_close command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`iroh-http:allow-dns-sd-browse`
+
+</td>
+<td>
+
+Enables the dns_sd_browse command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`iroh-http:deny-dns-sd-browse`
+
+</td>
+<td>
+
+Denies the dns_sd_browse command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`iroh-http:allow-dns-sd-browse-close`
+
+</td>
+<td>
+
+Enables the dns_sd_browse_close command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`iroh-http:deny-dns-sd-browse-close`
+
+</td>
+<td>
+
+Denies the dns_sd_browse_close command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`iroh-http:allow-dns-sd-next-record`
+
+</td>
+<td>
+
+Enables the dns_sd_next_record command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`iroh-http:deny-dns-sd-next-record`
+
+</td>
+<td>
+
+Denies the dns_sd_next_record command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
 `iroh-http:allow-endpoint-stats`
 
 </td>
@@ -1219,6 +1349,19 @@ Enables raw QUIC sessions — bidirectional streams and datagrams directly to a 
 <td>
 
 Enables low-level key operations — generate keypairs, sign with a secret key, and verify public key signatures.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`iroh-http:dns-sd`
+
+</td>
+<td>
+
+Enables generic DNS-SD service discovery — advertise and browse arbitrary local services with full control over instance name, port, TXT records, and protocol.
 
 </td>
 </tr>

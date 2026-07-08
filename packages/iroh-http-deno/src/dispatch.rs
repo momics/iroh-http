@@ -238,6 +238,12 @@ pub async fn dispatch(method: &str, payload: &[u8]) -> Value {
         sync  "mdnsBrowseClose"         => mdns_browse_close_dispatch,
         sync  "mdnsAdvertise"           => mdns_advertise_dispatch,
         sync  "mdnsAdvertiseClose"      => mdns_advertise_close_dispatch,
+        // ── Generic DNS-SD ───────────────────────────────────────────────────
+        sync  "dnsSdAdvertise"          => dns_sd_advertise_dispatch,
+        sync  "dnsSdAdvertiseClose"     => dns_sd_advertise_close_dispatch,
+        sync  "dnsSdBrowse"             => dns_sd_browse_dispatch,
+        async "dnsSdNextRecord"         => dns_sd_next_record_dispatch,
+        sync  "dnsSdBrowseClose"        => dns_sd_browse_close_dispatch,
         // ── Sessions ─────────────────────────────────────────────────────────
         async "sessionAccept"           => session_accept_dispatch,
         async "sessionConnect"          => session_connect_dispatch,
@@ -1144,6 +1150,181 @@ fn mdns_advertise_close_dispatch(_p: Value) -> Value {
             None => return err("missing advertiseHandle"),
         };
         let mut slab = advertise_slab().lock().unwrap_or_else(|e| e.into_inner());
+        if slab.contains(handle as usize) {
+            slab.remove(handle as usize);
+        }
+    }
+    ok(json!({}))
+}
+
+// ── Generic DNS-SD ───────────────────────────────────────────────────────────
+
+#[cfg(feature = "discovery")]
+type GenericBrowseHandle = Arc<TokioMutex<iroh_http_discovery::ServiceBrowseSession>>;
+
+#[cfg(feature = "discovery")]
+fn generic_browse_slab() -> &'static Mutex<Slab<GenericBrowseHandle>> {
+    static S: OnceLock<Mutex<Slab<GenericBrowseHandle>>> = OnceLock::new();
+    S.get_or_init(|| Mutex::new(Slab::new()))
+}
+
+#[cfg(feature = "discovery")]
+fn parse_protocol(p: &Value) -> Result<iroh_http_discovery::Protocol, String> {
+    match p["protocol"].as_str().unwrap_or("udp") {
+        "udp" => Ok(iroh_http_discovery::Protocol::Udp),
+        "tcp" => Ok(iroh_http_discovery::Protocol::Tcp),
+        other => Err(format!("invalid protocol: {other:?}")),
+    }
+}
+
+fn dns_sd_advertise_dispatch(_p: Value) -> Value {
+    #[cfg(feature = "discovery")]
+    {
+        let service_name = match _p["serviceName"].as_str() {
+            Some(s) => s.to_string(),
+            None => return err("missing serviceName"),
+        };
+        let instance_name = match _p["instanceName"].as_str() {
+            Some(s) => s.to_string(),
+            None => return err("missing instanceName"),
+        };
+        let port = match _p["port"].as_u64() {
+            Some(p) if p <= u16::MAX as u64 => p as u16,
+            _ => return err("port must be in the range 0..=65535"),
+        };
+        let protocol = match parse_protocol(&_p) {
+            Ok(p) => p,
+            Err(e) => return err(e),
+        };
+        let mut addrs = Vec::new();
+        if let Some(list) = _p["addrs"].as_array() {
+            for a in list {
+                match a.as_str().and_then(|s| s.parse::<std::net::IpAddr>().ok()) {
+                    Some(ip) => addrs.push(ip),
+                    None => return err(format!("invalid address: {a}")),
+                }
+            }
+        }
+        let mut txt = Vec::new();
+        if let Some(map) = _p["txt"].as_object() {
+            for (k, v) in map {
+                if let Some(v) = v.as_str() {
+                    txt.push((k.clone(), v.to_string()));
+                }
+            }
+        }
+        let config = iroh_http_discovery::ServiceConfig {
+            service_name,
+            instance_name,
+            port,
+            addrs,
+            txt,
+            protocol,
+        };
+        match iroh_http_discovery::advertise(config) {
+            Err(e) => err_code("REFUSED", e),
+            Ok(session) => {
+                let h = advertise_slab()
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(session) as u32;
+                ok(json!(h))
+            }
+        }
+    }
+    #[cfg(not(feature = "discovery"))]
+    err("discovery feature not enabled in this build")
+}
+
+fn dns_sd_advertise_close_dispatch(_p: Value) -> Value {
+    #[cfg(feature = "discovery")]
+    {
+        let handle = match _p["advertiseHandle"].as_u64() {
+            Some(h) => h,
+            None => return err("missing advertiseHandle"),
+        };
+        let mut slab = advertise_slab().lock().unwrap_or_else(|e| e.into_inner());
+        if slab.contains(handle as usize) {
+            slab.remove(handle as usize);
+        }
+    }
+    ok(json!({}))
+}
+
+fn dns_sd_browse_dispatch(_p: Value) -> Value {
+    #[cfg(feature = "discovery")]
+    {
+        let service_name = match _p["serviceName"].as_str() {
+            Some(s) => s.to_string(),
+            None => return err("missing serviceName"),
+        };
+        let protocol = match parse_protocol(&_p) {
+            Ok(p) => p,
+            Err(e) => return err(e),
+        };
+        let config = iroh_http_discovery::BrowseConfig {
+            service_name,
+            protocol,
+        };
+        match iroh_http_discovery::browse(config) {
+            Err(e) => err_code("REFUSED", e),
+            Ok(session) => {
+                let h = generic_browse_slab()
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(Arc::new(TokioMutex::new(session))) as u32;
+                ok(json!(h))
+            }
+        }
+    }
+    #[cfg(not(feature = "discovery"))]
+    err("discovery feature not enabled in this build")
+}
+
+async fn dns_sd_next_record_dispatch(_p: Value) -> Value {
+    #[cfg(feature = "discovery")]
+    {
+        let handle = match _p["browseHandle"].as_u64() {
+            Some(h) => h,
+            None => return err("missing browseHandle"),
+        };
+        let session = match generic_browse_slab()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(handle as usize)
+            .cloned()
+        {
+            Some(s) => s,
+            None => return err(format!("invalid browse handle: {handle}")),
+        };
+        let record = session.lock().await.next_record().await;
+        match record {
+            None => ok(json!(null)),
+            Some(r) => ok(json!({
+                "isActive": r.is_active,
+                "serviceType": r.service_type,
+                "instanceName": r.instance_name,
+                "host": r.host,
+                "port": r.port,
+                "addrs": r.addrs.iter().map(|a| a.to_string()).collect::<Vec<_>>(),
+                "txt": r.txt.into_iter().collect::<std::collections::HashMap<String, String>>(),
+            })),
+        }
+    }
+    #[cfg(not(feature = "discovery"))]
+    err("discovery feature not enabled in this build")
+}
+
+fn dns_sd_browse_close_dispatch(_p: Value) -> Value {
+    #[cfg(feature = "discovery")]
+    {
+        let handle = match _p["browseHandle"].as_u64() {
+            Some(h) => h,
+            None => return err("missing browseHandle"),
+        };
+        let mut slab = generic_browse_slab()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         if slab.contains(handle as usize) {
             slab.remove(handle as usize);
         }

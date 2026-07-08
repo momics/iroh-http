@@ -22,16 +22,22 @@
 #![deny(unsafe_code)]
 
 #[cfg(feature = "mdns")]
+pub mod dns_sd;
+
+#[cfg(feature = "mdns")]
 mod address_lookup;
 
 #[cfg(feature = "mdns")]
 use std::net::{IpAddr, SocketAddr};
 
 #[cfg(feature = "mdns")]
-use mdns_sd::{ResolvedService, ServiceDaemon, ServiceEvent, ServiceInfo};
+use address_lookup::MdnsSdAddressLookup;
 
 #[cfg(feature = "mdns")]
-use address_lookup::MdnsSdAddressLookup;
+pub use dns_sd::{
+    advertise, browse, AdvertiseSession, BrowseConfig, BrowseSession as ServiceBrowseSession,
+    Protocol, ServiceConfig, ServiceRecord,
+};
 
 // ── DiscoveryError ────────────────────────────────────────────────────────────
 
@@ -74,14 +80,15 @@ pub struct PeerDiscoveryEvent {
     pub addrs: Vec<String>,
 }
 
-// ── Service-name / TXT helpers ────────────────────────────────────────────────
+// ── iroh-http conventions ─────────────────────────────────────────────────────
 
 /// TXT property carrying the peer's base32 endpoint id.
-#[cfg(feature = "mdns")]
-const TXT_PK: &str = "pk";
+///
+/// Part of the iroh-http DNS-SD convention (ADR-016); also exported so generic
+/// [`dns_sd`] browsers can recognize iroh-http peers.
+pub const TXT_PK: &str = "pk";
 /// TXT property carrying the peer's home relay URL, if any.
-#[cfg(feature = "mdns")]
-const TXT_RELAY: &str = "relay";
+pub const TXT_RELAY: &str = "relay";
 
 /// Encode an endpoint id as lowercase RFC 4648 base32 (no padding) — a 52-char
 /// label that fits a DNS-SD instance name and matches the node-id form used by
@@ -95,62 +102,39 @@ fn node_id_label(id: &iroh::EndpointId) -> String {
     )
 }
 
-/// Validate a service name and build the fully-qualified DNS-SD service type
-/// `_<service_name>._udp.local.`.
-///
-/// The name must be a single DNS label: non-empty and ASCII alphanumeric or
-/// `-` (no leading `_`, no dot).
-#[cfg(feature = "mdns")]
-fn service_type(service_name: &str) -> Result<String, DiscoveryError> {
-    if service_name.is_empty() {
-        return Err(DiscoveryError::InvalidServiceName(
-            "service name must not be empty".into(),
-        ));
-    }
-    if !service_name
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '-')
-    {
-        return Err(DiscoveryError::InvalidServiceName(format!(
-            "{service_name:?} must contain only ASCII letters, digits, and '-'"
-        )));
-    }
-    Ok(format!("_{service_name}._udp.local."))
-}
-
-/// Extract the service instance label (the base32 endpoint id) from a DNS-SD
-/// fullname like `<instance>._iroh-http._udp.local.`.
-#[cfg(feature = "mdns")]
-fn instance_from_fullname(fullname: &str) -> Option<String> {
-    let instance = fullname.split("._").next()?;
-    if instance.is_empty() {
-        None
-    } else {
-        Some(instance.to_string())
-    }
-}
-
-/// Convert a resolved DNS-SD service into a [`PeerDiscoveryEvent`].
+/// Interpret a generic DNS-SD [`ServiceRecord`] as an iroh-http peer event.
 ///
 /// The node id comes from the `pk` TXT property, falling back to the instance
-/// label. Direct addresses are reconstructed from each resolved IP paired with
-/// the SRV port; a `relay` TXT property is appended if present.
+/// label. On active records the resolved socket addresses are surfaced and a
+/// `relay` TXT property is appended if present. Returns `None` if no usable
+/// node id can be derived.
 #[cfg(feature = "mdns")]
-fn resolved_to_event(rs: &ResolvedService) -> Option<PeerDiscoveryEvent> {
-    let node_id = rs
-        .txt_properties
-        .get_property_val_str(TXT_PK)
-        .map(str::to_string)
-        .or_else(|| instance_from_fullname(&rs.fullname))?;
-
-    let mut addrs: Vec<String> = rs
-        .addresses
+fn peer_event_from_record(rec: &ServiceRecord) -> Option<PeerDiscoveryEvent> {
+    let node_id = rec
+        .txt
         .iter()
-        .map(|scoped| SocketAddr::new(scoped.to_ip_addr(), rs.port).to_string())
-        .collect();
+        .find(|(k, _)| k == TXT_PK)
+        .map(|(_, v)| v.clone())
+        .filter(|v| !v.is_empty())
+        .or_else(|| {
+            if rec.instance_name.is_empty() {
+                None
+            } else {
+                Some(rec.instance_name.clone())
+            }
+        })?;
 
-    if let Some(relay) = rs.txt_properties.get_property_val_str(TXT_RELAY) {
-        addrs.push(relay.to_string());
+    if !rec.is_active {
+        return Some(PeerDiscoveryEvent {
+            is_active: false,
+            node_id,
+            addrs: Vec::new(),
+        });
+    }
+
+    let mut addrs: Vec<String> = rec.addrs.iter().map(SocketAddr::to_string).collect();
+    if let Some((_, relay)) = rec.txt.iter().find(|(k, _)| k == TXT_RELAY) {
+        addrs.push(relay.clone());
     }
 
     Some(PeerDiscoveryEvent {
@@ -160,129 +144,65 @@ fn resolved_to_event(rs: &ResolvedService) -> Option<PeerDiscoveryEvent> {
     })
 }
 
-/// Create a fresh mDNS daemon for a single browse or advertise session.
-///
-/// Each session owns its own daemon (rather than sharing one process-wide) so
-/// that its lifetime is tied to the session: dropping the session shuts the
-/// daemon down. It also means an advertise and a browse in the *same* process
-/// run on separate daemons and can discover each other over loopback multicast
-/// — `mdns-sd` does not deliver a daemon's own registrations back to its own
-/// browsers.
-#[cfg(feature = "mdns")]
-fn new_daemon() -> Result<ServiceDaemon, DiscoveryError> {
-    ServiceDaemon::new().map_err(|e| DiscoveryError::Setup(e.to_string()))
-}
+// ── iroh-http peer browse (specialization of dns_sd::browse) ─────────────────
 
-// ── Browse session ───────────────────────────────────────────────────────────
-
-/// An active browse session that yields discovery events.
+/// An active iroh-http peer-browse session that yields [`PeerDiscoveryEvent`]s.
 ///
-/// Drop to stop receiving events; this stops the underlying DNS-SD browse,
-/// shuts the session's mDNS daemon down, and stops the in-process
-/// address-lookup pump.
+/// Wraps a generic [`dns_sd::browse`] session and, as records arrive, feeds the
+/// endpoint's in-process address lookup so `fetch(nodeId)` resolves LAN peers.
+/// Drop to stop receiving events; the underlying DNS-SD browse and its daemon
+/// are shut down with the inner session.
 #[cfg(feature = "mdns")]
 pub struct BrowseSession {
-    rx: tokio::sync::mpsc::Receiver<PeerDiscoveryEvent>,
-    daemon: ServiceDaemon,
-    service_type: String,
-    pump: tokio::task::JoinHandle<()>,
+    inner: ServiceBrowseSession,
+    lookup: MdnsSdAddressLookup,
 }
 
 #[cfg(feature = "mdns")]
 impl BrowseSession {
-    /// Returns the next event, or `None` when the session is closed.
+    /// Returns the next peer event, or `None` when the session is closed.
+    ///
+    /// Generic (non-iroh) records that carry no usable node id are skipped.
     pub async fn next_event(&mut self) -> Option<PeerDiscoveryEvent> {
-        self.rx.recv().await
+        loop {
+            let record = self.inner.next_record().await?;
+            let Some(ev) = peer_event_from_record(&record) else {
+                continue;
+            };
+            // A bad node id from the wire must not abort the stream.
+            if ev.is_active {
+                let _ = self.lookup.upsert(&ev.node_id, &ev.addrs);
+            } else {
+                self.lookup.remove(&ev.node_id);
+            }
+            return Some(ev);
+        }
     }
 }
 
-#[cfg(feature = "mdns")]
-impl Drop for BrowseSession {
-    fn drop(&mut self) {
-        let _ = self.daemon.stop_browse(&self.service_type);
-        let _ = self.daemon.shutdown();
-        self.pump.abort();
-    }
-}
-
-/// Start a browse session: discover peers on the local network via DNS-SD.
+/// Start a browse session: discover iroh-http peers on the local network.
 ///
 /// Browses `_<service_name>._udp.local`, and registers an in-process
 /// [`AddressLookup`](iroh::address_lookup::AddressLookup) on the endpoint fed by
 /// the discovered peers, so `fetch(nodeId)` auto-resolves LAN peers by node id.
+///
+/// For non-iroh services (custom instance names, ports, or TXT), use
+/// [`dns_sd::browse`] directly.
 #[cfg(feature = "mdns")]
 pub async fn start_browse(
     ep: &iroh::Endpoint,
     service_name: &str,
 ) -> Result<BrowseSession, DiscoveryError> {
-    let service_type = service_type(service_name)?;
-    let daemon = new_daemon()?;
-    let receiver = daemon
-        .browse(&service_type)
-        .map_err(|e| DiscoveryError::Setup(e.to_string()))?;
-
     let lookup = MdnsSdAddressLookup::new();
     ep.address_lookup()
         .map_err(|e| DiscoveryError::Setup(e.to_string()))?
         .add(lookup.clone());
 
-    let (tx, rx) = tokio::sync::mpsc::channel(64);
-    let pump = tokio::spawn(async move {
-        while let Ok(event) = receiver.recv_async().await {
-            match event {
-                ServiceEvent::ServiceResolved(resolved) => {
-                    if let Some(ev) = resolved_to_event(&resolved) {
-                        // A bad node id from the wire must not abort the pump.
-                        let _ = lookup.upsert(&ev.node_id, &ev.addrs);
-                        if tx.send(ev).await.is_err() {
-                            break;
-                        }
-                    }
-                }
-                ServiceEvent::ServiceRemoved(_ty, fullname) => {
-                    if let Some(node_id) = instance_from_fullname(&fullname) {
-                        lookup.remove(&node_id);
-                        let ev = PeerDiscoveryEvent {
-                            is_active: false,
-                            node_id,
-                            addrs: Vec::new(),
-                        };
-                        if tx.send(ev).await.is_err() {
-                            break;
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-    });
-
-    Ok(BrowseSession {
-        rx,
-        daemon,
-        service_type,
-        pump,
-    })
+    let inner = dns_sd::browse(BrowseConfig::udp(service_name))?;
+    Ok(BrowseSession { inner, lookup })
 }
 
-// ── Advertise session ────────────────────────────────────────────────────────
-
-/// An active advertise session.
-///
-/// Drop to stop advertising; this unregisters the DNS-SD service.
-#[cfg(feature = "mdns")]
-pub struct AdvertiseSession {
-    daemon: ServiceDaemon,
-    fullname: String,
-}
-
-#[cfg(feature = "mdns")]
-impl Drop for AdvertiseSession {
-    fn drop(&mut self) {
-        let _ = self.daemon.unregister(&self.fullname);
-        let _ = self.daemon.shutdown();
-    }
-}
+// ── iroh-http advertise (specialization of dns_sd::advertise) ────────────────
 
 /// Start advertising this node on the local network via DNS-SD.
 ///
@@ -291,16 +211,15 @@ impl Drop for AdvertiseSession {
 /// endpoint's bound socket, and A/AAAA records for the host's addresses (kept
 /// up to date as interfaces change). The node remains advertised until the
 /// returned [`AdvertiseSession`] is dropped.
+///
+/// For non-iroh services (custom instance names, ports, or TXT), use
+/// [`dns_sd::advertise`] directly.
 #[cfg(feature = "mdns")]
 pub fn start_advertise(
     ep: &iroh::Endpoint,
     service_name: &str,
 ) -> Result<AdvertiseSession, DiscoveryError> {
-    let service_type = service_type(service_name)?;
-    let daemon = new_daemon()?;
-
     let instance = node_id_label(&ep.id());
-    let host_name = format!("{instance}.local.");
 
     let port = ep
         .bound_sockets()
@@ -309,30 +228,21 @@ pub fn start_advertise(
         .ok_or_else(|| DiscoveryError::Setup("endpoint has no bound socket".into()))?;
 
     let node_addr = ep.addr();
-    let ips: Vec<IpAddr> = node_addr.ip_addrs().map(|s| s.ip()).collect();
+    let addrs: Vec<IpAddr> = node_addr.ip_addrs().map(|s| s.ip()).collect();
 
-    let mut props: Vec<(String, String)> = vec![(TXT_PK.to_string(), instance.clone())];
+    let mut txt: Vec<(String, String)> = vec![(TXT_PK.to_string(), instance.clone())];
     if let Some(relay) = node_addr.relay_urls().next() {
-        props.push((TXT_RELAY.to_string(), relay.to_string()));
+        txt.push((TXT_RELAY.to_string(), relay.to_string()));
     }
 
-    let info = ServiceInfo::new(
-        &service_type,
-        &instance,
-        &host_name,
-        &ips[..],
+    dns_sd::advertise(ServiceConfig {
+        service_name: service_name.to_string(),
+        instance_name: instance,
         port,
-        &props[..],
-    )
-    .map_err(|e| DiscoveryError::Setup(e.to_string()))?
-    .enable_addr_auto();
-
-    let fullname = info.get_fullname().to_string();
-    daemon
-        .register(info)
-        .map_err(|e| DiscoveryError::Setup(e.to_string()))?;
-
-    Ok(AdvertiseSession { daemon, fullname })
+        addrs,
+        txt,
+        protocol: Protocol::Udp,
+    })
 }
 
 // ── Unit tests ────────────────────────────────────────────────────────────────
@@ -397,35 +307,57 @@ mod tests {
 
     #[cfg(feature = "mdns")]
     #[test]
-    fn service_type_builds_udp_local_domain() {
-        assert_eq!(service_type("iroh-http").unwrap(), "_iroh-http._udp.local.");
+    fn peer_event_from_record_prefers_pk_txt_over_instance() {
+        let rec = ServiceRecord {
+            is_active: true,
+            service_type: "_iroh-http._udp.local.".to_string(),
+            instance_name: "fallback-instance".to_string(),
+            host: Some("host.local.".to_string()),
+            port: 4433,
+            addrs: vec!["192.168.1.5:4433".parse().unwrap()],
+            txt: vec![
+                (TXT_PK.to_string(), "pk-node-id".to_string()),
+                (TXT_RELAY.to_string(), "https://relay.example".to_string()),
+            ],
+        };
+        let ev = peer_event_from_record(&rec).expect("event");
+        assert!(ev.is_active);
+        assert_eq!(ev.node_id, "pk-node-id");
+        assert!(ev.addrs.iter().any(|a| a == "192.168.1.5:4433"));
+        assert!(ev.addrs.iter().any(|a| a == "https://relay.example"));
     }
 
     #[cfg(feature = "mdns")]
     #[test]
-    fn service_type_rejects_empty_and_illegal_names() {
-        assert!(matches!(
-            service_type(""),
-            Err(DiscoveryError::InvalidServiceName(_))
-        ));
-        assert!(matches!(
-            service_type("has space"),
-            Err(DiscoveryError::InvalidServiceName(_))
-        ));
-        assert!(matches!(
-            service_type("has.dot"),
-            Err(DiscoveryError::InvalidServiceName(_))
-        ));
+    fn peer_event_from_record_falls_back_to_instance_name() {
+        let rec = ServiceRecord {
+            is_active: true,
+            service_type: "_iroh-http._udp.local.".to_string(),
+            instance_name: "instance-id".to_string(),
+            host: None,
+            port: 0,
+            addrs: vec![],
+            txt: vec![],
+        };
+        let ev = peer_event_from_record(&rec).expect("event");
+        assert_eq!(ev.node_id, "instance-id");
     }
 
     #[cfg(feature = "mdns")]
     #[test]
-    fn instance_from_fullname_extracts_base32_label() {
-        let full = "abcdef234567._iroh-http._udp.local.";
-        assert_eq!(
-            instance_from_fullname(full).as_deref(),
-            Some("abcdef234567")
-        );
-        assert_eq!(instance_from_fullname("._iroh-http._udp.local."), None);
+    fn peer_event_from_record_expired_carries_no_addresses() {
+        let rec = ServiceRecord {
+            is_active: false,
+            service_type: "_iroh-http._udp.local.".to_string(),
+            instance_name: "gone".to_string(),
+            host: None,
+            port: 0,
+            addrs: vec![],
+            txt: vec![],
+        };
+        let ev = peer_event_from_record(&rec).expect("event");
+        assert!(!ev.is_active);
+        assert_eq!(ev.node_id, "gone");
+        assert!(ev.addrs.is_empty());
     }
 }
