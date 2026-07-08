@@ -5515,6 +5515,7 @@ dependencies = [
  "iroh-http-core",
  "iroh-http-discovery",
  "n0-future",
+ "rustls",
  "serde",
  "serde_json",
  "slab",

@@ -97,6 +97,16 @@ impl<R: Runtime> PluginBuilder<R> {
 
     /// Finalise and produce the [`TauriPlugin`].
     pub fn build(self) -> TauriPlugin<R> {
+        // iroh enables reqwest's `rustls-no-provider` feature, so every reqwest
+        // client in the process — including the one Tauri's asset / dev-server
+        // proxy builds to serve the webview — relies on a process-wide default
+        // rustls `CryptoProvider`. Nothing else installs one, so the first
+        // `tauri://` request would abort (SIGABRT), most visibly on iOS where
+        // the dev server is proxied over the network. Install the ring provider
+        // (the backend iroh already uses) once; a returned `Err` just means a
+        // provider is already set, which is fine.
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
         let mut plugin_builder = Builder::new("iroh-http").invoke_handler(tauri::generate_handler![
             commands::create_endpoint,
             commands::close_endpoint,
