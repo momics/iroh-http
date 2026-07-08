@@ -142,7 +142,7 @@ pub async fn create_endpoint<R: tauri::Runtime>(
     // this from iroh-http-discovery's MdnsAddressLookup). Same `add()` call
     // desktop makes. Missing state (scheme/discovery not configured) is a no-op.
     #[cfg(mobile)]
-    if let Some(lookup) = app.try_state::<mobile_address_lookup::MobileAddressLookup>() {
+    if let Some(lookup) = app.try_state::<crate::mobile_address_lookup::MobileAddressLookup>() {
         if let Ok(services) = ep.raw().address_lookup() {
             services.add(lookup.inner().clone());
         }
@@ -1091,12 +1091,12 @@ pub fn generate_secret_key() -> Result<String, String> {
 
 use std::sync::{Mutex, OnceLock};
 
-#[cfg(feature = "discovery")]
+#[cfg(all(feature = "discovery", not(mobile)))]
 use std::sync::Arc;
-#[cfg(feature = "discovery")]
+#[cfg(all(feature = "discovery", not(mobile)))]
 use tokio::sync::Mutex as TokioMutex;
 
-#[cfg(feature = "discovery")]
+#[cfg(all(feature = "discovery", not(mobile)))]
 type BrowseHandle = Arc<TokioMutex<iroh_http_discovery::BrowseSession>>;
 
 /// ISS-017: shared mobile mDNS event buffer, accessible from both
@@ -1119,13 +1119,13 @@ fn mobile_mdns_buffer() -> &'static Mutex<
     BUFFER.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
 }
 
-#[cfg(feature = "discovery")]
+#[cfg(all(feature = "discovery", not(mobile)))]
 fn browse_slab() -> &'static Mutex<slab::Slab<BrowseHandle>> {
     static S: OnceLock<Mutex<slab::Slab<BrowseHandle>>> = OnceLock::new();
     S.get_or_init(|| Mutex::new(slab::Slab::new()))
 }
 
-#[cfg(feature = "discovery")]
+#[cfg(all(feature = "discovery", not(mobile)))]
 fn advertise_slab() -> &'static Mutex<slab::Slab<iroh_http_discovery::AdvertiseSession>> {
     static S: OnceLock<Mutex<slab::Slab<iroh_http_discovery::AdvertiseSession>>> = OnceLock::new();
     S.get_or_init(|| Mutex::new(slab::Slab::new()))
@@ -1172,6 +1172,7 @@ pub async fn mdns_browse(_endpoint_handle: u64, _service_name: String) -> Result
 #[command]
 #[cfg(mobile)]
 pub async fn mdns_browse<R: tauri::Runtime>(
+    _app: tauri::AppHandle<R>,
     state: tauri::State<'_, crate::mobile_mdns::MobileMdns<R>>,
     _endpoint_handle: u64,
     service_name: String,
@@ -1222,12 +1223,12 @@ pub async fn mdns_next_event(
 #[command]
 #[cfg(mobile)]
 pub async fn mdns_next_event<R: tauri::Runtime>(
+    _app: tauri::AppHandle<R>,
     state: tauri::State<'_, crate::mobile_mdns::MobileMdns<R>>,
     lookup: tauri::State<'_, crate::mobile_address_lookup::MobileAddressLookup>,
     browse_handle: u64,
 ) -> Result<Option<PeerDiscoveryEventPayload>, String> {
-    use std::collections::{HashMap, VecDeque};
-    use std::sync::{Mutex, OnceLock};
+    use std::collections::VecDeque;
 
     // TAURI-013: Buffer surplus events from browse_poll so they are not lost.
     // Each browse_handle gets its own queue.
@@ -1294,6 +1295,7 @@ pub fn mdns_browse_close(browse_handle: u64) {
 #[command]
 #[cfg(mobile)]
 pub fn mdns_browse_close<R: tauri::Runtime>(
+    _app: tauri::AppHandle<R>,
     state: tauri::State<'_, crate::mobile_mdns::MobileMdns<R>>,
     browse_handle: u64,
 ) {
@@ -1343,6 +1345,7 @@ pub fn mdns_advertise(_endpoint_handle: u64, _service_name: String) -> Result<u6
 #[command]
 #[cfg(mobile)]
 pub fn mdns_advertise<R: tauri::Runtime>(
+    _app: tauri::AppHandle<R>,
     state: tauri::State<'_, crate::mobile_mdns::MobileMdns<R>>,
     endpoint_handle: u64,
     service_name: String,
@@ -1378,6 +1381,7 @@ pub fn mdns_advertise_close(advertise_handle: u64) {
 #[command]
 #[cfg(mobile)]
 pub fn mdns_advertise_close<R: tauri::Runtime>(
+    _app: tauri::AppHandle<R>,
     state: tauri::State<'_, crate::mobile_mdns::MobileMdns<R>>,
     advertise_handle: u64,
 ) {

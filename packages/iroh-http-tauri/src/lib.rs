@@ -172,7 +172,8 @@ impl<R: Runtime> PluginBuilder<R> {
                 #[cfg(mobile)]
                 {
                     // ISS-009: return recoverable error instead of panicking on init failure.
-                    let mdns = mobile_mdns::init(app, _api).map_err(|e| e.into())?;
+                    let mdns = mobile_mdns::init(app, _api)
+                        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
                     app.manage(mdns);
                     // #310: manage the in-process AddressLookup that feeds
                     // natively-discovered peers to iroh's dialer. Registered on
