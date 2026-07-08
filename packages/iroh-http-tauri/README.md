@@ -46,6 +46,30 @@ fn main() {
 }
 ```
 
+### iOS
+
+The plugin's network-interface enumeration links Apple's `SystemConfiguration`
+framework, which iOS does not link automatically. Add it to your app's
+`bundle.iOS.frameworks` and recreate the iOS project:
+
+```jsonc
+// src-tauri/tauri.conf.json
+{
+  "bundle": {
+    "iOS": {
+      "frameworks": ["SystemConfiguration"]
+    }
+  }
+}
+```
+
+```sh
+npm run tauri ios init   # regenerate the Xcode project so the framework applies
+```
+
+Without this, the Xcode link step fails with missing `_kSCNetwork*` /
+`_kSCProp*` symbols.
+
 ## Quick start
 
 ```ts
