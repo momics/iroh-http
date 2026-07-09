@@ -1,22 +1,20 @@
 name: Publish
 
-# Triggered automatically when the Release workflow succeeds, or manually
-# when you need to re-publish without rebuilding all 10 native targets.
+# Manually promotes a tagged release to the immutable registries (npm, crates.io,
+# JSR). Publishing NEVER auto-fires — a maintainer deliberately dispatches this
+# workflow once the tag's Build and Extended tests are green.
 #
 # Manual usage (Actions → Run workflow):
-#   run_id: the ID of the successful Release workflow run whose Node artifacts
-#           you want to publish. Find it in the URL of the release run page.
+#   tag: the release tag to promote (e.g. v0.6.0). Its commit SHA is resolved to
+#        the tag's successful `Build` run, whose native artifacts are published.
 #
 # All publish steps are idempotent — safe to run multiple times.
 
 on:
-  workflow_run:
-    workflows: ["Build"]
-    types: [completed]
   workflow_dispatch:
     inputs:
-      run_id:
-        description: 'Build workflow run ID (for Node native artifacts)'
+      tag:
+        description: 'Release tag to publish (e.g. v0.6.0)'
         required: true
         type: string
       target:
@@ -35,49 +33,50 @@ jobs:
 
   # ── 0a. Resolve ref ───────────────────────────────────────────────────────────
   # Determine the EXACT commit whose artifacts we are about to publish, so the
-  # source we check out matches the native binaries built from that run. On a
-  # manual dispatch `github.sha` is the workflow's own ref (e.g. main@HEAD), NOT
-  # the commit behind `run_id` — publishing those together would ship source and
-  # binaries from different commits. Resolve the Build run's head SHA via the API
-  # and fail closed if that run did not succeed.
+  # source we check out matches the native binaries built from that run. Resolve
+  # the dispatched tag to its commit SHA, then find the tag's successful `Build`
+  # run and export that run's id so the publish jobs download the matching native
+  # artifacts. Fail closed if the tag has no successful Build run.
 
   resolve-ref:
     name: Resolve publish ref
     runs-on: ubuntu-latest
-    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
     outputs:
       sha: ${{ steps.resolve.outputs.sha }}
+      build_run_id: ${{ steps.resolve.outputs.build_run_id }}
     steps:
-      - name: Resolve exact commit SHA to publish
+      - name: Resolve tag to commit SHA and Build run
         id: resolve
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            RUN_ID="${{ inputs.run_id }}"
-            echo "Resolving head SHA for Build run $RUN_ID"
-            RUN_JSON=$(gh api "repos/${{ github.repository }}/actions/runs/$RUN_ID")
-            SHA=$(echo "$RUN_JSON" | jq -r '.head_sha')
-            CONCLUSION=$(echo "$RUN_JSON" | jq -r '.conclusion')
-            if [ "$CONCLUSION" != "success" ]; then
-              echo "::error::Build run $RUN_ID did not succeed (conclusion=$CONCLUSION) — refusing to publish"
-              exit 1
-            fi
-          else
-            SHA="${{ github.event.workflow_run.head_sha }}"
-          fi
+          TAG="${{ inputs.tag }}"
+          echo "Resolving commit SHA for tag $TAG"
+          # Works for both lightweight and annotated tags — the commits endpoint
+          # dereferences the tag to its underlying commit.
+          SHA=$(gh api "repos/${{ github.repository }}/commits/$TAG" --jq '.sha')
           if [ -z "$SHA" ] || [ "$SHA" = "null" ]; then
-            echo "::error::Could not resolve a commit SHA to publish"
+            echo "::error::Could not resolve tag $TAG to a commit SHA"
             exit 1
           fi
-          echo "Publishing from commit $SHA"
+          echo "Tag $TAG points at commit $SHA"
+
+          echo "Looking for a successful Build run for $SHA"
+          BUILD_RUN_ID=$(gh api \
+            "repos/${{ github.repository }}/actions/workflows/build.yml/runs?head_sha=$SHA&per_page=100" \
+            --jq '[.workflow_runs[] | select(.status == "completed" and .conclusion == "success")] | first | .id')
+          if [ -z "$BUILD_RUN_ID" ] || [ "$BUILD_RUN_ID" = "null" ]; then
+            echo "::error::No successful Build run found for tag $TAG ($SHA) — refusing to publish"
+            exit 1
+          fi
+          echo "Publishing artifacts from Build run $BUILD_RUN_ID (commit $SHA)"
           echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "build_run_id=$BUILD_RUN_ID" >> "$GITHUB_OUTPUT"
 
   # ── 0. Verify ─────────────────────────────────────────────────────────────────
-  # Skip automatically if triggered by a failed Release run. The extended-tests
-  # gate runs for the resolved SHA in both trigger modes — a manual re-publish
-  # must still prove the published commit passed extended tests.
+  # The extended-tests gate runs for the resolved SHA — a manual promotion must
+  # prove the published commit passed extended tests before anything ships.
 
   verify:
     name: Verify before publish
@@ -138,6 +137,7 @@ jobs:
     name: Publish Rust crates
     runs-on: ubuntu-latest
     needs: [resolve-ref, verify]
+    environment: release
     if: inputs.target == null || inputs.target == 'all' || inputs.target == 'crates'
     steps:
       - uses: actions/checkout@v6
@@ -208,6 +208,7 @@ jobs:
     name: Publish npm packages
     runs-on: ubuntu-latest
     needs: [resolve-ref, verify]
+    environment: release
     if: inputs.target == null || inputs.target == 'all' || inputs.target == 'npm'
     steps:
       - uses: actions/checkout@v6
@@ -230,7 +231,7 @@ jobs:
           pattern: node-native-*
           path: packages/iroh-http-node/artifacts/
           merge-multiple: true
-          run-id: ${{ github.event.workflow_run.id || inputs.run_id }}
+          run-id: ${{ needs.resolve-ref.outputs.build_run_id }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Move artifacts into platform package dirs
@@ -294,6 +295,7 @@ jobs:
     name: Publish JSR packages
     runs-on: ubuntu-latest
     needs: [resolve-ref, verify]
+    environment: release
     if: inputs.target == null || inputs.target == 'all' || inputs.target == 'jsr'
     steps:
       - uses: actions/checkout@v6
@@ -325,7 +327,7 @@ jobs:
           pattern: deno-native-*
           path: packages/iroh-http-deno/lib/
           merge-multiple: true
-          run-id: ${{ github.event.workflow_run.id || inputs.run_id }}
+          run-id: ${{ needs.resolve-ref.outputs.build_run_id }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Generate native checksums
