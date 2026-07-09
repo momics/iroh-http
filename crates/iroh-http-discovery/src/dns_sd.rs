@@ -127,9 +127,19 @@ pub(crate) fn service_type(
 }
 
 /// Extract the service instance label from a DNS-SD fullname like
-/// `<instance>._my-app._udp.local.`.
-pub(crate) fn instance_from_fullname(fullname: &str) -> Option<String> {
-    let instance = fullname.split("._").next()?;
+/// `<instance>._my-app._udp.local.`, given the known `ty_domain` suffix
+/// (`_my-app._udp.local.`) reported alongside it.
+///
+/// Stripping the exact, known suffix — rather than splitting on the first
+/// `"._"` — keeps this correct for the *generic* DNS-SD surface, where an
+/// instance label can itself legally contain `._` (`mdns-sd` escapes literal
+/// dots in TXT/instance data with a leading `\`, but an instance name built
+/// from arbitrary bytes can still contain the two-character sequence `._`
+/// without escaping). A naive first-match split would then chop the label
+/// short.
+pub(crate) fn instance_from_fullname(fullname: &str, ty_domain: &str) -> Option<String> {
+    let suffix = format!(".{ty_domain}");
+    let instance = fullname.strip_suffix(suffix.as_str())?;
     if instance.is_empty() {
         None
     } else {
@@ -152,7 +162,7 @@ pub(crate) fn new_daemon() -> Result<ServiceDaemon, DiscoveryError> {
 // ── Record conversion ────────────────────────────────────────────────────────
 
 fn record_from_resolved(rs: &mdns_sd::ResolvedService) -> Option<ServiceRecord> {
-    let instance_name = instance_from_fullname(&rs.fullname)?;
+    let instance_name = instance_from_fullname(&rs.fullname, &rs.ty_domain)?;
     let addrs = rs
         .addresses
         .iter()
@@ -175,7 +185,7 @@ fn record_from_resolved(rs: &mdns_sd::ResolvedService) -> Option<ServiceRecord> 
 }
 
 fn record_from_removed(service_type: String, fullname: &str) -> Option<ServiceRecord> {
-    let instance_name = instance_from_fullname(fullname)?;
+    let instance_name = instance_from_fullname(fullname, &service_type)?;
     Some(ServiceRecord {
         is_active: false,
         service_type,
@@ -339,12 +349,30 @@ mod tests {
 
     #[test]
     fn instance_from_fullname_extracts_label() {
+        let ty_domain = "_iroh-http._udp.local.";
         let full = "abcdef234567._iroh-http._udp.local.";
         assert_eq!(
-            instance_from_fullname(full).as_deref(),
+            instance_from_fullname(full, ty_domain).as_deref(),
             Some("abcdef234567")
         );
-        assert_eq!(instance_from_fullname("._iroh-http._udp.local."), None);
+        assert_eq!(
+            instance_from_fullname("._iroh-http._udp.local.", ty_domain),
+            None
+        );
+    }
+
+    #[test]
+    fn instance_from_fullname_handles_dotted_instance_label() {
+        // Regression for PR #330 review finding #5: an instance label that
+        // itself contains the two-character sequence `._` must not be
+        // truncated by a naive first-match split — only the known
+        // `ty_domain` suffix should be stripped.
+        let ty_domain = "_my-app._udp.local.";
+        let full = "foo._bar._my-app._udp.local.";
+        assert_eq!(
+            instance_from_fullname(full, ty_domain).as_deref(),
+            Some("foo._bar")
+        );
     }
 
     #[test]

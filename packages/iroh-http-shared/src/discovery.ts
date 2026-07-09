@@ -84,6 +84,16 @@ export interface DnsSdBrowseOptions {
  *
  * Records are lossless: every TXT property, the instance label, host, port and
  * resolved socket addresses are preserved.
+ *
+ * **Platform caveat:** on iOS, the generic `node.browse()` path is
+ * metadata-only — `host` is `undefined`, `port` is `0`, and `addrs` is empty,
+ * even on `"discovered"` (active) records. Resolving the target host/port/IP
+ * would require opening an `NWConnection` per result, which this surface does
+ * not do. Desktop and Android fully resolve these fields. See ADR-018 §8 for
+ * the rationale; consumers that need addresses on iOS should rely on a
+ * `relay`/`address` TXT entry surfaced through `addrs` as a best effort, or
+ * use `asIrohPeer()` / `node.browsePeers()` for the iroh-peer specialization,
+ * which resolves addresses via `AddressLookup` instead of DNS-SD.
  */
 export interface ServiceRecord {
   /** `true` when the service appeared or was updated; `false` on expiry. */
