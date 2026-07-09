@@ -1,5 +1,6 @@
 import { PublicKey, resolveNodeId } from "./PublicKey.js";
 import { SecretKey } from "./SecretKey.js";
+import { advertiseService, browseServices } from "./dns-sd.js";
 import { type FetchFn, makeFetch } from "./fetch.js";
 import {
   makeServe,
@@ -35,11 +36,27 @@ import type {
   AdvertiseOptions,
   BrowseOptions,
   DiscoveredPeer,
+  DnsSdAdvertiseOptions,
+  DnsSdBrowseOptions,
   PeerDiscoveryEvent,
+  ServiceRecord,
 } from "./discovery.js";
 import type { NodeOptions } from "./options/NodeOptions.js";
 
 const _INTERNAL = Symbol("IrohNode._create");
+
+/**
+ * True when `nodeId` (as reported by a peer browse event) identifies the local
+ * node. Compared through {@link PublicKey} so encoding differences don't matter;
+ * an unparseable id is treated as "not self" so real peers are never dropped.
+ */
+function isSelfPeer(nodeId: string, selfId: PublicKey): boolean {
+  try {
+    return PublicKey.fromString(nodeId).equals(selfId);
+  } catch {
+    return false;
+  }
+}
 
 export class IrohNode extends EventTarget {
   readonly publicKey: PublicKey;
@@ -298,7 +315,12 @@ export class IrohNode extends EventTarget {
   }
 
   /**
-   * Discover peers on the local network via mDNS.
+   * Discover iroh-http peers on the local network via mDNS.
+   *
+   * The iroh-http specialization of {@link IrohNode.browse}: it browses the
+   * reserved `"iroh-http"` service, maps each record to a {@link DiscoveredPeer}
+   * (`nodeId` / `addrs` / `isActive`), and feeds the endpoint's address lookup
+   * so `fetch(nodeId)` resolves discovered peers automatically.
    *
    * Returns an async iterable that yields a {@link DiscoveredPeer} for each
    * mDNS announcement received. Mirroring iroh's discovery semantics, events
@@ -307,22 +329,28 @@ export class IrohNode extends EventTarget {
    * out is yielded once with `isActive: false`. The iterable ends when the node
    * closes or `options.signal` is aborted.
    *
+   * This node's own advertisement is excluded: mDNS echoes a node's records
+   * back to itself, but a peer stream should only surface *other* nodes. Use
+   * the generic {@link IrohNode.browse} if you need the raw DNS-SD records,
+   * including this node's own.
+   *
    * @param options.serviceName mDNS service name to browse. Defaults to `"iroh-http"`.
    * @param options.signal Abort signal to stop browsing and end the iterable.
    *
    * ```ts
    * const ac = new AbortController();
-   * for await (const peer of node.browse({ serviceName: "my-app", signal: ac.signal })) {
+   * for await (const peer of node.browsePeers({ signal: ac.signal })) {
    *   console.log(peer.isActive ? "discovered" : "expired", peer.nodeId, peer.addrs);
    * }
    * ac.abort(); // stop browsing
    * ```
    */
-  browse(options?: BrowseOptions): AsyncIterable<DiscoveredPeer> {
+  browsePeers(options?: BrowseOptions): AsyncIterable<DiscoveredPeer> {
     const adapter = this.#adapter;
     const handle = this.#endpointHandle;
     const svcName = options?.serviceName ?? "iroh-http";
     const signal = options?.signal;
+    const selfId = this.publicKey;
 
     return {
       [Symbol.asyncIterator]() {
@@ -330,51 +358,64 @@ export class IrohNode extends EventTarget {
         return {
           async next(): Promise<IteratorResult<DiscoveredPeer>> {
             if (browseHandle === null) {
-              browseHandle = await adapter.mdnsBrowse(handle, svcName);
-            }
-            if (signal?.aborted) {
-              adapter.mdnsBrowseClose(browseHandle);
-              browseHandle = null;
-              return { done: true as const, value: undefined };
+              browseHandle = await adapter.browsePeers(handle, svcName);
             }
 
-            let event: PeerDiscoveryEvent | null;
-            if (signal) {
-              const abortPromise = new Promise<null>((resolve) => {
-                if (signal.aborted) {
-                  resolve(null);
-                  return;
-                }
-                signal.addEventListener("abort", () => resolve(null), {
-                  once: true,
-                });
-              });
-              event = await Promise.race([
-                adapter.mdnsNextEvent(browseHandle),
-                abortPromise,
-              ]);
-              if (signal.aborted && browseHandle !== null) {
-                adapter.mdnsBrowseClose(browseHandle);
+            // Loop so this node's own advertisement is transparently skipped.
+            // mDNS echoes a node's own multicast records back to it, so a node
+            // that both advertises and browses sees itself — but a *peer* API
+            // should never surface the local node as a discoverable peer (you
+            // never dial yourself; self-fetch is loopback per ADR-015). The
+            // generic `browse()` primitive stays faithful to DNS-SD and still
+            // reports it.
+            while (true) {
+              if (signal?.aborted) {
+                adapter.browsePeersClose(browseHandle);
                 browseHandle = null;
                 return { done: true as const, value: undefined };
               }
-            } else {
-              event = await adapter.mdnsNextEvent(browseHandle);
-            }
 
-            if (event === null) {
-              return { done: true as const, value: undefined };
+              let event: PeerDiscoveryEvent | null;
+              if (signal) {
+                const abortPromise = new Promise<null>((resolve) => {
+                  if (signal.aborted) {
+                    resolve(null);
+                    return;
+                  }
+                  signal.addEventListener("abort", () => resolve(null), {
+                    once: true,
+                  });
+                });
+                event = await Promise.race([
+                  adapter.browsePeersNext(browseHandle),
+                  abortPromise,
+                ]);
+                if (signal.aborted && browseHandle !== null) {
+                  adapter.browsePeersClose(browseHandle);
+                  browseHandle = null;
+                  return { done: true as const, value: undefined };
+                }
+              } else {
+                event = await adapter.browsePeersNext(browseHandle);
+              }
+
+              if (event === null) {
+                return { done: true as const, value: undefined };
+              }
+              if (isSelfPeer(event.nodeId, selfId)) {
+                continue;
+              }
+              const discovered: DiscoveredPeer = {
+                nodeId: event.nodeId,
+                addrs: event.addrs ?? [],
+                isActive: event.type === "discovered",
+              };
+              return { done: false as const, value: discovered };
             }
-            const discovered: DiscoveredPeer = {
-              nodeId: event.nodeId,
-              addrs: event.addrs ?? [],
-              isActive: event.type === "discovered",
-            };
-            return { done: false as const, value: discovered };
           },
           return(): Promise<IteratorResult<DiscoveredPeer>> {
             if (browseHandle !== null) {
-              adapter.mdnsBrowseClose(browseHandle);
+              adapter.browsePeersClose(browseHandle);
               browseHandle = null;
             }
             return Promise.resolve({ done: true as const, value: undefined });
@@ -385,7 +426,11 @@ export class IrohNode extends EventTarget {
   }
 
   /**
-   * Announce this node on the local network via mDNS so peers can discover it.
+   * Advertise this node as a discoverable iroh-http peer on the local network.
+   *
+   * The iroh-http specialization of {@link IrohNode.advertise}: it announces the
+   * reserved `"iroh-http"` service using this node's endpoint port and public
+   * key (as the `pk` TXT), so other iroh-http nodes can find and dial it.
    *
    * Pass `options.signal` to control how long the node stays advertised: the
    * returned promise stays pending until the signal is aborted, then advertising
@@ -398,31 +443,79 @@ export class IrohNode extends EventTarget {
    * ```ts
    * const ac = new AbortController();
    * // Resolves when `ac.abort()` is called (e.g. from a Ctrl+C handler).
-   * const advertising = node.advertise({ serviceName: "my-app", signal: ac.signal });
+   * const advertising = node.advertisePeer({ signal: ac.signal });
    * // ... later, to stop advertising:
    * ac.abort();
    * await advertising;
    * ```
    */
-  async advertise(options?: AdvertiseOptions): Promise<void> {
+  async advertisePeer(options?: AdvertiseOptions): Promise<void> {
     const svcName = options?.serviceName ?? "iroh-http";
     const signal = options?.signal;
-    const advHandle = await this.#adapter.mdnsAdvertise(
+    const advHandle = await this.#adapter.advertisePeer(
       this.#endpointHandle,
       svcName,
     );
     if (signal) {
       return new Promise<void>((resolve) => {
         signal.addEventListener("abort", () => {
-          this.#adapter.mdnsAdvertiseClose(advHandle);
+          this.#adapter.advertisePeerClose(advHandle);
           resolve();
         }, { once: true });
         if (signal.aborted) {
-          this.#adapter.mdnsAdvertiseClose(advHandle);
+          this.#adapter.advertisePeerClose(advHandle);
           resolve();
         }
       });
     }
+  }
+
+  /**
+   * Advertise a generic DNS-SD service on the local network.
+   *
+   * The protocol-neutral primitive underneath {@link IrohNode.advertisePeer}:
+   * announce *any* local service with full control over instance name, port,
+   * TXT records, and protocol. It runs on this node's native binding because
+   * the discovery FFI is loaded through the node addon (see ADR-018).
+   *
+   * Pass `options.signal` to stop advertising; without one the service stays
+   * advertised for the lifetime of the process.
+   *
+   * ```ts
+   * const ac = new AbortController();
+   * const advertising = node.advertise({
+   *   serviceName: "my-app",
+   *   instanceName: "living-room",
+   *   port: 8080,
+   *   txt: { version: "1" },
+   *   signal: ac.signal,
+   * });
+   * // ... later:
+   * ac.abort();
+   * await advertising;
+   * ```
+   */
+  advertise(options: DnsSdAdvertiseOptions): Promise<void> {
+    return advertiseService(this.#adapter, options);
+  }
+
+  /**
+   * Browse for a generic DNS-SD service on the local network.
+   *
+   * The protocol-neutral primitive underneath {@link IrohNode.browsePeers}:
+   * discover *any* local service and receive lossless {@link ServiceRecord}s
+   * (instance label, host, port, addresses, and every TXT property). Use
+   * `asIrohPeer` to recognize an iroh-http peer inside the results.
+   *
+   * ```ts
+   * const ac = new AbortController();
+   * for await (const rec of node.browse({ serviceName: "my-app", signal: ac.signal })) {
+   *   console.log(rec.instanceName, rec.addrs, rec.txt);
+   * }
+   * ```
+   */
+  browse(options: DnsSdBrowseOptions): AsyncIterable<ServiceRecord> {
+    return browseServices(this.#adapter, options);
   }
 
   /**

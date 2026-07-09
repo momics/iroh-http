@@ -3,6 +3,16 @@
  */
 
 import {
+  advertise as napiAdvertise,
+  advertiseClose as napiAdvertiseClose,
+  advertisePeer as napiAdvertisePeer,
+  advertisePeerClose as napiAdvertisePeerClose,
+  browse as napiBrowse,
+  browseClose as napiBrowseClose,
+  browseNext as napiBrowseNext,
+  browsePeers as napiBrowsePeers,
+  browsePeersClose as napiBrowsePeersClose,
+  browsePeersNext as napiBrowsePeersNext,
   closeEndpoint,
   createEndpoint,
   endpointStats as napiEndpointStats,
@@ -15,11 +25,6 @@ import {
   jsNextChunk,
   jsSendChunk,
   jsTryNextChunk,
-  mdnsAdvertise as napiMdnsAdvertise,
-  mdnsAdvertiseClose as napiMdnsAdvertiseClose,
-  mdnsBrowse as napiMdnsBrowse,
-  mdnsBrowseClose as napiMdnsBrowseClose,
-  mdnsNextEvent as napiMdnsNextEvent,
   nextPathChange as napiNextPathChange,
   nodeAddr as napiNodeAddr,
   nodeTicket as napiNodeTicket,
@@ -73,6 +78,11 @@ import type {
   PathInfo,
   PeerDiscoveryEvent,
   PeerStats,
+} from "@momics/iroh-http-shared";
+import type {
+  DnsSdProtocol,
+  ServiceConfig,
+  ServiceRecord,
 } from "@momics/iroh-http-shared";
 
 // ── Graceful shutdown tracking ─────────────────────────────────────────────────
@@ -363,13 +373,13 @@ class NodeAdapter extends IrohAdapter {
   }
 
   // ── mDNS discovery ──────────────────────────────────────────────────────────
-  async mdnsBrowse(handle: number, serviceName: string): Promise<number> {
-    return napiMdnsBrowse(handle, serviceName);
+  async browsePeers(handle: number, serviceName: string): Promise<number> {
+    return napiBrowsePeers(handle, serviceName);
   }
-  async mdnsNextEvent(
+  async browsePeersNext(
     browseHandle: number,
   ): Promise<PeerDiscoveryEvent | null> {
-    const ev = await napiMdnsNextEvent(browseHandle);
+    const ev = await napiBrowsePeersNext(browseHandle);
     if (!ev) return null;
     return {
       type: ev.isActive ? "discovered" : "expired",
@@ -377,14 +387,53 @@ class NodeAdapter extends IrohAdapter {
       addrs: ev.addrs,
     };
   }
-  mdnsBrowseClose(browseHandle: number): void {
-    napiMdnsBrowseClose(browseHandle);
+  browsePeersClose(browseHandle: number): void {
+    napiBrowsePeersClose(browseHandle);
   }
-  async mdnsAdvertise(handle: number, serviceName: string): Promise<number> {
-    return napiMdnsAdvertise(handle, serviceName);
+  async advertisePeer(handle: number, serviceName: string): Promise<number> {
+    return napiAdvertisePeer(handle, serviceName);
   }
-  mdnsAdvertiseClose(advertiseHandle: number): void {
-    napiMdnsAdvertiseClose(advertiseHandle);
+  advertisePeerClose(advertiseHandle: number): void {
+    napiAdvertisePeerClose(advertiseHandle);
+  }
+
+  // ── Generic DNS-SD ──────────────────────────────────────────────────────────
+  async advertise(config: ServiceConfig): Promise<number> {
+    return napiAdvertise({
+      serviceName: config.serviceName,
+      instanceName: config.instanceName,
+      port: config.port,
+      addrs: config.addrs ?? [],
+      txt: config.txt ?? {},
+      protocol: config.protocol,
+    });
+  }
+  advertiseClose(advertiseHandle: number): void {
+    napiAdvertiseClose(advertiseHandle);
+  }
+  async browse(
+    serviceName: string,
+    protocol?: DnsSdProtocol,
+  ): Promise<number> {
+    return napiBrowse(serviceName, protocol);
+  }
+  async browseNext(
+    browseHandle: number,
+  ): Promise<ServiceRecord | null> {
+    const rec = await napiBrowseNext(browseHandle);
+    if (!rec) return null;
+    return {
+      isActive: rec.isActive,
+      serviceType: rec.serviceType,
+      instanceName: rec.instanceName,
+      host: rec.host ?? undefined,
+      port: rec.port,
+      addrs: rec.addrs,
+      txt: rec.txt,
+    };
+  }
+  browseClose(browseHandle: number): void {
+    napiBrowseClose(browseHandle);
   }
 
   // ── Transport events ────────────────────────────────────────────────────────
@@ -421,8 +470,26 @@ class NodeAdapter extends IrohAdapter {
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
-export { PublicKey, SecretKey } from "@momics/iroh-http-shared";
-export type { IrohNode, IrohNodeWithSecret, NodeOptions };
+export {
+  asIrohPeer,
+  IROH_HTTP_SERVICE,
+  PublicKey,
+  SecretKey,
+  TXT_KEY_PUBLIC_KEY,
+  TXT_KEY_RELAY,
+} from "@momics/iroh-http-shared";
+export type {
+  DnsSdAdvertiseOptions,
+  DnsSdBrowseOptions,
+} from "@momics/iroh-http-shared";
+export type {
+  DnsSdProtocol,
+  IrohNode,
+  IrohNodeWithSecret,
+  NodeOptions,
+  ServiceConfig,
+  ServiceRecord,
+};
 
 /**
  * Create an Iroh node — the entry point for peer-to-peer HTTP.

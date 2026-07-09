@@ -58,6 +58,8 @@ fn install_panic_hook() {
     });
 }
 
+use std::collections::HashMap;
+
 #[cfg(feature = "discovery")]
 use slab::Slab;
 #[cfg(feature = "discovery")]
@@ -243,6 +245,17 @@ fn advertise_slab() -> &'static Mutex<Slab<iroh_http_discovery::AdvertiseSession
     S.get_or_init(|| Mutex::new(Slab::new()))
 }
 
+/// Generic (non-iroh) DNS-SD browse sessions, keyed independently of the
+/// iroh-http peer-browse slab. See `dns_sd_*` entry points.
+#[cfg(feature = "discovery")]
+type GenericBrowseHandle = Arc<TokioMutex<iroh_http_discovery::ServiceBrowseSession>>;
+
+#[cfg(feature = "discovery")]
+fn generic_browse_slab() -> &'static Mutex<Slab<GenericBrowseHandle>> {
+    static S: OnceLock<Mutex<Slab<GenericBrowseHandle>>> = OnceLock::new();
+    S.get_or_init(|| Mutex::new(Slab::new()))
+}
+
 // ── Endpoint lifecycle ────────────────────────────────────────────────────────
 
 /// Extract a `u64` handle from a [`BigInt`].
@@ -417,7 +430,7 @@ pub async fn close_endpoint(endpoint_handle: u32, force: Option<bool>) -> napi::
 
 // ── mDNS browse / advertise ──────────────────────────────────────────────────
 
-/// Discovery event returned by `mdnsNextEvent`.
+/// Discovery event returned by `browsePeersNext`.
 #[napi(object)]
 pub struct JsPeerDiscoveryEvent {
     /// `true` = peer appeared; `false` = peer expired.
@@ -432,11 +445,11 @@ pub struct JsPeerDiscoveryEvent {
 /// Returns a browse handle for polling events.
 #[napi]
 #[cfg(feature = "discovery")]
-pub async fn mdns_browse(endpoint_handle: u32, service_name: String) -> napi::Result<u32> {
+pub async fn browse_peers(endpoint_handle: u32, service_name: String) -> napi::Result<u32> {
     let ep = get_endpoint(endpoint_handle)?;
     validate_bounded_string("serviceName", &service_name, MAX_MDNS_SERVICE_NAME_LEN)
         .map_err(ffi_invalid_arg)?;
-    let session = iroh_http_discovery::start_browse(ep.raw(), &service_name)
+    let session = iroh_http_discovery::browse_peers(ep.raw(), &service_name)
         .await
         .map_err(|e| napi::Error::new(Status::GenericFailure, format_error_json("REFUSED", e)))?;
     let handle = lock_browse_slab()?.insert(Arc::new(TokioMutex::new(session))) as u32;
@@ -445,7 +458,7 @@ pub async fn mdns_browse(endpoint_handle: u32, service_name: String) -> napi::Re
 
 #[napi]
 #[cfg(not(feature = "discovery"))]
-pub async fn mdns_browse(_endpoint_handle: u32, _service_name: String) -> napi::Result<u32> {
+pub async fn browse_peers(_endpoint_handle: u32, _service_name: String) -> napi::Result<u32> {
     Err(napi::Error::new(
         Status::GenericFailure,
         format_error_json("UNKNOWN", "discovery feature not enabled in this build"),
@@ -456,7 +469,7 @@ pub async fn mdns_browse(_endpoint_handle: u32, _service_name: String) -> napi::
 /// Returns `null` when the session is closed.
 #[napi]
 #[cfg(feature = "discovery")]
-pub async fn mdns_next_event(browse_handle: u32) -> napi::Result<Option<JsPeerDiscoveryEvent>> {
+pub async fn browse_peers_next(browse_handle: u32) -> napi::Result<Option<JsPeerDiscoveryEvent>> {
     let session =
         { lock_browse_slab()?.get(browse_handle as usize).cloned() }.ok_or_else(|| {
             napi::Error::new(
@@ -477,7 +490,7 @@ pub async fn mdns_next_event(browse_handle: u32) -> napi::Result<Option<JsPeerDi
 
 #[napi]
 #[cfg(not(feature = "discovery"))]
-pub async fn mdns_next_event(_browse_handle: u32) -> napi::Result<Option<JsPeerDiscoveryEvent>> {
+pub async fn browse_peers_next(_browse_handle: u32) -> napi::Result<Option<JsPeerDiscoveryEvent>> {
     Err(napi::Error::new(
         Status::GenericFailure,
         format_error_json("UNKNOWN", "discovery feature not enabled in this build"),
@@ -487,7 +500,7 @@ pub async fn mdns_next_event(_browse_handle: u32) -> napi::Result<Option<JsPeerD
 /// Close a browse session, stopping mDNS discovery.
 #[napi]
 #[cfg(feature = "discovery")]
-pub fn mdns_browse_close(browse_handle: u32) {
+pub fn browse_peers_close(browse_handle: u32) {
     if let Ok(mut slab) = browse_slab().lock() {
         if slab.contains(browse_handle as usize) {
             slab.remove(browse_handle as usize);
@@ -499,7 +512,7 @@ pub fn mdns_browse_close(browse_handle: u32) {
 
 #[napi]
 #[cfg(not(feature = "discovery"))]
-pub fn mdns_browse_close(_browse_handle: u32) {}
+pub fn browse_peers_close(_browse_handle: u32) {}
 
 /// Start advertising this node on the local network via mDNS.
 /// Returns an advertise handle.
@@ -513,11 +526,11 @@ pub fn mdns_browse_close(_browse_handle: u32) {}
 /// post-shutdown calls reject gracefully instead of aborting.
 #[napi]
 #[cfg(feature = "discovery")]
-pub async fn mdns_advertise(endpoint_handle: u32, service_name: String) -> napi::Result<u32> {
+pub async fn advertise_peer(endpoint_handle: u32, service_name: String) -> napi::Result<u32> {
     let ep = get_endpoint(endpoint_handle)?;
     validate_bounded_string("serviceName", &service_name, MAX_MDNS_SERVICE_NAME_LEN)
         .map_err(ffi_invalid_arg)?;
-    let session = iroh_http_discovery::start_advertise(ep.raw(), &service_name)
+    let session = iroh_http_discovery::advertise_peer(ep.raw(), &service_name)
         .map_err(|e| napi::Error::new(Status::GenericFailure, format_error_json("REFUSED", e)))?;
     let handle = lock_advertise_slab()?.insert(session) as u32;
     Ok(handle)
@@ -525,7 +538,7 @@ pub async fn mdns_advertise(endpoint_handle: u32, service_name: String) -> napi:
 
 #[napi]
 #[cfg(not(feature = "discovery"))]
-pub async fn mdns_advertise(_endpoint_handle: u32, _service_name: String) -> napi::Result<u32> {
+pub async fn advertise_peer(_endpoint_handle: u32, _service_name: String) -> napi::Result<u32> {
     Err(napi::Error::new(
         Status::GenericFailure,
         format_error_json("UNKNOWN", "discovery feature not enabled in this build"),
@@ -535,7 +548,7 @@ pub async fn mdns_advertise(_endpoint_handle: u32, _service_name: String) -> nap
 /// Stop advertising this node on the local network.
 #[napi]
 #[cfg(feature = "discovery")]
-pub fn mdns_advertise_close(advertise_handle: u32) {
+pub fn advertise_peer_close(advertise_handle: u32) {
     if let Ok(mut slab) = advertise_slab().lock() {
         if slab.contains(advertise_handle as usize) {
             slab.remove(advertise_handle as usize);
@@ -547,7 +560,215 @@ pub fn mdns_advertise_close(advertise_handle: u32) {
 
 #[napi]
 #[cfg(not(feature = "discovery"))]
-pub fn mdns_advertise_close(_advertise_handle: u32) {}
+pub fn advertise_peer_close(_advertise_handle: u32) {}
+
+// ── Generic DNS-SD (endpoint-free) ───────────────────────────────────────────
+
+/// A service to advertise via generic DNS-SD (no iroh endpoint involved).
+#[napi(object)]
+pub struct JsServiceConfig {
+    /// Bare service name, e.g. `"my-app"` → `_my-app._udp.local.`.
+    pub service_name: String,
+    /// DNS-SD instance label.
+    pub instance_name: String,
+    /// SRV port peers connect to.
+    pub port: u32,
+    /// Extra IP addresses to advertise (local interface addrs added auto).
+    pub addrs: Vec<String>,
+    /// TXT key/value properties.
+    pub txt: HashMap<String, String>,
+    /// `"udp"` (default) or `"tcp"`.
+    pub protocol: Option<String>,
+}
+
+/// A fully-resolved DNS-SD service record returned by `browseNext`.
+#[napi(object)]
+pub struct JsServiceRecord {
+    /// `true` = appeared/updated; `false` = expired.
+    pub is_active: bool,
+    /// Service type and domain, e.g. `_my-app._udp.local.`.
+    pub service_type: String,
+    /// Service instance label.
+    pub instance_name: String,
+    /// Host name (absent on expiry).
+    pub host: Option<String>,
+    /// SRV port (`0` on expiry).
+    pub port: u32,
+    /// Resolved socket addresses (empty on expiry).
+    pub addrs: Vec<String>,
+    /// All TXT key/value properties (empty on expiry).
+    pub txt: HashMap<String, String>,
+}
+
+#[cfg(feature = "discovery")]
+fn parse_protocol(s: Option<&str>) -> napi::Result<iroh_http_discovery::Protocol> {
+    match s.unwrap_or("udp") {
+        "udp" => Ok(iroh_http_discovery::Protocol::Udp),
+        "tcp" => Ok(iroh_http_discovery::Protocol::Tcp),
+        other => Err(napi::Error::new(
+            Status::InvalidArg,
+            format_error_json("INVALID_INPUT", format!("invalid protocol: {other:?}")),
+        )),
+    }
+}
+
+#[cfg(feature = "discovery")]
+fn js_config_to_service_config(
+    c: JsServiceConfig,
+) -> napi::Result<iroh_http_discovery::ServiceConfig> {
+    validate_bounded_string("serviceName", &c.service_name, MAX_MDNS_SERVICE_NAME_LEN)
+        .map_err(ffi_invalid_arg)?;
+    let port = u16::try_from(c.port).map_err(|_| {
+        napi::Error::new(
+            Status::InvalidArg,
+            format_error_json("INVALID_INPUT", "port must be in the range 0..=65535"),
+        )
+    })?;
+    let addrs = c
+        .addrs
+        .iter()
+        .map(|s| s.parse::<std::net::IpAddr>())
+        .collect::<std::result::Result<Vec<std::net::IpAddr>, std::net::AddrParseError>>()
+        .map_err(|e| {
+            napi::Error::new(
+                Status::InvalidArg,
+                format_error_json("INVALID_INPUT", format!("invalid address: {e}")),
+            )
+        })?;
+    Ok(iroh_http_discovery::ServiceConfig {
+        service_name: c.service_name,
+        instance_name: c.instance_name,
+        port,
+        addrs,
+        txt: c.txt.into_iter().collect(),
+        protocol: parse_protocol(c.protocol.as_deref())?,
+    })
+}
+
+#[cfg(feature = "discovery")]
+fn service_record_to_js(r: iroh_http_discovery::ServiceRecord) -> JsServiceRecord {
+    JsServiceRecord {
+        is_active: r.is_active,
+        service_type: r.service_type,
+        instance_name: r.instance_name,
+        host: r.host,
+        port: u32::from(r.port),
+        addrs: r.addrs.iter().map(|a| a.to_string()).collect(),
+        txt: r.txt.into_iter().collect(),
+    }
+}
+
+/// Advertise a generic DNS-SD service. Returns an advertise handle.
+#[napi]
+#[cfg(feature = "discovery")]
+pub async fn advertise(config: JsServiceConfig) -> napi::Result<u32> {
+    let cfg = js_config_to_service_config(config)?;
+    let session = iroh_http_discovery::advertise(cfg)
+        .map_err(|e| napi::Error::new(Status::GenericFailure, format_error_json("REFUSED", e)))?;
+    let handle = lock_advertise_slab()?.insert(session) as u32;
+    Ok(handle)
+}
+
+#[napi]
+#[cfg(not(feature = "discovery"))]
+pub async fn advertise(_config: JsServiceConfig) -> napi::Result<u32> {
+    Err(napi::Error::new(
+        Status::GenericFailure,
+        format_error_json("UNKNOWN", "discovery feature not enabled in this build"),
+    ))
+}
+
+/// Stop a generic DNS-SD advertisement.
+#[napi]
+#[cfg(feature = "discovery")]
+pub fn advertise_close(advertise_handle: u32) {
+    if let Ok(mut slab) = advertise_slab().lock() {
+        if slab.contains(advertise_handle as usize) {
+            slab.remove(advertise_handle as usize);
+        }
+    } else {
+        tracing::error!("iroh-http-node: advertise slab lock poisoned during close");
+    }
+}
+
+#[napi]
+#[cfg(not(feature = "discovery"))]
+pub fn advertise_close(_advertise_handle: u32) {}
+
+/// Browse for a generic DNS-SD service. Returns a browse handle for polling
+/// records via `browseNext`.
+#[napi]
+#[cfg(feature = "discovery")]
+pub async fn browse(service_name: String, protocol: Option<String>) -> napi::Result<u32> {
+    validate_bounded_string("serviceName", &service_name, MAX_MDNS_SERVICE_NAME_LEN)
+        .map_err(ffi_invalid_arg)?;
+    let cfg = iroh_http_discovery::BrowseConfig {
+        service_name,
+        protocol: parse_protocol(protocol.as_deref())?,
+    };
+    let session = iroh_http_discovery::browse(cfg)
+        .map_err(|e| napi::Error::new(Status::GenericFailure, format_error_json("REFUSED", e)))?;
+    let handle = lock_generic_browse_slab()?.insert(Arc::new(TokioMutex::new(session))) as u32;
+    Ok(handle)
+}
+
+#[napi]
+#[cfg(not(feature = "discovery"))]
+pub async fn browse(_service_name: String, _protocol: Option<String>) -> napi::Result<u32> {
+    Err(napi::Error::new(
+        Status::GenericFailure,
+        format_error_json("UNKNOWN", "discovery feature not enabled in this build"),
+    ))
+}
+
+/// Poll the next record from a generic DNS-SD browse session.
+/// Returns `null` when the session is closed.
+#[napi]
+#[cfg(feature = "discovery")]
+pub async fn browse_next(browse_handle: u32) -> napi::Result<Option<JsServiceRecord>> {
+    let session = {
+        lock_generic_browse_slab()?
+            .get(browse_handle as usize)
+            .cloned()
+    }
+    .ok_or_else(|| {
+        napi::Error::new(
+            Status::InvalidArg,
+            format_error_json(
+                "INVALID_HANDLE",
+                format!("invalid browse handle: {browse_handle}"),
+            ),
+        )
+    })?;
+    let record = session.lock().await.next_record().await;
+    Ok(record.map(service_record_to_js))
+}
+
+#[napi]
+#[cfg(not(feature = "discovery"))]
+pub async fn browse_next(_browse_handle: u32) -> napi::Result<Option<JsServiceRecord>> {
+    Err(napi::Error::new(
+        Status::GenericFailure,
+        format_error_json("UNKNOWN", "discovery feature not enabled in this build"),
+    ))
+}
+
+/// Close a generic DNS-SD browse session.
+#[napi]
+#[cfg(feature = "discovery")]
+pub fn browse_close(browse_handle: u32) {
+    if let Ok(mut slab) = generic_browse_slab().lock() {
+        if slab.contains(browse_handle as usize) {
+            slab.remove(browse_handle as usize);
+        }
+    } else {
+        tracing::error!("iroh-http-node: generic browse slab lock poisoned during close");
+    }
+}
+
+#[napi]
+#[cfg(not(feature = "discovery"))]
+pub fn browse_close(_browse_handle: u32) {}
 
 // ── Bridge methods ────────────────────────────────────────────────────────────
 
@@ -1341,6 +1562,15 @@ fn lock_advertise_slab(
     advertise_slab().lock().map_err(|_| {
         ffi_generic(FfiError::InternalLock {
             resource: "advertise_slab",
+        })
+    })
+}
+
+#[cfg(feature = "discovery")]
+fn lock_generic_browse_slab() -> napi::Result<MutexGuard<'static, Slab<GenericBrowseHandle>>> {
+    generic_browse_slab().lock().map_err(|_| {
+        ffi_generic(FfiError::InternalLock {
+            resource: "generic_browse_slab",
         })
     })
 }

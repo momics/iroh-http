@@ -128,18 +128,18 @@ Find peers on the local network. Works on macOS, Linux, and Windows desktop. Not
 ### Advertise
 
 ```ts
-await node.advertise("my-app.iroh-http");
+await node.advertisePeer({ serviceName: "my-app" });
 ```
 
 ### Browse
 
 ```ts
 const ac = new AbortController();
-for await (const event of node.browse({ serviceName: "my-app.iroh-http", signal: ac.signal })) {
-  if (event.type === "discovered") {
+for await (const event of node.browsePeers({ serviceName: "my-app", signal: ac.signal })) {
+  if (event.isActive) {
     console.log("found:", event.nodeId, event.addrs);
     const res = await node.fetch(`httpi://${event.nodeId}/api`);
-  } else if (event.type === "expired") {
+  } else {
     console.log("gone:", event.nodeId);
   }
 }

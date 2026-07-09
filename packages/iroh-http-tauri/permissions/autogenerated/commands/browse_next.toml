@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-browse-next"
+description = "Enables the browse_next command without any pre-configured scope."
+commands.allow = ["browse_next"]
+
+[[permission]]
+identifier = "deny-browse-next"
+description = "Denies the browse_next command without any pre-configured scope."
+commands.deny = ["browse_next"]

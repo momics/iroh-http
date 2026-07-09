@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-advertise-peer"
+description = "Enables the advertise_peer command without any pre-configured scope."
+commands.allow = ["advertise_peer"]
+
+[[permission]]
+identifier = "deny-advertise-peer"
+description = "Denies the advertise_peer command without any pre-configured scope."
+commands.deny = ["advertise_peer"]

@@ -17,6 +17,7 @@
 - [Rust](guidelines/rust.md): naming, visibility, error handling, async, testing for `iroh-http-core`
 - [JavaScript / TypeScript](guidelines/javascript.md): types, errors, streaming, serve/fetch for adapters
 - [Tauri](guidelines/tauri.md): invoke commands, channels for `iroh-http-tauri`
+- [Mobile mDNS / DNS-SD setup](guidelines/mobile-mdns-setup.md): iOS `Info.plist` and Android manifest entries for local-network discovery
 
 ## Features
 

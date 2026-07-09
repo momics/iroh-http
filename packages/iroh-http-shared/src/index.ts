@@ -26,7 +26,18 @@ export type {
   AdvertiseOptions,
   BrowseOptions,
   DiscoveredPeer,
+  DnsSdAdvertiseOptions,
+  DnsSdBrowseOptions,
+  DnsSdProtocol,
   PeerDiscoveryEvent,
+  ServiceConfig,
+  ServiceRecord,
+} from "./discovery.js";
+export {
+  asIrohPeer,
+  IROH_HTTP_SERVICE,
+  TXT_KEY_PUBLIC_KEY,
+  TXT_KEY_RELAY,
 } from "./discovery.js";
 export type {
   IrohSession,

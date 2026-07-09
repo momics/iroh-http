@@ -15,6 +15,11 @@ import type {
   PeerDiscoveryEvent,
   PeerStats,
 } from "@momics/iroh-http-shared";
+import type {
+  DnsSdProtocol,
+  ServiceConfig,
+  ServiceRecord,
+} from "@momics/iroh-http-shared";
 import { IrohAdapter } from "@momics/iroh-http-shared/adapter";
 import type {
   AllocBodyWriterFn,
@@ -1076,25 +1081,52 @@ export const denoAddrFns = {
 
 /** Discovery functions backed by Deno FFI calls. */
 export const denoDiscoveryFns = {
-  mdnsBrowse: async (handle: number, serviceName: string) => {
-    return call<number>("mdnsBrowse", { endpointHandle: handle, serviceName });
+  browsePeers: async (handle: number, serviceName: string) => {
+    return call<number>("browsePeers", { endpointHandle: handle, serviceName });
   },
-  mdnsNextEvent: async (browseHandle: number) => {
-    return call<PeerDiscoveryEvent | null>("mdnsNextEvent", { browseHandle });
+  browsePeersNext: async (browseHandle: number) => {
+    return call<PeerDiscoveryEvent | null>("browsePeersNext", { browseHandle });
   },
-  mdnsBrowseClose: (browseHandle: number) => {
-    call<Record<never, never>>("mdnsBrowseClose", { browseHandle }).catch(
+  browsePeersClose: (browseHandle: number) => {
+    call<Record<never, never>>("browsePeersClose", { browseHandle }).catch(
       () => {},
     );
   },
-  mdnsAdvertise: async (handle: number, serviceName: string) => {
-    return call<number>("mdnsAdvertise", {
+  advertisePeer: async (handle: number, serviceName: string) => {
+    return call<number>("advertisePeer", {
       endpointHandle: handle,
       serviceName,
     });
   },
-  mdnsAdvertiseClose: (advertiseHandle: number) => {
-    call<Record<never, never>>("mdnsAdvertiseClose", { advertiseHandle }).catch(
+  advertisePeerClose: (advertiseHandle: number) => {
+    call<Record<never, never>>("advertisePeerClose", { advertiseHandle }).catch(
+      () => {},
+    );
+  },
+  advertise: async (config: ServiceConfig) => {
+    return call<number>("advertise", {
+      serviceName: config.serviceName,
+      instanceName: config.instanceName,
+      port: config.port,
+      addrs: config.addrs ?? [],
+      txt: config.txt ?? {},
+      protocol: config.protocol,
+    });
+  },
+  advertiseClose: (advertiseHandle: number) => {
+    call<Record<never, never>>("advertiseClose", { advertiseHandle })
+      .catch(
+        () => {},
+      );
+  },
+  browse: async (serviceName: string, protocol?: DnsSdProtocol) => {
+    return call<number>("browse", { serviceName, protocol });
+  },
+  browseNext: async (browseHandle: number) => {
+    return call<ServiceRecord | null>("browseNext", { browseHandle });
+  },
+  browseClose: (browseHandle: number) => {
+    call<Record<never, never>>("browseClose", { browseHandle }).catch(
       () => {},
     );
   },
@@ -1415,34 +1447,73 @@ export class DenoAdapter extends IrohAdapter {
 
   // ── mDNS discovery ──────────────────────────────────────────────────────────
 
-  override mdnsBrowse(
+  override browsePeers(
     endpointHandle: number,
     serviceName: string,
   ): Promise<number> {
-    return call<number>("mdnsBrowse", { endpointHandle, serviceName });
+    return call<number>("browsePeers", { endpointHandle, serviceName });
   }
 
-  override mdnsNextEvent(
+  override browsePeersNext(
     browseHandle: number,
   ): Promise<PeerDiscoveryEvent | null> {
-    return call<PeerDiscoveryEvent | null>("mdnsNextEvent", { browseHandle });
+    return call<PeerDiscoveryEvent | null>("browsePeersNext", { browseHandle });
   }
 
-  override mdnsBrowseClose(browseHandle: number): void {
-    call<Record<never, never>>("mdnsBrowseClose", { browseHandle }).catch(
+  override browsePeersClose(browseHandle: number): void {
+    call<Record<never, never>>("browsePeersClose", { browseHandle }).catch(
       () => {},
     );
   }
 
-  override mdnsAdvertise(
+  override advertisePeer(
     endpointHandle: number,
     serviceName: string,
   ): Promise<number> {
-    return call<number>("mdnsAdvertise", { endpointHandle, serviceName });
+    return call<number>("advertisePeer", { endpointHandle, serviceName });
   }
 
-  override mdnsAdvertiseClose(advertiseHandle: number): void {
-    call<Record<never, never>>("mdnsAdvertiseClose", { advertiseHandle }).catch(
+  override advertisePeerClose(advertiseHandle: number): void {
+    call<Record<never, never>>("advertisePeerClose", { advertiseHandle }).catch(
+      () => {},
+    );
+  }
+
+  // ── Generic DNS-SD ────────────────────────────────────────────────
+
+  override advertise(config: ServiceConfig): Promise<number> {
+    return call<number>("advertise", {
+      serviceName: config.serviceName,
+      instanceName: config.instanceName,
+      port: config.port,
+      addrs: config.addrs ?? [],
+      txt: config.txt ?? {},
+      protocol: config.protocol,
+    });
+  }
+
+  override advertiseClose(advertiseHandle: number): void {
+    call<Record<never, never>>("advertiseClose", { advertiseHandle })
+      .catch(
+        () => {},
+      );
+  }
+
+  override browse(
+    serviceName: string,
+    protocol?: DnsSdProtocol,
+  ): Promise<number> {
+    return call<number>("browse", { serviceName, protocol });
+  }
+
+  override browseNext(
+    browseHandle: number,
+  ): Promise<ServiceRecord | null> {
+    return call<ServiceRecord | null>("browseNext", { browseHandle });
+  }
+
+  override browseClose(browseHandle: number): void {
+    call<Record<never, never>>("browseClose", { browseHandle }).catch(
       () => {},
     );
   }

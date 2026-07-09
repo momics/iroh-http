@@ -15,8 +15,8 @@ use crate::state;
 
 use iroh_http_adapter::{
     coerce_endpoint_options, coerce_fetch_options, coerce_serve_options, core_error_to_json,
-    deliver_request, format_error_json, validate_header_rows, DeliverableRequest, RawEndpointOptions,
-    RawFetchOptions, RawServeOptions, RequestTransport, Undeliverable,
+    deliver_request, format_error_json, validate_header_rows, DeliverableRequest,
+    RawEndpointOptions, RawFetchOptions, RawServeOptions, RequestTransport, Undeliverable,
 };
 
 // ── Endpoint ──────────────────────────────────────────────────────────────────
@@ -365,9 +365,7 @@ pub async fn send_chunk(request: tauri::ipc::Request<'_>) -> Result<(), String> 
         .get("iroh-ep")
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse().ok())
-        .ok_or_else(|| {
-            format_error_json("INVALID_INPUT", "missing or invalid iroh-ep header")
-        })?;
+        .ok_or_else(|| format_error_json("INVALID_INPUT", "missing or invalid iroh-ep header"))?;
     let handle: u64 = headers
         .get("iroh-handle")
         .and_then(|v| v.to_str().ok())
@@ -814,7 +812,9 @@ pub struct SessionAcceptedPayload {
 }
 
 #[command]
-pub async fn session_accept(endpoint_handle: u64) -> Result<Option<SessionAcceptedPayload>, String> {
+pub async fn session_accept(
+    endpoint_handle: u64,
+) -> Result<Option<SessionAcceptedPayload>, String> {
     let ep = state::get_endpoint(endpoint_handle).ok_or_else(|| {
         format_error_json(
             "INVALID_HANDLE",
@@ -832,7 +832,10 @@ pub async fn session_accept(endpoint_handle: u64) -> Result<Option<SessionAccept
         .remote_id()
         .map(|pk| iroh_http_core::base32_encode(pk.as_bytes()))
         .unwrap_or_default();
-    Ok(Some(SessionAcceptedPayload { session_handle: session.handle(), node_id }))
+    Ok(Some(SessionAcceptedPayload {
+        session_handle: session.handle(),
+        node_id,
+    }))
 }
 
 /// Open a new bidirectional stream on an existing session.
@@ -922,10 +925,7 @@ pub async fn session_closed(
         )
     })?;
     let session = iroh_http_core::Session::from_handle(ep, session_handle);
-    let info = session
-        .closed()
-        .await
-        .map_err(|e| core_error_to_json(&e))?;
+    let info = session.closed().await.map_err(|e| core_error_to_json(&e))?;
     Ok(CloseInfoPayload {
         close_code: info.close_code,
         reason: info.reason,
@@ -1100,7 +1100,7 @@ use tokio::sync::Mutex as TokioMutex;
 type BrowseHandle = Arc<TokioMutex<iroh_http_discovery::BrowseSession>>;
 
 /// ISS-017: shared mobile mDNS event buffer, accessible from both
-/// `mdns_next_event` and `mdns_browse_close` to clear stale events.
+/// `browse_peers_next` and `browse_peers_close` to clear stale events.
 #[cfg(mobile)]
 fn mobile_mdns_buffer() -> &'static Mutex<
     std::collections::HashMap<
@@ -1120,11 +1120,11 @@ fn mobile_mdns_buffer() -> &'static Mutex<
 }
 
 /// Set of browse handles that are still open. The native mDNS poll
-/// (`browse_poll`) is non-blocking and, once a session is stopped, resolves
-/// with an empty event list rather than an error. `mdns_next_event` long-polls
+/// (`browse_peers_poll`) is non-blocking and, once a session is stopped, resolves
+/// with an empty event list rather than an error. `browse_peers_next` long-polls
 /// that layer, so it consults this set to detect closure and terminate with
 /// `None` (stream finished) instead of spinning forever after
-/// `mdns_browse_close`.
+/// `browse_peers_close`.
 #[cfg(mobile)]
 fn mobile_active_browses() -> &'static Mutex<std::collections::HashSet<u64>> {
     static S: OnceLock<Mutex<std::collections::HashSet<u64>>> = OnceLock::new();
@@ -1155,14 +1155,14 @@ pub struct PeerDiscoveryEventPayload {
 /// Start a browse session: discover peers on the local network via mDNS.
 #[command]
 #[cfg(all(feature = "discovery", not(mobile)))]
-pub async fn mdns_browse(endpoint_handle: u64, service_name: String) -> Result<u64, String> {
+pub async fn browse_peers(endpoint_handle: u64, service_name: String) -> Result<u64, String> {
     let ep = state::get_endpoint(endpoint_handle).ok_or_else(|| {
         format_error_json(
             "INVALID_HANDLE",
             format!("invalid endpoint handle: {endpoint_handle}"),
         )
     })?;
-    let session = iroh_http_discovery::start_browse(ep.raw(), &service_name)
+    let session = iroh_http_discovery::browse_peers(ep.raw(), &service_name)
         .await
         .map_err(|e| format_error_json("REFUSED", e))?;
     let handle = browse_slab()
@@ -1174,7 +1174,7 @@ pub async fn mdns_browse(endpoint_handle: u64, service_name: String) -> Result<u
 
 #[command]
 #[cfg(all(not(feature = "discovery"), not(mobile)))]
-pub async fn mdns_browse(_endpoint_handle: u64, _service_name: String) -> Result<u64, String> {
+pub async fn browse_peers(_endpoint_handle: u64, _service_name: String) -> Result<u64, String> {
     Err(format_error_json(
         "UNKNOWN",
         "discovery feature not enabled in this build",
@@ -1183,17 +1183,17 @@ pub async fn mdns_browse(_endpoint_handle: u64, _service_name: String) -> Result
 
 #[command]
 #[cfg(mobile)]
-pub async fn mdns_browse<R: tauri::Runtime>(
+pub async fn browse_peers<R: tauri::Runtime>(
     _app: tauri::AppHandle<R>,
     state: tauri::State<'_, crate::mobile_mdns::MobileMdns<R>>,
     _endpoint_handle: u64,
     service_name: String,
 ) -> Result<u64, String> {
     let browse_id = state
-        .browse_start(&service_name)
+        .browse_peers_start(&service_name)
         .map_err(|e| format_error_json("REFUSED", e))?;
-    // Mark the session active so `mdns_next_event` knows to keep long-polling
-    // until `mdns_browse_close` retires the handle.
+    // Mark the session active so `browse_peers_next` knows to keep long-polling
+    // until `browse_peers_close` retires the handle.
     mobile_active_browses()
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -1204,7 +1204,7 @@ pub async fn mdns_browse<R: tauri::Runtime>(
 /// Poll the next discovery event from a browse session.
 #[command]
 #[cfg(all(feature = "discovery", not(mobile)))]
-pub async fn mdns_next_event(
+pub async fn browse_peers_next(
     browse_handle: u64,
 ) -> Result<Option<PeerDiscoveryEventPayload>, String> {
     let session = {
@@ -1230,7 +1230,7 @@ pub async fn mdns_next_event(
 
 #[command]
 #[cfg(all(not(feature = "discovery"), not(mobile)))]
-pub async fn mdns_next_event(
+pub async fn browse_peers_next(
     _browse_handle: u64,
 ) -> Result<Option<PeerDiscoveryEventPayload>, String> {
     Err(format_error_json(
@@ -1241,14 +1241,14 @@ pub async fn mdns_next_event(
 
 #[command]
 #[cfg(mobile)]
-pub async fn mdns_next_event<R: tauri::Runtime>(
+pub async fn browse_peers_next<R: tauri::Runtime>(
     _app: tauri::AppHandle<R>,
     state: tauri::State<'_, crate::mobile_mdns::MobileMdns<R>>,
     lookup: tauri::State<'_, crate::mobile_address_lookup::MobileAddressLookup>,
     browse_handle: u64,
 ) -> Result<Option<PeerDiscoveryEventPayload>, String> {
     // The native NWBrowser / NsdManager layer is poll-based and non-blocking:
-    // `browse_poll` returns `[]` whenever nothing has been discovered *yet*.
+    // `browse_peers_poll` returns `[]` whenever nothing has been discovered *yet*.
     // The shared JS async iterator, however, treats a `null` event as
     // "stream ended" — matching the desktop `next_event().await` contract,
     // where `None` only ever means the browse session finished. Returning
@@ -1288,7 +1288,7 @@ pub async fn mdns_next_event<R: tauri::Runtime>(
 
         // 3. Poll the native layer for freshly discovered / expired peers.
         let mut events = state
-            .browse_poll(browse_handle)
+            .browse_peers_poll(browse_handle)
             .map_err(|e| format_error_json("INVALID_HANDLE", e))?;
 
         // #310: feed every freshly polled event into the in-process AddressLookup so
@@ -1304,9 +1304,7 @@ pub async fn mdns_next_event<R: tauri::Runtime>(
         // Buffer remaining events.
         if !events.is_empty() {
             let mut map = buffer.lock().unwrap_or_else(|e| e.into_inner());
-            map.entry(browse_handle)
-                .or_default()
-                .extend(events);
+            map.entry(browse_handle).or_default().extend(events);
         }
 
         if let Some(ev) = first {
@@ -1325,7 +1323,7 @@ pub async fn mdns_next_event<R: tauri::Runtime>(
 /// Close a browse session, stopping mDNS discovery.
 #[command]
 #[cfg(not(mobile))]
-pub fn mdns_browse_close(browse_handle: u64) {
+pub fn browse_peers_close(browse_handle: u64) {
     #[cfg(feature = "discovery")]
     {
         let mut slab = browse_slab().lock().unwrap_or_else(|e| e.into_inner());
@@ -1337,18 +1335,18 @@ pub fn mdns_browse_close(browse_handle: u64) {
 
 #[command]
 #[cfg(mobile)]
-pub fn mdns_browse_close<R: tauri::Runtime>(
+pub fn browse_peers_close<R: tauri::Runtime>(
     _app: tauri::AppHandle<R>,
     state: tauri::State<'_, crate::mobile_mdns::MobileMdns<R>>,
     browse_handle: u64,
 ) {
-    // Retire the handle first so any in-flight `mdns_next_event` long-poll
+    // Retire the handle first so any in-flight `browse_peers_next` long-poll
     // observes the closure and returns `None` (stream finished).
     mobile_active_browses()
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .remove(&browse_handle);
-    let _ = state.browse_stop(browse_handle);
+    let _ = state.browse_peers_stop(browse_handle);
     // ISS-017: clear stale buffered events for the closed browse session.
     mobile_mdns_buffer()
         .lock()
@@ -1359,21 +1357,21 @@ pub fn mdns_browse_close<R: tauri::Runtime>(
 /// Start advertising this node on the local network via mDNS.
 ///
 /// Declared `async` so Tauri runs it inside the async (Tokio) runtime. The mDNS
-/// address-lookup constructor (`start_advertise` → `MdnsAddressLookup::build`)
+/// address-lookup constructor (`advertise_peer` → `MdnsAddressLookup::build`)
 /// calls `tokio::runtime::Handle::current()`, which panics with "there is no
 /// reactor running" when invoked outside a runtime context. A synchronous Tauri
 /// command runs on a plain worker thread with no runtime, so enabling mDNS
 /// advertising aborted the process. Mirrors the Node adapter fix (#243).
 #[command]
 #[cfg(all(feature = "discovery", not(mobile)))]
-pub async fn mdns_advertise(endpoint_handle: u64, service_name: String) -> Result<u64, String> {
+pub async fn advertise_peer(endpoint_handle: u64, service_name: String) -> Result<u64, String> {
     let ep = state::get_endpoint(endpoint_handle).ok_or_else(|| {
         format_error_json(
             "INVALID_HANDLE",
             format!("invalid endpoint handle: {endpoint_handle}"),
         )
     })?;
-    let session = iroh_http_discovery::start_advertise(ep.raw(), &service_name)
+    let session = iroh_http_discovery::advertise_peer(ep.raw(), &service_name)
         .map_err(|e| format_error_json("REFUSED", e))?;
     let handle = advertise_slab()
         .lock()
@@ -1384,7 +1382,7 @@ pub async fn mdns_advertise(endpoint_handle: u64, service_name: String) -> Resul
 
 #[command]
 #[cfg(all(not(feature = "discovery"), not(mobile)))]
-pub fn mdns_advertise(_endpoint_handle: u64, _service_name: String) -> Result<u64, String> {
+pub fn advertise_peer(_endpoint_handle: u64, _service_name: String) -> Result<u64, String> {
     Err(format_error_json(
         "UNKNOWN",
         "discovery feature not enabled in this build",
@@ -1393,7 +1391,7 @@ pub fn mdns_advertise(_endpoint_handle: u64, _service_name: String) -> Result<u6
 
 #[command]
 #[cfg(mobile)]
-pub fn mdns_advertise<R: tauri::Runtime>(
+pub fn advertise_peer<R: tauri::Runtime>(
     _app: tauri::AppHandle<R>,
     state: tauri::State<'_, crate::mobile_mdns::MobileMdns<R>>,
     endpoint_handle: u64,
@@ -1410,14 +1408,14 @@ pub fn mdns_advertise<R: tauri::Runtime>(
     let node_id = ep.node_id().to_string();
     let relay = ep.home_relay();
     state
-        .advertise_start(&service_name, &node_id, relay.as_deref())
+        .advertise_peer_start(&service_name, &node_id, relay.as_deref())
         .map_err(|e| format_error_json("REFUSED", e))
 }
 
 /// Stop advertising this node on the local network.
 #[command]
 #[cfg(not(mobile))]
-pub fn mdns_advertise_close(advertise_handle: u64) {
+pub fn advertise_peer_close(advertise_handle: u64) {
     #[cfg(feature = "discovery")]
     {
         let mut slab = advertise_slab().lock().unwrap_or_else(|e| e.into_inner());
@@ -1429,12 +1427,356 @@ pub fn mdns_advertise_close(advertise_handle: u64) {
 
 #[command]
 #[cfg(mobile)]
-pub fn mdns_advertise_close<R: tauri::Runtime>(
+pub fn advertise_peer_close<R: tauri::Runtime>(
+    _app: tauri::AppHandle<R>,
+    state: tauri::State<'_, crate::mobile_mdns::MobileMdns<R>>,
+    advertise_handle: u64,
+) {
+    let _ = state.advertise_peer_stop(advertise_handle);
+}
+
+// ── Generic DNS-SD ─────────────────────────────────────────────────────────────────────────
+
+#[cfg(all(feature = "discovery", not(mobile)))]
+type GenericBrowseHandle = Arc<TokioMutex<iroh_http_discovery::ServiceBrowseSession>>;
+
+#[cfg(all(feature = "discovery", not(mobile)))]
+fn generic_browse_slab() -> &'static Mutex<slab::Slab<GenericBrowseHandle>> {
+    static S: OnceLock<Mutex<slab::Slab<GenericBrowseHandle>>> = OnceLock::new();
+    S.get_or_init(|| Mutex::new(slab::Slab::new()))
+}
+
+/// Mobile generic DNS-SD browse buffer, mirroring the peer path's
+/// `mobile_mdns_buffer`: holds records polled from the native layer that have
+/// not yet been drained by `browse_next`.
+#[cfg(mobile)]
+#[allow(clippy::type_complexity)]
+fn mobile_dns_sd_buffer() -> &'static Mutex<
+    std::collections::HashMap<
+        u64,
+        std::collections::VecDeque<crate::mobile_mdns::MobileServiceRecord>,
+    >,
+> {
+    static BUFFER: OnceLock<
+        Mutex<
+            std::collections::HashMap<
+                u64,
+                std::collections::VecDeque<crate::mobile_mdns::MobileServiceRecord>,
+            >,
+        >,
+    > = OnceLock::new();
+    BUFFER.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Set of generic browse handles still open, mirroring `mobile_active_browses`.
+#[cfg(mobile)]
+fn mobile_active_dns_sd_browses() -> &'static Mutex<std::collections::HashSet<u64>> {
+    static S: OnceLock<Mutex<std::collections::HashSet<u64>>> = OnceLock::new();
+    S.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+}
+
+#[cfg(mobile)]
+fn service_record_from_mobile(r: crate::mobile_mdns::MobileServiceRecord) -> ServiceRecordPayload {
+    ServiceRecordPayload {
+        is_active: r.is_active,
+        service_type: r.service_type,
+        instance_name: r.instance_name,
+        host: r.host,
+        port: r.port,
+        addrs: r.addrs,
+        txt: r.txt,
+    }
+}
+
+/// A generic DNS-SD service to advertise, mirroring the shared `ServiceConfig`.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServiceConfigPayload {
+    pub service_name: String,
+    pub instance_name: String,
+    pub port: u16,
+    #[serde(default)]
+    pub addrs: Vec<String>,
+    #[serde(default)]
+    pub txt: std::collections::HashMap<String, String>,
+    #[serde(default)]
+    pub protocol: Option<String>,
+}
+
+/// A resolved DNS-SD service record, mirroring the shared `ServiceRecord`.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServiceRecordPayload {
+    pub is_active: bool,
+    pub service_type: String,
+    pub instance_name: String,
+    pub host: Option<String>,
+    pub port: u16,
+    pub addrs: Vec<String>,
+    pub txt: std::collections::HashMap<String, String>,
+}
+
+#[cfg(all(feature = "discovery", not(mobile)))]
+fn parse_protocol(p: Option<&str>) -> Result<iroh_http_discovery::Protocol, String> {
+    match p.unwrap_or("udp") {
+        "udp" => Ok(iroh_http_discovery::Protocol::Udp),
+        "tcp" => Ok(iroh_http_discovery::Protocol::Tcp),
+        other => Err(format_error_json(
+            "INVALID_INPUT",
+            format!("invalid protocol: {other:?}"),
+        )),
+    }
+}
+
+/// Advertise a generic DNS-SD service (not tied to an iroh endpoint).
+#[command]
+#[cfg(all(feature = "discovery", not(mobile)))]
+pub async fn advertise(config: ServiceConfigPayload) -> Result<u64, String> {
+    let protocol = parse_protocol(config.protocol.as_deref())?;
+    let addrs = config
+        .addrs
+        .iter()
+        .map(|s| {
+            s.parse::<std::net::IpAddr>()
+                .map_err(|e| format_error_json("INVALID_INPUT", format!("invalid address: {e}")))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let service_config = iroh_http_discovery::ServiceConfig {
+        service_name: config.service_name,
+        instance_name: config.instance_name,
+        port: config.port,
+        addrs,
+        txt: config.txt.into_iter().collect(),
+        protocol,
+    };
+    let session = iroh_http_discovery::advertise(service_config)
+        .map_err(|e| format_error_json("REFUSED", e))?;
+    let handle = advertise_slab()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(session) as u64;
+    Ok(handle)
+}
+
+#[command]
+#[cfg(all(not(feature = "discovery"), not(mobile)))]
+pub async fn advertise(_config: ServiceConfigPayload) -> Result<u64, String> {
+    Err(format_error_json(
+        "UNKNOWN",
+        "discovery feature not enabled in this build",
+    ))
+}
+
+#[command]
+#[cfg(mobile)]
+pub fn advertise<R: tauri::Runtime>(
+    _app: tauri::AppHandle<R>,
+    state: tauri::State<'_, crate::mobile_mdns::MobileMdns<R>>,
+    config: ServiceConfigPayload,
+) -> Result<u64, String> {
+    let protocol = config.protocol.as_deref().unwrap_or("udp");
+    state
+        .advertise_start(
+            &config.service_name,
+            &config.instance_name,
+            config.port,
+            protocol,
+            &config.addrs,
+            &config.txt,
+        )
+        .map_err(|e| format_error_json("REFUSED", e))
+}
+
+/// Stop a generic DNS-SD advertisement.
+#[command]
+#[cfg(not(mobile))]
+pub fn advertise_close(advertise_handle: u64) {
+    #[cfg(feature = "discovery")]
+    {
+        let mut slab = advertise_slab().lock().unwrap_or_else(|e| e.into_inner());
+        if slab.contains(advertise_handle as usize) {
+            slab.remove(advertise_handle as usize);
+        }
+    }
+}
+
+#[command]
+#[cfg(mobile)]
+pub fn advertise_close<R: tauri::Runtime>(
     _app: tauri::AppHandle<R>,
     state: tauri::State<'_, crate::mobile_mdns::MobileMdns<R>>,
     advertise_handle: u64,
 ) {
     let _ = state.advertise_stop(advertise_handle);
+}
+
+/// Browse for a generic DNS-SD service.
+#[command]
+#[cfg(all(feature = "discovery", not(mobile)))]
+pub async fn browse(service_name: String, protocol: Option<String>) -> Result<u64, String> {
+    let protocol = parse_protocol(protocol.as_deref())?;
+    let config = iroh_http_discovery::BrowseConfig {
+        service_name,
+        protocol,
+    };
+    let session =
+        iroh_http_discovery::browse(config).map_err(|e| format_error_json("REFUSED", e))?;
+    let handle = generic_browse_slab()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(Arc::new(TokioMutex::new(session))) as u64;
+    Ok(handle)
+}
+
+#[command]
+#[cfg(all(not(feature = "discovery"), not(mobile)))]
+pub async fn browse(_service_name: String, _protocol: Option<String>) -> Result<u64, String> {
+    Err(format_error_json(
+        "UNKNOWN",
+        "discovery feature not enabled in this build",
+    ))
+}
+
+#[command]
+#[cfg(mobile)]
+pub fn browse<R: tauri::Runtime>(
+    _app: tauri::AppHandle<R>,
+    state: tauri::State<'_, crate::mobile_mdns::MobileMdns<R>>,
+    service_name: String,
+    protocol: Option<String>,
+) -> Result<u64, String> {
+    let protocol = protocol.as_deref().unwrap_or("udp");
+    let browse_id = state
+        .browse_start(&service_name, protocol)
+        .map_err(|e| format_error_json("REFUSED", e))?;
+    mobile_active_dns_sd_browses()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(browse_id);
+    Ok(browse_id)
+}
+
+/// Poll the next record from a generic DNS-SD browse session.
+#[command]
+#[cfg(all(feature = "discovery", not(mobile)))]
+pub async fn browse_next(browse_handle: u64) -> Result<Option<ServiceRecordPayload>, String> {
+    let session = {
+        generic_browse_slab()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(browse_handle as usize)
+            .cloned()
+    }
+    .ok_or_else(|| {
+        format_error_json(
+            "INVALID_HANDLE",
+            format!("invalid browse handle: {browse_handle}"),
+        )
+    })?;
+    let record = session.lock().await.next_record().await;
+    Ok(record.map(|r| ServiceRecordPayload {
+        is_active: r.is_active,
+        service_type: r.service_type,
+        instance_name: r.instance_name,
+        host: r.host,
+        port: r.port,
+        addrs: r.addrs.iter().map(|a| a.to_string()).collect(),
+        txt: r.txt.into_iter().collect(),
+    }))
+}
+
+#[command]
+#[cfg(all(not(feature = "discovery"), not(mobile)))]
+pub async fn browse_next(_browse_handle: u64) -> Result<Option<ServiceRecordPayload>, String> {
+    Err(format_error_json(
+        "UNKNOWN",
+        "discovery feature not enabled in this build",
+    ))
+}
+
+#[command]
+#[cfg(mobile)]
+pub async fn browse_next<R: tauri::Runtime>(
+    _app: tauri::AppHandle<R>,
+    state: tauri::State<'_, crate::mobile_mdns::MobileMdns<R>>,
+    browse_handle: u64,
+) -> Result<Option<ServiceRecordPayload>, String> {
+    // The native NsdManager / NWBrowser layer is poll-based and non-blocking
+    // (`browse_poll` returns `[]` until a record appears), whereas the
+    // shared async iterator treats `None` as "stream finished". Long-poll so
+    // `None` keeps its cross-platform meaning — mirrors `browse_peers_next`.
+    let buffer = mobile_dns_sd_buffer();
+    loop {
+        // 1. Drain any record buffered by a previous poll first.
+        {
+            let mut map = buffer.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(queue) = map.get_mut(&browse_handle) {
+                if let Some(rec) = queue.pop_front() {
+                    return Ok(Some(service_record_from_mobile(rec)));
+                }
+            }
+        }
+
+        // 2. Stop long-polling once the session has been closed.
+        let active = mobile_active_dns_sd_browses()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(&browse_handle);
+        if !active {
+            return Ok(None);
+        }
+
+        // 3. Poll the native layer for freshly resolved records.
+        let mut records = state
+            .browse_poll(browse_handle)
+            .map_err(|e| format_error_json("INVALID_HANDLE", e))?;
+        let first = records.drain(..1.min(records.len())).next();
+        if !records.is_empty() {
+            let mut map = buffer.lock().unwrap_or_else(|e| e.into_inner());
+            map.entry(browse_handle).or_default().extend(records);
+        }
+        if let Some(rec) = first {
+            return Ok(Some(service_record_from_mobile(rec)));
+        }
+
+        // 4. Nothing yet — wait briefly, then poll again.
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+}
+
+/// Close a generic DNS-SD browse session.
+#[command]
+#[cfg(not(mobile))]
+pub fn browse_close(browse_handle: u64) {
+    #[cfg(feature = "discovery")]
+    {
+        let mut slab = generic_browse_slab()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if slab.contains(browse_handle as usize) {
+            slab.remove(browse_handle as usize);
+        }
+    }
+}
+
+#[command]
+#[cfg(mobile)]
+pub fn browse_close<R: tauri::Runtime>(
+    _app: tauri::AppHandle<R>,
+    state: tauri::State<'_, crate::mobile_mdns::MobileMdns<R>>,
+    browse_handle: u64,
+) {
+    // Retire the handle first so any in-flight `browse_next` long-poll
+    // observes the closure and returns `None` (stream finished).
+    mobile_active_dns_sd_browses()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&browse_handle);
+    let _ = state.browse_stop(browse_handle);
+    mobile_dns_sd_buffer()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&browse_handle);
 }
 
 // ── Transport events ──────────────────────────────────────────────────────────

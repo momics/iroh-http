@@ -12,7 +12,7 @@
  *   <script type="module" src="./tauri.ts"></script>
  */
 
-import { createNode, PublicKey, SecretKey } from "@momics/iroh-http-tauri";
+import { createNode, PublicKey, SecretKey, asIrohPeer } from "@momics/iroh-http-tauri";
 import { invoke } from "@tauri-apps/api/core";
 
 // @ts-ignore — .mjs shared suites (pure WHATWG, no Node/Deno deps)
@@ -53,6 +53,7 @@ const ctx = {
   createNode,
   PublicKey,
   SecretKey,
+  asIrohPeer,
   test: (name: string, fn: () => Promise<void>) => {
     queue.push({ name, fn });
   },

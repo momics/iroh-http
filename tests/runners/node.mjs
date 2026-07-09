@@ -11,6 +11,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  asIrohPeer,
   createNode,
   PublicKey,
   SecretKey,
@@ -31,6 +32,7 @@ const ctx = {
   createNode,
   PublicKey,
   SecretKey,
+  asIrohPeer,
   test: (name, fn) => test(name, { timeout: 120_000 }, fn),
   assert: (v, msg) => assert.ok(v, msg),
   assertEqual: (a, b, msg) => assert.deepStrictEqual(a, b, msg),

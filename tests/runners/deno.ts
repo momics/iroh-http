@@ -10,6 +10,7 @@
 
 import { assert, assertEquals, assertNotEquals } from "jsr:@std/assert@^1";
 import {
+  asIrohPeer,
   createNode,
   PublicKey,
   SecretKey,
@@ -30,6 +31,7 @@ const ctx = {
   createNode,
   PublicKey,
   SecretKey,
+  asIrohPeer,
   test: (name: string, fn: () => Promise<void>) =>
     Deno.test({ name, sanitizeOps: false, sanitizeResources: false }, fn),
   assert: (v: unknown, msg?: string) => assert(v, msg),

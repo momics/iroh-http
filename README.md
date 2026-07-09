@@ -77,14 +77,32 @@ const { readable, writable } = await session.createBidirectionalStream();
 
 ### mDNS discovery
 
-Find peers on the local network without exchanging keys out-of-band.
+Find peers on the local network without exchanging keys out-of-band. Discovery
+speaks **standard DNS-SD** (RFC 6763), so desktop nodes are visible to Bonjour,
+iOS `NWBrowser`, and Android `NsdManager` — but **not** to plain-iroh peers using
+iroh's built-in mDNS (see the [interop note](docs/features/discovery.md#interop-with-irohs-built-in-mdns)).
 
 ```ts
-await node.advertise("my-app.iroh-http");
-for await (const event of node.browse("my-app.iroh-http")) {
-  if (event.type === "discovered")
-    await node.fetch(`httpi://${event.nodeId}/api`);
+const ac = new AbortController();
+node.advertisePeer({ serviceName: "my-app", signal: ac.signal });
+for await (const event of node.browsePeers({ serviceName: "my-app", signal: ac.signal })) {
+  if (event.isActive) await node.fetch(`httpi://${event.nodeId}/api`);
 }
+```
+
+To advertise or browse **any** DNS-SD service (custom instance name, port, TXT,
+`udp`/`tcp`) — not just iroh nodes — use the generic `node.advertise()` /
+`node.browse()` primitives that `advertisePeer` / `browsePeers` specialize:
+
+```ts
+await node.advertise({
+  serviceName: "printers",
+  instanceName: "Front Desk",
+  port: 9100,
+  protocol: "tcp",
+  txt: { model: "LaserJet 9000" },
+  signal: ac.signal,
+});
 ```
 
 ### Crypto
@@ -105,7 +123,7 @@ Full API details for sessions, crypto, and mDNS: [docs/api-overview.md](docs/api
 | Package | What it does |
 |---------|--------------|
 | [`iroh-http-core`](crates/iroh-http-core/) | Rust. QUIC transport, HTTP/1.1 framing, connection pool, server stack. |
-| [`iroh-http-discovery`](crates/iroh-http-discovery/) | Rust. mDNS peer discovery via Iroh's `Discovery` trait. |
+| [`iroh-http-discovery`](crates/iroh-http-discovery/) | Rust. Standard DNS-SD (mDNS) peer discovery for the local network. |
 | [`iroh-http-adapter`](crates/iroh-http-adapter/) | Rust. Shared FFI error envelope for all adapters. |
 | [`iroh-http-shared`](packages/iroh-http-shared/) | TypeScript. `IrohNode` class, stream helpers, error hierarchy. No native deps. |
 | [`iroh-http-node`](packages/iroh-http-node/) | Node.js native addon (napi-rs). |

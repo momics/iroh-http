@@ -95,6 +95,10 @@ generated iOS `Info.plist`:
 Without these, `NWBrowser` is denied with `NWError -65555 (NoAuth)` and browsing
 silently restarts. Each custom `serviceName` needs its own `_<name>._udp` entry.
 
+For the full iOS + Android setup (including the Android `AndroidManifest.xml`
+entries), see the
+[Mobile mDNS / DNS-SD setup guide](../../docs/guidelines/mobile-mdns-setup.md).
+
 ## Quick start
 
 ```ts
@@ -125,14 +129,14 @@ sessions, mDNS discovery, and Ed25519 crypto. See the
 Tauri's capability system controls what the frontend can access. Declare
 permissions in `capabilities/default.json`:
 
-| Permission          | Covers                                        |
-| ------------------- | --------------------------------------------- |
-| `iroh-http:default` | `createNode()`, `close()`, node introspection |
-| `iroh-http:fetch`   | `node.fetch()` + body streaming               |
-| `iroh-http:serve`   | `node.serve()` + body streaming               |
-| `iroh-http:connect` | Raw QUIC sessions (bidi streams, datagrams)   |
-| `iroh-http:mdns`    | mDNS peer discovery                           |
-| `iroh-http:crypto`  | Key generation, signing, verification         |
+| Permission            | Covers                                                                                |
+| --------------------- | ------------------------------------------------------------------------------------- |
+| `iroh-http:default`   | `createNode()`, `close()`, node introspection                                         |
+| `iroh-http:fetch`     | `node.fetch()` + body streaming                                                       |
+| `iroh-http:serve`     | `node.serve()` + body streaming                                                       |
+| `iroh-http:connect`   | Raw QUIC sessions (bidi streams, datagrams)                                           |
+| `iroh-http:discovery` | Local-network discovery: `advertisePeer`/`browsePeers` + generic `advertise`/`browse` |
+| `iroh-http:crypto`    | Key generation, signing, verification                                                 |
 
 A typical app using fetch and serve:
 
@@ -207,7 +211,7 @@ value.
 - All crypto functions are async (round-trip through the Rust plugin via Tauri
   invoke).
 - QUIC sessions require the `iroh-http:connect` permission.
-- mDNS requires the `iroh-http:mdns` permission.
+- Local-network discovery requires the `iroh-http:discovery` permission.
 - The `httpi://` scheme handler (opt-in via `.with_scheme()`) enables native URL
   resolution without IPC overhead.
 

@@ -192,6 +192,70 @@ describe("createNode IPC", () => {
   });
 });
 
+// ── browsePeers isActive mapping (#330 review finding #10) ──────────────────
+
+describe("browsePeers isActive mapping", () => {
+  beforeEach(() => {
+    mockWindows("main");
+  });
+
+  it("maps the raw browse_peers_next payload to a tagged discovered event", async () => {
+    let browseNextCalls = 0;
+
+    mockIPC((cmd) => {
+      if (cmd === "plugin:iroh-http|create_endpoint") {
+        return {
+          endpointHandle: 1,
+          nodeId: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        };
+      }
+      if (cmd === "plugin:iroh-http|wait_endpoint_closed") {
+        return new Promise(() => {});
+      }
+      if (cmd === "plugin:iroh-http|node_addr") {
+        return {
+          id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          addrs: [],
+        };
+      }
+      if (cmd === "plugin:iroh-http|browse_peers") {
+        return 1;
+      }
+      if (cmd === "plugin:iroh-http|browse_peers_next") {
+        browseNextCalls += 1;
+        // Raw native payload shape (camelCase, untagged) — what the Rust
+        // command actually serializes. It has no `type` field.
+        if (browseNextCalls === 1) {
+          return {
+            isActive: true,
+            nodeId: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            addrs: ["127.0.0.1:1234"],
+          };
+        }
+        return null;
+      }
+    });
+
+    const { createNode } = await import("../index.ts");
+    const node = await createNode({ disableNetworking: true });
+
+    const peers = [];
+    for await (const peer of node.browsePeers()) {
+      peers.push(peer);
+    }
+
+    expect(peers).toHaveLength(1);
+    // Regression guard for #330 finding #10: before the fix, the untagged
+    // payload was cast straight to `PeerDiscoveryEvent`, so `event.type` was
+    // always `undefined` and every discovered peer reported `isActive: false`.
+    expect(peers[0].isActive).toBe(true);
+    expect(peers[0].nodeId).toBe(
+      "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    );
+    expect(peers[0].addrs).toEqual(["127.0.0.1:1234"]);
+  });
+});
+
 // ── Error propagation ───────────────────────────────────────────────────────
 
 describe("error propagation", () => {

@@ -125,7 +125,7 @@ above this limit time out with 408.
 
 ## Discovery errors
 
-### mDNS `browse()` returns no events
+### mDNS `browsePeers()` returns no events
 
 mDNS uses UDP multicast on port 5353. Common blockers:
 

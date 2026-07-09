@@ -7,11 +7,16 @@
  *   - HTTP serve & fetch (with WebTransport echo)
  *   - Peer address info & connection stats
  *   - mDNS discovery (browse + advertise)
+ *   - Generic DNS-SD (advertise/browse any service)
  *   - QUIC sessions (bidi streams + datagrams)
  *   - Ed25519 sign, verify, and key generation
  */
-import { createNode } from "@momics/iroh-http-tauri";
-import { PublicKey, SecretKey } from "@momics/iroh-http-shared";
+import {
+  asIrohPeer,
+  createNode,
+  PublicKey,
+  SecretKey,
+} from "@momics/iroh-http-tauri";
 import type { IrohSession } from "@momics/iroh-http-shared";
 
 // ── Utilities ──────────────────────────────────────────────────────────────────
@@ -469,77 +474,181 @@ document.querySelector<HTMLButtonElement>("#peer-stats-btn")!.addEventListener(
 
 // ── Discovery (mDNS) ───────────────────────────────────────────────────────────
 
-const advertiseBtn = document.querySelector<HTMLButtonElement>(
-  "#advertise-btn",
+const advertisePeerBtn = document.querySelector<HTMLButtonElement>(
+  "#advertise-peer-btn",
 )!;
-const advertiseStatus = document.querySelector<HTMLElement>(
-  "#advertise-status",
+const advertisePeerStatus = document.querySelector<HTMLElement>(
+  "#advertise-peer-status",
 )!;
-const advertiseServiceInput = document.querySelector<HTMLInputElement>(
-  "#advertise-service",
-)!;
-
-const browseBtn = document.querySelector<HTMLButtonElement>("#browse-btn")!;
-const browseLog = document.querySelector<HTMLElement>("#browse-log")!;
-const browseServiceInput = document.querySelector<HTMLInputElement>(
-  "#browse-service",
+const advertisePeerServiceInput = document.querySelector<HTMLInputElement>(
+  "#advertise-peer-service",
 )!;
 
-let advertiseAbort: AbortController | null = null;
-let browseAbort: AbortController | null = null;
+const browsePeersBtn = document.querySelector<HTMLButtonElement>(
+  "#browse-peers-btn",
+)!;
+const browsePeersLog = document.querySelector<HTMLElement>(
+  "#browse-peers-log",
+)!;
+const browsePeersServiceInput = document.querySelector<HTMLInputElement>(
+  "#browse-peers-service",
+)!;
 
-advertiseBtn.addEventListener("click", async () => {
-  if (advertiseAbort) {
-    advertiseAbort.abort();
-    advertiseAbort = null;
-    advertiseBtn.textContent = "Start advertising";
-    setStatus(advertiseStatus, "Stopped");
+let advertisePeerAbort: AbortController | null = null;
+let browsePeersAbort: AbortController | null = null;
+
+advertisePeerBtn.addEventListener("click", async () => {
+  if (advertisePeerAbort) {
+    advertisePeerAbort.abort();
+    advertisePeerAbort = null;
+    advertisePeerBtn.textContent = "Start advertising";
+    setStatus(advertisePeerStatus, "Stopped");
     return;
   }
 
-  const serviceName = advertiseServiceInput.value.trim() || "iroh-http";
-  advertiseAbort = new AbortController();
-  advertiseBtn.textContent = "Stop advertising";
-  setStatus(advertiseStatus, `Advertising as "${serviceName}"`, "ok");
+  const serviceName = advertisePeerServiceInput.value.trim() || "iroh-http";
+  advertisePeerAbort = new AbortController();
+  advertisePeerBtn.textContent = "Stop advertising";
+  setStatus(advertisePeerStatus, `Advertising as "${serviceName}"`, "ok");
 
   try {
-    await node.advertise({ serviceName, signal: advertiseAbort.signal });
+    await node.advertisePeer({
+      serviceName,
+      signal: advertisePeerAbort.signal,
+    });
   } catch { /* aborted or error */ }
 
-  advertiseAbort = null;
-  advertiseBtn.textContent = "Start advertising";
-  setStatus(advertiseStatus, "Done");
+  advertisePeerAbort = null;
+  advertisePeerBtn.textContent = "Start advertising";
+  setStatus(advertisePeerStatus, "Done");
 });
 
-browseBtn.addEventListener("click", async () => {
-  if (browseAbort) {
-    browseAbort.abort();
-    browseAbort = null;
-    browseBtn.textContent = "Start browsing";
+browsePeersBtn.addEventListener("click", async () => {
+  if (browsePeersAbort) {
+    browsePeersAbort.abort();
+    browsePeersAbort = null;
+    browsePeersBtn.textContent = "Start browsing";
     return;
   }
 
-  const serviceName = browseServiceInput.value.trim() || "iroh-http";
-  browseAbort = new AbortController();
-  browseBtn.textContent = "Stop browsing";
-  browseLog.textContent = "";
+  const serviceName = browsePeersServiceInput.value.trim() || "iroh-http";
+  browsePeersAbort = new AbortController();
+  browsePeersBtn.textContent = "Stop browsing";
+  browsePeersLog.textContent = "";
 
   try {
     for await (
-      const ev of node.browse({ serviceName, signal: browseAbort.signal })
+      const ev of node.browsePeers({
+        serviceName,
+        signal: browsePeersAbort.signal,
+      })
     ) {
       const icon = ev.isActive ? "+" : "-";
       appendLog(
-        browseLog,
+        browsePeersLog,
         `${icon} ${ev.nodeId.slice(0, 20)}… [${ev.addrs.join(", ")}]`,
       );
     }
   } catch (e) {
-    appendLog(browseLog, `Error: ${e}`);
+    appendLog(browsePeersLog, `Error: ${e}`);
   }
 
-  browseAbort = null;
-  browseBtn.textContent = "Start browsing";
+  browsePeersAbort = null;
+  browsePeersBtn.textContent = "Start browsing";
+});
+
+// ── Generic DNS-SD ─────────────────────────────────────────────────────────────
+
+const genericServiceInput = document.querySelector<HTMLInputElement>(
+  "#generic-service",
+)!;
+const genericAdvertiseBtn = document.querySelector<HTMLButtonElement>(
+  "#generic-advertise-btn",
+)!;
+const genericBrowseBtn = document.querySelector<HTMLButtonElement>(
+  "#generic-browse-btn",
+)!;
+const genericStatus = document.querySelector<HTMLElement>("#generic-status")!;
+const genericLog = document.querySelector<HTMLElement>("#generic-log")!;
+
+let genericAdvertiseAbort: AbortController | null = null;
+let genericBrowseAbort: AbortController | null = null;
+
+genericAdvertiseBtn.addEventListener("click", async () => {
+  if (genericAdvertiseAbort) {
+    genericAdvertiseAbort.abort();
+    genericAdvertiseAbort = null;
+    genericAdvertiseBtn.textContent = "Start advertising";
+    setStatus(genericStatus, "Stopped");
+    return;
+  }
+
+  const serviceName = genericServiceInput.value.trim() || "demo-printer";
+  genericAdvertiseAbort = new AbortController();
+  genericAdvertiseBtn.textContent = "Stop advertising";
+  setStatus(
+    genericStatus,
+    `Advertising "Front Desk Printer" on _${serviceName}._tcp`,
+    "ok",
+  );
+
+  try {
+    // A fully generic advertisement: custom instance label, port, TXT and
+    // protocol — this is not an iroh node.
+    await node.advertise({
+      serviceName,
+      instanceName: "Front Desk Printer",
+      port: 9100,
+      protocol: "tcp",
+      txt: { model: "LaserJet 9000", color: "true", pdl: "application/pdf" },
+      signal: genericAdvertiseAbort.signal,
+    });
+  } catch { /* aborted or error */ }
+
+  genericAdvertiseAbort = null;
+  genericAdvertiseBtn.textContent = "Start advertising";
+  setStatus(genericStatus, "Done");
+});
+
+genericBrowseBtn.addEventListener("click", async () => {
+  if (genericBrowseAbort) {
+    genericBrowseAbort.abort();
+    genericBrowseAbort = null;
+    genericBrowseBtn.textContent = "Start browsing";
+    return;
+  }
+
+  const serviceName = genericServiceInput.value.trim() || "demo-printer";
+  genericBrowseAbort = new AbortController();
+  genericBrowseBtn.textContent = "Stop browsing";
+  genericLog.textContent = "";
+
+  try {
+    for await (
+      const record of node.browse({
+        serviceName,
+        protocol: "tcp",
+        signal: genericBrowseAbort.signal,
+      })
+    ) {
+      const icon = record.isActive ? "+" : "-";
+      const txt = Object.entries(record.txt)
+        .map(([k, v]) => `${k}=${v}`)
+        .join(", ");
+      const peer = asIrohPeer(record);
+      const tag = peer ? `  (iroh peer ${peer.nodeId.slice(0, 12)}…)` : "";
+      appendLog(
+        genericLog,
+        `${icon} ${record.instanceName} :${record.port}${tag}` +
+          (txt ? `\n    ${txt}` : ""),
+      );
+    }
+  } catch (e) {
+    appendLog(genericLog, `Error: ${e}`);
+  }
+
+  genericBrowseAbort = null;
+  genericBrowseBtn.textContent = "Start browsing";
 });
 
 // ── Sessions (QUIC) ────────────────────────────────────────────────────────────

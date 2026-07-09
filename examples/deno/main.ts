@@ -6,6 +6,8 @@
  *   deno task client <peer-id>        # fetch from a server
  *   deno task advertise [service]     # announce this node on the LAN via mDNS
  *   deno task browse    [service]     # discover nodes on the LAN via mDNS
+ *   deno task dnssd-advertise         # advertise ANY service (custom TXT/port)
+ *   deno task dnssd-browse            # browse ANY service, print full records
  *
  * The `host` task wires Deno's standard-library file server (`serveDir`) onto an
  * httpi:// endpoint, so any peer can stream the files in ./public (audio.wav,
@@ -18,14 +20,24 @@
  * Terminal B prints terminal A's node ID as it is discovered. Press Ctrl+C to
  * stop either side. Pass a matching service name to scope discovery, e.g.
  *   deno task advertise my-app   &&   deno task browse my-app
+ *
+ * The `dnssd-*` tasks use the generic `node.advertise()` / `node.browse()`
+ * surface to advertise and browse arbitrary DNS-SD services — with a custom
+ * instance label, port, TXT records and protocol — not just iroh nodes.
+ * `asIrohPeer` reinterprets any record that carries an iroh public key as a
+ * peer. (`node.advertisePeer()` / `node.browsePeers()` are the iroh-http
+ * specializations used by the `advertise` / `browse` tasks above.)
  */
 
-import { createNode } from "@momics/iroh-http-deno";
+import { asIrohPeer, createNode } from "@momics/iroh-http-deno";
 import { serveDir } from "@std/http/file-server";
 import { fromFileUrl } from "@std/path";
 
 /** Default mDNS service name shared by `advertise` and `browse`. */
 const DEFAULT_SERVICE = "iroh-http-example";
+
+/** Default generic service name shared by the `dnssd-*` tasks. */
+const DEFAULT_DNSSD_SERVICE = "demo-printer";
 
 /** Read an env var without throwing when `--allow-env` was not granted. */
 function envVar(name: string): string | undefined {
@@ -124,7 +136,7 @@ switch (mode) {
     const abort = new AbortController();
     Deno.addSignalListener("SIGINT", () => abort.abort());
     console.log(`Advertising as "${serviceName}". Press Ctrl+C to stop.`);
-    await node.advertise({ serviceName, signal: abort.signal });
+    await node.advertisePeer({ serviceName, signal: abort.signal });
     await node.close();
     break;
   }
@@ -135,7 +147,7 @@ switch (mode) {
     Deno.addSignalListener("SIGINT", () => abort.abort());
     console.log(`Browsing for "${serviceName}". Press Ctrl+C to stop.`);
     for await (
-      const peer of node.browse({ serviceName, signal: abort.signal })
+      const peer of node.browsePeers({ serviceName, signal: abort.signal })
     ) {
       const status = peer.isActive ? "discovered" : "expired";
       const addrs = peer.addrs.length > 0 ? `  [${peer.addrs.join(", ")}]` : "";
@@ -145,9 +157,61 @@ switch (mode) {
     break;
   }
 
+  case "dnssd-advertise": {
+    // Advertise an arbitrary DNS-SD service — not an iroh node. Everything is
+    // caller-controlled: instance label, SRV port, TXT records and protocol.
+    const serviceName = arg ?? DEFAULT_DNSSD_SERVICE;
+    const abort = new AbortController();
+    Deno.addSignalListener("SIGINT", () => abort.abort());
+    console.log(
+      `Advertising "Front Desk Printer" as _${serviceName}._tcp on :9100. ` +
+        "Press Ctrl+C to stop.",
+    );
+    await node.advertise({
+      serviceName,
+      instanceName: "Front Desk Printer",
+      port: 9100,
+      protocol: "tcp",
+      txt: { model: "LaserJet 9000", color: "true", pdl: "application/pdf" },
+      signal: abort.signal,
+    });
+    await node.close();
+    break;
+  }
+
+  case "dnssd-browse": {
+    // Browse any DNS-SD service and print the full, lossless record. Records
+    // that carry an iroh public key are additionally surfaced as peers.
+    const serviceName = arg ?? DEFAULT_DNSSD_SERVICE;
+    const abort = new AbortController();
+    Deno.addSignalListener("SIGINT", () => abort.abort());
+    console.log(`Browsing for _${serviceName}. Press Ctrl+C to stop.`);
+    for await (
+      const record of node.browse({
+        serviceName,
+        protocol: "tcp",
+        signal: abort.signal,
+      })
+    ) {
+      const status = record.isActive ? "discovered" : "expired";
+      const txt = Object.entries(record.txt)
+        .map(([k, v]) => `${k}=${v}`)
+        .join(", ");
+      console.log(`  ${status}: ${record.instanceName} :${record.port}`);
+      if (record.addrs.length > 0) {
+        console.log(`      addrs: ${record.addrs.join(", ")}`);
+      }
+      if (txt) console.log(`      txt:   ${txt}`);
+      const peer = asIrohPeer(record);
+      if (peer) console.log(`      ↳ iroh peer: ${peer.nodeId}`);
+    }
+    await node.close();
+    break;
+  }
+
   default:
     console.error(
-      "Usage: deno task server | host | client <peer-id> | advertise [service] | browse [service]",
+      "Usage: deno task server | host | client <peer-id> | advertise [service] | browse [service] | dnssd-advertise [service] | dnssd-browse [service]",
     );
     Deno.exit(1);
 }

@@ -1,0 +1,24 @@
+"$schema" = "../schemas/schema.json"
+
+[[set]]
+identifier = "discovery"
+description = """
+Enables local-network service discovery over DNS-SD (RFC 6763) / mDNS. Covers \
+both the iroh-http peer discovery specialization (advertisePeer / browsePeers) \
+and the generic DNS-SD primitive (advertise / browse) for arbitrary local \
+services — instance name, port, TXT records, and protocol.
+"""
+permissions = [
+  # iroh-http peer discovery (node.advertisePeer / node.browsePeers)
+  "allow-browse-peers",
+  "allow-browse-peers-close",
+  "allow-browse-peers-next",
+  "allow-advertise-peer",
+  "allow-advertise-peer-close",
+  # generic DNS-SD (node.advertise / node.browse)
+  "allow-advertise",
+  "allow-advertise-close",
+  "allow-browse",
+  "allow-browse-next",
+  "allow-browse-close",
+]

@@ -107,53 +107,59 @@ impl<R: Runtime> PluginBuilder<R> {
         // provider is already set, which is fine.
         let _ = rustls::crypto::ring::default_provider().install_default();
 
-        let mut plugin_builder = Builder::new("iroh-http").invoke_handler(tauri::generate_handler![
-            commands::create_endpoint,
-            commands::close_endpoint,
-            commands::ping,
-            commands::node_addr,
-            commands::node_ticket,
-            commands::home_relay,
-            commands::peer_info,
-            commands::peer_stats,
-            commands::endpoint_stats,
-            commands::next_chunk,
-            commands::try_next_chunk,
-            commands::send_chunk,
-            commands::finish_body,
-            commands::cancel_request,
-            commands::create_body_writer,
-            commands::create_fetch_token,
-            commands::cancel_in_flight,
-            commands::fetch,
-            commands::serve,
-            commands::stop_serve,
-            commands::wait_serve_stop,
-            commands::wait_endpoint_closed,
-            commands::respond_to_request,
-            commands::secret_key_sign,
-            commands::public_key_verify,
-            commands::generate_secret_key,
-            commands::mdns_browse,
-            commands::mdns_next_event,
-            commands::mdns_browse_close,
-            commands::mdns_advertise,
-            commands::mdns_advertise_close,
-            commands::session_connect,
-            commands::session_accept,
-            commands::session_create_bidi_stream,
-            commands::session_next_bidi_stream,
-            commands::session_close,
-            commands::session_closed,
-            commands::session_create_uni_stream,
-            commands::session_next_uni_stream,
-            commands::session_send_datagram,
-            commands::session_recv_datagram,
-            commands::session_max_datagram_size,
-            commands::start_transport_events,
-            commands::next_path_change,
-            commands::unsubscribe_path_changes,
-        ]);
+        let mut plugin_builder =
+            Builder::new("iroh-http").invoke_handler(tauri::generate_handler![
+                commands::create_endpoint,
+                commands::close_endpoint,
+                commands::ping,
+                commands::node_addr,
+                commands::node_ticket,
+                commands::home_relay,
+                commands::peer_info,
+                commands::peer_stats,
+                commands::endpoint_stats,
+                commands::next_chunk,
+                commands::try_next_chunk,
+                commands::send_chunk,
+                commands::finish_body,
+                commands::cancel_request,
+                commands::create_body_writer,
+                commands::create_fetch_token,
+                commands::cancel_in_flight,
+                commands::fetch,
+                commands::serve,
+                commands::stop_serve,
+                commands::wait_serve_stop,
+                commands::wait_endpoint_closed,
+                commands::respond_to_request,
+                commands::secret_key_sign,
+                commands::public_key_verify,
+                commands::generate_secret_key,
+                commands::browse_peers,
+                commands::browse_peers_next,
+                commands::browse_peers_close,
+                commands::advertise_peer,
+                commands::advertise_peer_close,
+                commands::advertise,
+                commands::advertise_close,
+                commands::browse,
+                commands::browse_next,
+                commands::browse_close,
+                commands::session_connect,
+                commands::session_accept,
+                commands::session_create_bidi_stream,
+                commands::session_next_bidi_stream,
+                commands::session_close,
+                commands::session_closed,
+                commands::session_create_uni_stream,
+                commands::session_next_uni_stream,
+                commands::session_send_datagram,
+                commands::session_recv_datagram,
+                commands::session_max_datagram_size,
+                commands::start_transport_events,
+                commands::next_path_change,
+                commands::unsubscribe_path_changes,
+            ]);
 
         // Register the `httpi://` scheme protocol before `.build()` — Tauri
         // requires schemes to be declared at builder time.
@@ -294,10 +300,7 @@ mod scheme {
         let node_id = node_id.trim_end_matches(".localhost");
 
         // ── 3. Reconstruct the httpi:// URL for iroh-http-core ───────────────
-        let path_and_query = uri
-            .path_and_query()
-            .map(|pq| pq.as_str())
-            .unwrap_or("/");
+        let path_and_query = uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
         let core_url = format!("httpi://{node_id}{path_and_query}");
 
         // ── 4. Collect headers — forward Range for seeking support ───────────
@@ -325,12 +328,12 @@ mod scheme {
             &core_url,
             "GET",
             &headers,
-            None,  // no request body for scheme handler requests
-            None,  // no fetch cancellation token
-            None,  // no extra direct addrs
-            None,  // use endpoint default timeout
-            true,  // decompress
-            Some(max_response_bytes),  // bound buffered response size
+            None,                     // no request body for scheme handler requests
+            None,                     // no fetch cancellation token
+            None,                     // no extra direct addrs
+            None,                     // use endpoint default timeout
+            true,                     // decompress
+            Some(max_response_bytes), // bound buffered response size
         )
         .await
         .map_err(|e| e.to_string())?;
@@ -343,9 +346,7 @@ mod scheme {
                     Ok(Some(chunk)) => {
                         // Defence in depth: the core cap above already bounds the
                         // response, but never let the buffer grow past the limit.
-                        if body_bytes.len().saturating_add(chunk.len())
-                            > max_response_bytes
-                        {
+                        if body_bytes.len().saturating_add(chunk.len()) > max_response_bytes {
                             ep.handles().cancel_reader(res.body_handle);
                             return Err(format!(
                                 "httpi:// response exceeds {max_response_bytes} byte cap"
@@ -365,8 +366,7 @@ mod scheme {
         }
 
         // ── 7. Build the http::Response ──────────────────────────────────────
-        let status = StatusCode::from_u16(res.status)
-            .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+        let status = StatusCode::from_u16(res.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
 
         let mut builder = Response::builder().status(status);
 

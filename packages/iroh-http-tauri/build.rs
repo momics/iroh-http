@@ -43,12 +43,18 @@ fn main() {
         "secret_key_sign",
         "public_key_verify",
         "generate_secret_key",
-        // mDNS discovery (iroh-http:mdns)
-        "mdns_browse",
-        "mdns_next_event",
-        "mdns_browse_close",
-        "mdns_advertise",
-        "mdns_advertise_close",
+        // Local-network discovery — iroh peer (iroh-http:discovery)
+        "browse_peers",
+        "browse_peers_next",
+        "browse_peers_close",
+        "advertise_peer",
+        "advertise_peer_close",
+        // Local-network discovery — generic DNS-SD (iroh-http:discovery)
+        "advertise",
+        "advertise_close",
+        "browse",
+        "browse_next",
+        "browse_close",
         // Transport / path-change events (bundled into iroh-http:default)
         "start_transport_events",
         "next_path_change",

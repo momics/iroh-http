@@ -27,7 +27,7 @@ fn expected_sets() -> BTreeMap<&'static str, &'static str> {
         ("serve", "allow-serve"),
         ("connect", "allow-session-connect"),
         ("crypto", "allow-secret-key-sign"),
-        ("mdns", "allow-mdns-browse"),
+        ("discovery", "allow-browse-peers"),
     ])
 }
 
@@ -144,8 +144,7 @@ fn manifest_dir() -> PathBuf {
 
 /// Commands wired into `tauri::generate_handler![...]` in `src/lib.rs`.
 fn registered_commands() -> BTreeSet<String> {
-    let src = std::fs::read_to_string(manifest_dir().join("src/lib.rs"))
-        .expect("read src/lib.rs");
+    let src = std::fs::read_to_string(manifest_dir().join("src/lib.rs")).expect("read src/lib.rs");
     let start = src
         .find("generate_handler![")
         .expect("generate_handler! macro in src/lib.rs");

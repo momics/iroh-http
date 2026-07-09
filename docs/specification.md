@@ -78,14 +78,17 @@ interface IrohNode {
     init?: { directAddrs?: string[] },
   ): Promise<IrohSession>;
 
-  /** Discover peers on the local network via mDNS. */
-  browse(
-    options?: MdnsOptions,
-    signal?: AbortSignal,
-  ): AsyncIterable<PeerDiscoveryEvent>;
+  /** Discover iroh-http peers on the local network via mDNS. */
+  browsePeers(options?: MdnsOptions): AsyncIterable<PeerDiscoveryEvent>;
 
-  /** Advertise this node on the local network via mDNS. */
-  advertise(options?: MdnsOptions, signal?: AbortSignal): Promise<void>;
+  /** Advertise this node as a discoverable iroh-http peer via mDNS. */
+  advertisePeer(options?: MdnsOptions): Promise<void>;
+
+  /** Browse for any DNS-SD service on the local network (generic primitive). */
+  browse(options: DnsSdBrowseOptions): AsyncIterable<ServiceRecord>;
+
+  /** Advertise any DNS-SD service on the local network (generic primitive). */
+  advertise(options: DnsSdAdvertiseOptions): Promise<void>;
 
   /** Resolves when the node's endpoint has closed. */
   readonly closed: Promise<WebTransportCloseInfo>;
@@ -763,6 +766,11 @@ Provided by [`PublicKey.verify()`](#publickey) and [`SecretKey.sign()`](#secretk
 
 ### Discovery (mDNS)
 
+`advertisePeer` / `browsePeers` are the iroh-http specialization; `advertise` /
+`browse` are the generic DNS-SD primitives they build on. Both run on the node
+because the discovery FFI is loaded through the node addon (see
+[ADR-018](adr/018-general-dns-sd-surface.md)).
+
 ```ts
 interface PeerDiscoveryEvent {
   isActive: boolean;  // true = appeared, false = departed
@@ -772,6 +780,38 @@ interface PeerDiscoveryEvent {
 
 interface MdnsOptions {
   serviceName?: string;  // Default: "iroh-http"
+  signal?: AbortSignal;  // Abort to stop advertising / browsing
+}
+
+type DnsSdProtocol = "udp" | "tcp";  // Default: "udp"
+
+// Generic advertise input.
+interface DnsSdAdvertiseOptions {
+  serviceName: string;              // Bare name, e.g. "printers" → _printers._udp.local.
+  instanceName: string;             // Unique instance label (< 64 bytes)
+  port: number;                     // SRV port; must fit u16 (0–65535)
+  txt?: Record<string, string>;     // TXT properties
+  addrs?: string[];                 // Extra addresses (local ones added automatically)
+  protocol?: DnsSdProtocol;
+  signal?: AbortSignal;
+}
+
+// Generic browse input.
+interface DnsSdBrowseOptions {
+  serviceName: string;
+  protocol?: DnsSdProtocol;
+  signal?: AbortSignal;
+}
+
+// Lossless record yielded by browse().
+interface ServiceRecord {
+  isActive: boolean;
+  serviceType: string;              // e.g. _printers._udp.local.
+  instanceName: string;
+  host?: string;                    // Absent on expiry
+  port: number;                     // 0 on expiry
+  addrs: string[];                  // Empty on expiry
+  txt: Record<string, string>;      // Empty on expiry
 }
 ```
 

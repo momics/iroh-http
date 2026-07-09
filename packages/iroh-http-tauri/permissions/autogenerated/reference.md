@@ -30,6 +30,266 @@ Node lifecycle and introspection. Covers createNode() and close(). Add iroh-http
 <tr>
 <td>
 
+`iroh-http:allow-advertise`
+
+</td>
+<td>
+
+Enables the advertise command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`iroh-http:deny-advertise`
+
+</td>
+<td>
+
+Denies the advertise command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`iroh-http:allow-advertise-close`
+
+</td>
+<td>
+
+Enables the advertise_close command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`iroh-http:deny-advertise-close`
+
+</td>
+<td>
+
+Denies the advertise_close command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`iroh-http:allow-advertise-peer`
+
+</td>
+<td>
+
+Enables the advertise_peer command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`iroh-http:deny-advertise-peer`
+
+</td>
+<td>
+
+Denies the advertise_peer command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`iroh-http:allow-advertise-peer-close`
+
+</td>
+<td>
+
+Enables the advertise_peer_close command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`iroh-http:deny-advertise-peer-close`
+
+</td>
+<td>
+
+Denies the advertise_peer_close command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`iroh-http:allow-browse`
+
+</td>
+<td>
+
+Enables the browse command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`iroh-http:deny-browse`
+
+</td>
+<td>
+
+Denies the browse command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`iroh-http:allow-browse-close`
+
+</td>
+<td>
+
+Enables the browse_close command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`iroh-http:deny-browse-close`
+
+</td>
+<td>
+
+Denies the browse_close command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`iroh-http:allow-browse-next`
+
+</td>
+<td>
+
+Enables the browse_next command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`iroh-http:deny-browse-next`
+
+</td>
+<td>
+
+Denies the browse_next command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`iroh-http:allow-browse-peers`
+
+</td>
+<td>
+
+Enables the browse_peers command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`iroh-http:deny-browse-peers`
+
+</td>
+<td>
+
+Denies the browse_peers command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`iroh-http:allow-browse-peers-close`
+
+</td>
+<td>
+
+Enables the browse_peers_close command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`iroh-http:deny-browse-peers-close`
+
+</td>
+<td>
+
+Denies the browse_peers_close command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`iroh-http:allow-browse-peers-next`
+
+</td>
+<td>
+
+Enables the browse_peers_next command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`iroh-http:deny-browse-peers-next`
+
+</td>
+<td>
+
+Denies the browse_peers_next command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
 `iroh-http:allow-cancel-in-flight`
 
 </td>
@@ -309,136 +569,6 @@ Enables the home_relay command without any pre-configured scope.
 <td>
 
 Denies the home_relay command without any pre-configured scope.
-
-</td>
-</tr>
-
-<tr>
-<td>
-
-`iroh-http:allow-mdns-advertise`
-
-</td>
-<td>
-
-Enables the mdns_advertise command without any pre-configured scope.
-
-</td>
-</tr>
-
-<tr>
-<td>
-
-`iroh-http:deny-mdns-advertise`
-
-</td>
-<td>
-
-Denies the mdns_advertise command without any pre-configured scope.
-
-</td>
-</tr>
-
-<tr>
-<td>
-
-`iroh-http:allow-mdns-advertise-close`
-
-</td>
-<td>
-
-Enables the mdns_advertise_close command without any pre-configured scope.
-
-</td>
-</tr>
-
-<tr>
-<td>
-
-`iroh-http:deny-mdns-advertise-close`
-
-</td>
-<td>
-
-Denies the mdns_advertise_close command without any pre-configured scope.
-
-</td>
-</tr>
-
-<tr>
-<td>
-
-`iroh-http:allow-mdns-browse`
-
-</td>
-<td>
-
-Enables the mdns_browse command without any pre-configured scope.
-
-</td>
-</tr>
-
-<tr>
-<td>
-
-`iroh-http:deny-mdns-browse`
-
-</td>
-<td>
-
-Denies the mdns_browse command without any pre-configured scope.
-
-</td>
-</tr>
-
-<tr>
-<td>
-
-`iroh-http:allow-mdns-browse-close`
-
-</td>
-<td>
-
-Enables the mdns_browse_close command without any pre-configured scope.
-
-</td>
-</tr>
-
-<tr>
-<td>
-
-`iroh-http:deny-mdns-browse-close`
-
-</td>
-<td>
-
-Denies the mdns_browse_close command without any pre-configured scope.
-
-</td>
-</tr>
-
-<tr>
-<td>
-
-`iroh-http:allow-mdns-next-event`
-
-</td>
-<td>
-
-Enables the mdns_next_event command without any pre-configured scope.
-
-</td>
-</tr>
-
-<tr>
-<td>
-
-`iroh-http:deny-mdns-next-event`
-
-</td>
-<td>
-
-Denies the mdns_next_event command without any pre-configured scope.
 
 </td>
 </tr>
@@ -1226,12 +1356,13 @@ Enables low-level key operations — generate keypairs, sign with a secret key, 
 <tr>
 <td>
 
-`iroh-http:fetch`
+`iroh-http:discovery`
 
 </td>
 <td>
 
-Enables node.fetch() — send HTTP requests to remote peers. Includes all internal body-streaming primitives required for fetch to function.
+Enables local-network service discovery over DNS-SD (RFC 6763) / mDNS. Covers both the iroh-http peer discovery specialization (advertisePeer / browsePeers) and the generic DNS-SD primitive (advertise / browse) for arbitrary local services — instance name, port, TXT records, and protocol.
+
 
 </td>
 </tr>
@@ -1239,12 +1370,12 @@ Enables node.fetch() — send HTTP requests to remote peers. Includes all intern
 <tr>
 <td>
 
-`iroh-http:mdns`
+`iroh-http:fetch`
 
 </td>
 <td>
 
-Enables local peer discovery via mDNS — browse for peers on the local network and advertise this node.
+Enables node.fetch() — send HTTP requests to remote peers. Includes all internal body-streaming primitives required for fetch to function.
 
 </td>
 </tr>
