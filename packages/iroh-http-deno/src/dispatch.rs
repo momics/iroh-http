@@ -1047,7 +1047,7 @@ async fn mdns_browse_dispatch(_p: Value) -> Value {
                 )
             }
         };
-        match iroh_http_discovery::start_browse(ep.raw(), service_name).await {
+        match iroh_http_discovery::browse_peers(ep.raw(), service_name).await {
             Err(e) => err_code("REFUSED", e),
             Ok(session) => {
                 let h = browse_slab()
@@ -1127,7 +1127,7 @@ fn mdns_advertise_dispatch(_p: Value) -> Value {
                 )
             }
         };
-        match iroh_http_discovery::start_advertise(ep.raw(), service_name) {
+        match iroh_http_discovery::advertise_peer(ep.raw(), service_name) {
             Err(e) => err_code("REFUSED", e),
             Ok(session) => {
                 let h = advertise_slab()

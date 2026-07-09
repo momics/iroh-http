@@ -1,7 +1,7 @@
 //! End-to-end DNS-SD interop test for the desktop discovery stack.
 //!
-//! Advertises a node via [`iroh_http_discovery::start_advertise`] and confirms a
-//! second endpoint discovers it via [`iroh_http_discovery::start_browse`]. This
+//! Advertises a node via [`iroh_http_discovery::advertise_peer`] and confirms a
+//! second endpoint discovers it via [`iroh_http_discovery::browse_peers`]. This
 //! exercises the real `mdns-sd` wire path (PTR + SRV + TXT + A/AAAA) that the
 //! rework in issue #329 introduced.
 //!
@@ -15,7 +15,7 @@
 use std::time::Duration;
 
 use iroh::{Endpoint, RelayMode};
-use iroh_http_discovery::{start_advertise, start_browse};
+use iroh_http_discovery::{advertise_peer, browse_peers};
 
 async fn minimal_endpoint() -> Endpoint {
     Endpoint::builder(iroh::endpoint::presets::Minimal)
@@ -39,10 +39,10 @@ async fn advertised_node_is_discovered_over_dns_sd() {
         base32::Alphabet::Rfc4648Lower { padding: false },
         adv_ep.id().as_bytes(),
     );
-    let _advertise = start_advertise(&adv_ep, service).expect("start advertise");
+    let _advertise = advertise_peer(&adv_ep, service).expect("start advertise");
 
     let browse_ep = minimal_endpoint().await;
-    let mut session = start_browse(&browse_ep, service)
+    let mut session = browse_peers(&browse_ep, service)
         .await
         .expect("start browse");
 

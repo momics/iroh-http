@@ -3,7 +3,7 @@
 //! Implements standard DNS-SD (RFC 6763) mDNS so nodes on the same local
 //! network can find each other without a relay server.
 //!
-//! Use [`start_browse`] and [`start_advertise`] to start discovery sessions.
+//! Use [`browse_peers`] and [`advertise_peer`] to start discovery sessions.
 //!
 //! # Wire format
 //!
@@ -41,7 +41,7 @@ pub use dns_sd::{
 
 // ── DiscoveryError ────────────────────────────────────────────────────────────
 
-/// Structured error returned by [`start_browse`] and [`start_advertise`].
+/// Structured error returned by [`browse_peers`] and [`advertise_peer`].
 ///
 /// Using an enum instead of `String` lets callers handle different failure
 /// modes programmatically (issue-45 fix).
@@ -189,7 +189,7 @@ impl BrowseSession {
 /// For non-iroh services (custom instance names, ports, or TXT), use
 /// [`dns_sd::browse`] directly.
 #[cfg(feature = "mdns")]
-pub async fn start_browse(
+pub async fn browse_peers(
     ep: &iroh::Endpoint,
     service_name: &str,
 ) -> Result<BrowseSession, DiscoveryError> {
@@ -215,7 +215,7 @@ pub async fn start_browse(
 /// For non-iroh services (custom instance names, ports, or TXT), use
 /// [`dns_sd::advertise`] directly.
 #[cfg(feature = "mdns")]
-pub fn start_advertise(
+pub fn advertise_peer(
     ep: &iroh::Endpoint,
     service_name: &str,
 ) -> Result<AdvertiseSession, DiscoveryError> {

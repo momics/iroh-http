@@ -449,7 +449,7 @@ pub async fn mdns_browse(endpoint_handle: u32, service_name: String) -> napi::Re
     let ep = get_endpoint(endpoint_handle)?;
     validate_bounded_string("serviceName", &service_name, MAX_MDNS_SERVICE_NAME_LEN)
         .map_err(ffi_invalid_arg)?;
-    let session = iroh_http_discovery::start_browse(ep.raw(), &service_name)
+    let session = iroh_http_discovery::browse_peers(ep.raw(), &service_name)
         .await
         .map_err(|e| napi::Error::new(Status::GenericFailure, format_error_json("REFUSED", e)))?;
     let handle = lock_browse_slab()?.insert(Arc::new(TokioMutex::new(session))) as u32;
@@ -530,7 +530,7 @@ pub async fn mdns_advertise(endpoint_handle: u32, service_name: String) -> napi:
     let ep = get_endpoint(endpoint_handle)?;
     validate_bounded_string("serviceName", &service_name, MAX_MDNS_SERVICE_NAME_LEN)
         .map_err(ffi_invalid_arg)?;
-    let session = iroh_http_discovery::start_advertise(ep.raw(), &service_name)
+    let session = iroh_http_discovery::advertise_peer(ep.raw(), &service_name)
         .map_err(|e| napi::Error::new(Status::GenericFailure, format_error_json("REFUSED", e)))?;
     let handle = lock_advertise_slab()?.insert(session) as u32;
     Ok(handle)

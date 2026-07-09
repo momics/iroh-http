@@ -23,7 +23,7 @@ const PROVENANCE: &str = "mdns-sd";
 /// An in-process [`AddressLookup`] populated from DNS-SD–discovered peers.
 ///
 /// Cheap to clone: the map is shared behind an `Arc<Mutex<_>>`. Registered on
-/// the endpoint by [`crate::start_browse`]; the browse pump updates the map.
+/// the endpoint by [`crate::browse_peers`]; the browse pump updates the map.
 #[derive(Debug, Default, Clone)]
 pub(crate) struct MdnsSdAddressLookup {
     map: Arc<Mutex<HashMap<EndpointId, EndpointData>>>,

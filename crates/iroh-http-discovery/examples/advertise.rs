@@ -14,7 +14,7 @@
 use std::time::Duration;
 
 use iroh::{Endpoint, RelayMode};
-use iroh_http_discovery::start_advertise;
+use iroh_http_discovery::advertise_peer;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -36,7 +36,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ep.id().as_bytes(),
     );
 
-    let _session = start_advertise(&ep, &service)?;
+    let _session = advertise_peer(&ep, &service)?;
 
     println!("advertising _{service}._udp.local");
     println!("  node id : {node_id}");

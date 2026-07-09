@@ -1162,7 +1162,7 @@ pub async fn mdns_browse(endpoint_handle: u64, service_name: String) -> Result<u
             format!("invalid endpoint handle: {endpoint_handle}"),
         )
     })?;
-    let session = iroh_http_discovery::start_browse(ep.raw(), &service_name)
+    let session = iroh_http_discovery::browse_peers(ep.raw(), &service_name)
         .await
         .map_err(|e| format_error_json("REFUSED", e))?;
     let handle = browse_slab()
@@ -1357,7 +1357,7 @@ pub fn mdns_browse_close<R: tauri::Runtime>(
 /// Start advertising this node on the local network via mDNS.
 ///
 /// Declared `async` so Tauri runs it inside the async (Tokio) runtime. The mDNS
-/// address-lookup constructor (`start_advertise` → `MdnsAddressLookup::build`)
+/// address-lookup constructor (`advertise_peer` → `MdnsAddressLookup::build`)
 /// calls `tokio::runtime::Handle::current()`, which panics with "there is no
 /// reactor running" when invoked outside a runtime context. A synchronous Tauri
 /// command runs on a plain worker thread with no runtime, so enabling mDNS
@@ -1371,7 +1371,7 @@ pub async fn mdns_advertise(endpoint_handle: u64, service_name: String) -> Resul
             format!("invalid endpoint handle: {endpoint_handle}"),
         )
     })?;
-    let session = iroh_http_discovery::start_advertise(ep.raw(), &service_name)
+    let session = iroh_http_discovery::advertise_peer(ep.raw(), &service_name)
         .map_err(|e| format_error_json("REFUSED", e))?;
     let handle = advertise_slab()
         .lock()
