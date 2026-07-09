@@ -10,15 +10,15 @@ services — instance name, port, TXT records, and protocol.
 """
 permissions = [
   # iroh-http peer discovery (node.advertisePeer / node.browsePeers)
-  "allow-mdns-browse",
-  "allow-mdns-browse-close",
-  "allow-mdns-next-event",
-  "allow-mdns-advertise",
-  "allow-mdns-advertise-close",
+  "allow-browse-peers",
+  "allow-browse-peers-close",
+  "allow-browse-peers-next",
+  "allow-advertise-peer",
+  "allow-advertise-peer-close",
   # generic DNS-SD (node.advertise / node.browse)
-  "allow-dns-sd-advertise",
-  "allow-dns-sd-advertise-close",
-  "allow-dns-sd-browse",
-  "allow-dns-sd-next-record",
-  "allow-dns-sd-browse-close",
+  "allow-advertise",
+  "allow-advertise-close",
+  "allow-browse",
+  "allow-browse-next",
+  "allow-browse-close",
 ]

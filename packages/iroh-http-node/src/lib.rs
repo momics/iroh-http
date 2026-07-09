@@ -430,7 +430,7 @@ pub async fn close_endpoint(endpoint_handle: u32, force: Option<bool>) -> napi::
 
 // ── mDNS browse / advertise ──────────────────────────────────────────────────
 
-/// Discovery event returned by `mdnsNextEvent`.
+/// Discovery event returned by `browsePeersNext`.
 #[napi(object)]
 pub struct JsPeerDiscoveryEvent {
     /// `true` = peer appeared; `false` = peer expired.
@@ -445,7 +445,7 @@ pub struct JsPeerDiscoveryEvent {
 /// Returns a browse handle for polling events.
 #[napi]
 #[cfg(feature = "discovery")]
-pub async fn mdns_browse(endpoint_handle: u32, service_name: String) -> napi::Result<u32> {
+pub async fn browse_peers(endpoint_handle: u32, service_name: String) -> napi::Result<u32> {
     let ep = get_endpoint(endpoint_handle)?;
     validate_bounded_string("serviceName", &service_name, MAX_MDNS_SERVICE_NAME_LEN)
         .map_err(ffi_invalid_arg)?;
@@ -458,7 +458,7 @@ pub async fn mdns_browse(endpoint_handle: u32, service_name: String) -> napi::Re
 
 #[napi]
 #[cfg(not(feature = "discovery"))]
-pub async fn mdns_browse(_endpoint_handle: u32, _service_name: String) -> napi::Result<u32> {
+pub async fn browse_peers(_endpoint_handle: u32, _service_name: String) -> napi::Result<u32> {
     Err(napi::Error::new(
         Status::GenericFailure,
         format_error_json("UNKNOWN", "discovery feature not enabled in this build"),
@@ -469,7 +469,7 @@ pub async fn mdns_browse(_endpoint_handle: u32, _service_name: String) -> napi::
 /// Returns `null` when the session is closed.
 #[napi]
 #[cfg(feature = "discovery")]
-pub async fn mdns_next_event(browse_handle: u32) -> napi::Result<Option<JsPeerDiscoveryEvent>> {
+pub async fn browse_peers_next(browse_handle: u32) -> napi::Result<Option<JsPeerDiscoveryEvent>> {
     let session =
         { lock_browse_slab()?.get(browse_handle as usize).cloned() }.ok_or_else(|| {
             napi::Error::new(
@@ -490,7 +490,7 @@ pub async fn mdns_next_event(browse_handle: u32) -> napi::Result<Option<JsPeerDi
 
 #[napi]
 #[cfg(not(feature = "discovery"))]
-pub async fn mdns_next_event(_browse_handle: u32) -> napi::Result<Option<JsPeerDiscoveryEvent>> {
+pub async fn browse_peers_next(_browse_handle: u32) -> napi::Result<Option<JsPeerDiscoveryEvent>> {
     Err(napi::Error::new(
         Status::GenericFailure,
         format_error_json("UNKNOWN", "discovery feature not enabled in this build"),
@@ -500,7 +500,7 @@ pub async fn mdns_next_event(_browse_handle: u32) -> napi::Result<Option<JsPeerD
 /// Close a browse session, stopping mDNS discovery.
 #[napi]
 #[cfg(feature = "discovery")]
-pub fn mdns_browse_close(browse_handle: u32) {
+pub fn browse_peers_close(browse_handle: u32) {
     if let Ok(mut slab) = browse_slab().lock() {
         if slab.contains(browse_handle as usize) {
             slab.remove(browse_handle as usize);
@@ -512,7 +512,7 @@ pub fn mdns_browse_close(browse_handle: u32) {
 
 #[napi]
 #[cfg(not(feature = "discovery"))]
-pub fn mdns_browse_close(_browse_handle: u32) {}
+pub fn browse_peers_close(_browse_handle: u32) {}
 
 /// Start advertising this node on the local network via mDNS.
 /// Returns an advertise handle.
@@ -526,7 +526,7 @@ pub fn mdns_browse_close(_browse_handle: u32) {}
 /// post-shutdown calls reject gracefully instead of aborting.
 #[napi]
 #[cfg(feature = "discovery")]
-pub async fn mdns_advertise(endpoint_handle: u32, service_name: String) -> napi::Result<u32> {
+pub async fn advertise_peer(endpoint_handle: u32, service_name: String) -> napi::Result<u32> {
     let ep = get_endpoint(endpoint_handle)?;
     validate_bounded_string("serviceName", &service_name, MAX_MDNS_SERVICE_NAME_LEN)
         .map_err(ffi_invalid_arg)?;
@@ -538,7 +538,7 @@ pub async fn mdns_advertise(endpoint_handle: u32, service_name: String) -> napi:
 
 #[napi]
 #[cfg(not(feature = "discovery"))]
-pub async fn mdns_advertise(_endpoint_handle: u32, _service_name: String) -> napi::Result<u32> {
+pub async fn advertise_peer(_endpoint_handle: u32, _service_name: String) -> napi::Result<u32> {
     Err(napi::Error::new(
         Status::GenericFailure,
         format_error_json("UNKNOWN", "discovery feature not enabled in this build"),
@@ -548,7 +548,7 @@ pub async fn mdns_advertise(_endpoint_handle: u32, _service_name: String) -> nap
 /// Stop advertising this node on the local network.
 #[napi]
 #[cfg(feature = "discovery")]
-pub fn mdns_advertise_close(advertise_handle: u32) {
+pub fn advertise_peer_close(advertise_handle: u32) {
     if let Ok(mut slab) = advertise_slab().lock() {
         if slab.contains(advertise_handle as usize) {
             slab.remove(advertise_handle as usize);
@@ -560,7 +560,7 @@ pub fn mdns_advertise_close(advertise_handle: u32) {
 
 #[napi]
 #[cfg(not(feature = "discovery"))]
-pub fn mdns_advertise_close(_advertise_handle: u32) {}
+pub fn advertise_peer_close(_advertise_handle: u32) {}
 
 // ── Generic DNS-SD (endpoint-free) ───────────────────────────────────────────
 
@@ -581,7 +581,7 @@ pub struct JsServiceConfig {
     pub protocol: Option<String>,
 }
 
-/// A fully-resolved DNS-SD service record returned by `dnsSdNextRecord`.
+/// A fully-resolved DNS-SD service record returned by `browseNext`.
 #[napi(object)]
 pub struct JsServiceRecord {
     /// `true` = appeared/updated; `false` = expired.
@@ -661,7 +661,7 @@ fn service_record_to_js(r: iroh_http_discovery::ServiceRecord) -> JsServiceRecor
 /// Advertise a generic DNS-SD service. Returns an advertise handle.
 #[napi]
 #[cfg(feature = "discovery")]
-pub async fn dns_sd_advertise(config: JsServiceConfig) -> napi::Result<u32> {
+pub async fn advertise(config: JsServiceConfig) -> napi::Result<u32> {
     let cfg = js_config_to_service_config(config)?;
     let session = iroh_http_discovery::advertise(cfg)
         .map_err(|e| napi::Error::new(Status::GenericFailure, format_error_json("REFUSED", e)))?;
@@ -671,7 +671,7 @@ pub async fn dns_sd_advertise(config: JsServiceConfig) -> napi::Result<u32> {
 
 #[napi]
 #[cfg(not(feature = "discovery"))]
-pub async fn dns_sd_advertise(_config: JsServiceConfig) -> napi::Result<u32> {
+pub async fn advertise(_config: JsServiceConfig) -> napi::Result<u32> {
     Err(napi::Error::new(
         Status::GenericFailure,
         format_error_json("UNKNOWN", "discovery feature not enabled in this build"),
@@ -681,7 +681,7 @@ pub async fn dns_sd_advertise(_config: JsServiceConfig) -> napi::Result<u32> {
 /// Stop a generic DNS-SD advertisement.
 #[napi]
 #[cfg(feature = "discovery")]
-pub fn dns_sd_advertise_close(advertise_handle: u32) {
+pub fn advertise_close(advertise_handle: u32) {
     if let Ok(mut slab) = advertise_slab().lock() {
         if slab.contains(advertise_handle as usize) {
             slab.remove(advertise_handle as usize);
@@ -693,13 +693,13 @@ pub fn dns_sd_advertise_close(advertise_handle: u32) {
 
 #[napi]
 #[cfg(not(feature = "discovery"))]
-pub fn dns_sd_advertise_close(_advertise_handle: u32) {}
+pub fn advertise_close(_advertise_handle: u32) {}
 
 /// Browse for a generic DNS-SD service. Returns a browse handle for polling
-/// records via `dnsSdNextRecord`.
+/// records via `browseNext`.
 #[napi]
 #[cfg(feature = "discovery")]
-pub async fn dns_sd_browse(service_name: String, protocol: Option<String>) -> napi::Result<u32> {
+pub async fn browse(service_name: String, protocol: Option<String>) -> napi::Result<u32> {
     validate_bounded_string("serviceName", &service_name, MAX_MDNS_SERVICE_NAME_LEN)
         .map_err(ffi_invalid_arg)?;
     let cfg = iroh_http_discovery::BrowseConfig {
@@ -714,7 +714,7 @@ pub async fn dns_sd_browse(service_name: String, protocol: Option<String>) -> na
 
 #[napi]
 #[cfg(not(feature = "discovery"))]
-pub async fn dns_sd_browse(_service_name: String, _protocol: Option<String>) -> napi::Result<u32> {
+pub async fn browse(_service_name: String, _protocol: Option<String>) -> napi::Result<u32> {
     Err(napi::Error::new(
         Status::GenericFailure,
         format_error_json("UNKNOWN", "discovery feature not enabled in this build"),
@@ -725,7 +725,7 @@ pub async fn dns_sd_browse(_service_name: String, _protocol: Option<String>) -> 
 /// Returns `null` when the session is closed.
 #[napi]
 #[cfg(feature = "discovery")]
-pub async fn dns_sd_next_record(browse_handle: u32) -> napi::Result<Option<JsServiceRecord>> {
+pub async fn browse_next(browse_handle: u32) -> napi::Result<Option<JsServiceRecord>> {
     let session = {
         lock_generic_browse_slab()?
             .get(browse_handle as usize)
@@ -746,7 +746,7 @@ pub async fn dns_sd_next_record(browse_handle: u32) -> napi::Result<Option<JsSer
 
 #[napi]
 #[cfg(not(feature = "discovery"))]
-pub async fn dns_sd_next_record(_browse_handle: u32) -> napi::Result<Option<JsServiceRecord>> {
+pub async fn browse_next(_browse_handle: u32) -> napi::Result<Option<JsServiceRecord>> {
     Err(napi::Error::new(
         Status::GenericFailure,
         format_error_json("UNKNOWN", "discovery feature not enabled in this build"),
@@ -756,7 +756,7 @@ pub async fn dns_sd_next_record(_browse_handle: u32) -> napi::Result<Option<JsSe
 /// Close a generic DNS-SD browse session.
 #[napi]
 #[cfg(feature = "discovery")]
-pub fn dns_sd_browse_close(browse_handle: u32) {
+pub fn browse_close(browse_handle: u32) {
     if let Ok(mut slab) = generic_browse_slab().lock() {
         if slab.contains(browse_handle as usize) {
             slab.remove(browse_handle as usize);
@@ -768,7 +768,7 @@ pub fn dns_sd_browse_close(browse_handle: u32) {
 
 #[napi]
 #[cfg(not(feature = "discovery"))]
-pub fn dns_sd_browse_close(_browse_handle: u32) {}
+pub fn browse_close(_browse_handle: u32) {}
 
 // ── Bridge methods ────────────────────────────────────────────────────────────
 

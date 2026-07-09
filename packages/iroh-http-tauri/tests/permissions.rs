@@ -27,7 +27,7 @@ fn expected_sets() -> BTreeMap<&'static str, &'static str> {
         ("serve", "allow-serve"),
         ("connect", "allow-session-connect"),
         ("crypto", "allow-secret-key-sign"),
-        ("discovery", "allow-mdns-browse"),
+        ("discovery", "allow-browse-peers"),
     ])
 }
 

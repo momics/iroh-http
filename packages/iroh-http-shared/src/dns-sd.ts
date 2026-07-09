@@ -45,11 +45,11 @@ export async function advertiseService(
   options: DnsSdAdvertiseOptions,
 ): Promise<void> {
   const { signal, ...config } = options;
-  const advHandle = await adapter.dnsSdAdvertise(config as ServiceConfig);
+  const advHandle = await adapter.advertise(config as ServiceConfig);
   if (signal) {
     return new Promise<void>((resolve) => {
       const stop = () => {
-        adapter.dnsSdAdvertiseClose(advHandle);
+        adapter.advertiseClose(advHandle);
         resolve();
       };
       if (signal.aborted) {
@@ -89,10 +89,10 @@ export function browseServices(
       return {
         async next(): Promise<IteratorResult<ServiceRecord>> {
           if (browseHandle === null) {
-            browseHandle = await adapter.dnsSdBrowse(serviceName, protocol);
+            browseHandle = await adapter.browse(serviceName, protocol);
           }
           if (signal?.aborted) {
-            adapter.dnsSdBrowseClose(browseHandle);
+            adapter.browseClose(browseHandle);
             browseHandle = null;
             return { done: true as const, value: undefined };
           }
@@ -109,16 +109,16 @@ export function browseServices(
               });
             });
             record = await Promise.race([
-              adapter.dnsSdNextRecord(browseHandle),
+              adapter.browseNext(browseHandle),
               abortPromise,
             ]);
             if (signal.aborted && browseHandle !== null) {
-              adapter.dnsSdBrowseClose(browseHandle);
+              adapter.browseClose(browseHandle);
               browseHandle = null;
               return { done: true as const, value: undefined };
             }
           } else {
-            record = await adapter.dnsSdNextRecord(browseHandle);
+            record = await adapter.browseNext(browseHandle);
           }
 
           if (record === null) {
@@ -128,7 +128,7 @@ export function browseServices(
         },
         return(): Promise<IteratorResult<ServiceRecord>> {
           if (browseHandle !== null) {
-            adapter.dnsSdBrowseClose(browseHandle);
+            adapter.browseClose(browseHandle);
             browseHandle = null;
           }
           return Promise.resolve({ done: true as const, value: undefined });

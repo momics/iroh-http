@@ -295,6 +295,126 @@
       "type": "string",
       "oneOf": [
         {
+          "description": "Enables the advertise command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-advertise",
+          "markdownDescription": "Enables the advertise command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the advertise command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-advertise",
+          "markdownDescription": "Denies the advertise command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the advertise_close command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-advertise-close",
+          "markdownDescription": "Enables the advertise_close command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the advertise_close command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-advertise-close",
+          "markdownDescription": "Denies the advertise_close command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the advertise_peer command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-advertise-peer",
+          "markdownDescription": "Enables the advertise_peer command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the advertise_peer command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-advertise-peer",
+          "markdownDescription": "Denies the advertise_peer command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the advertise_peer_close command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-advertise-peer-close",
+          "markdownDescription": "Enables the advertise_peer_close command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the advertise_peer_close command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-advertise-peer-close",
+          "markdownDescription": "Denies the advertise_peer_close command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the browse command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-browse",
+          "markdownDescription": "Enables the browse command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the browse command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-browse",
+          "markdownDescription": "Denies the browse command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the browse_close command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-browse-close",
+          "markdownDescription": "Enables the browse_close command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the browse_close command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-browse-close",
+          "markdownDescription": "Denies the browse_close command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the browse_next command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-browse-next",
+          "markdownDescription": "Enables the browse_next command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the browse_next command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-browse-next",
+          "markdownDescription": "Denies the browse_next command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the browse_peers command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-browse-peers",
+          "markdownDescription": "Enables the browse_peers command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the browse_peers command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-browse-peers",
+          "markdownDescription": "Denies the browse_peers command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the browse_peers_close command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-browse-peers-close",
+          "markdownDescription": "Enables the browse_peers_close command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the browse_peers_close command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-browse-peers-close",
+          "markdownDescription": "Denies the browse_peers_close command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the browse_peers_next command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-browse-peers-next",
+          "markdownDescription": "Enables the browse_peers_next command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the browse_peers_next command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-browse-peers-next",
+          "markdownDescription": "Denies the browse_peers_next command without any pre-configured scope."
+        },
+        {
           "description": "Enables the cancel_in_flight command without any pre-configured scope.",
           "type": "string",
           "const": "allow-cancel-in-flight",
@@ -367,66 +487,6 @@
           "markdownDescription": "Denies the create_fetch_token command without any pre-configured scope."
         },
         {
-          "description": "Enables the dns_sd_advertise command without any pre-configured scope.",
-          "type": "string",
-          "const": "allow-dns-sd-advertise",
-          "markdownDescription": "Enables the dns_sd_advertise command without any pre-configured scope."
-        },
-        {
-          "description": "Denies the dns_sd_advertise command without any pre-configured scope.",
-          "type": "string",
-          "const": "deny-dns-sd-advertise",
-          "markdownDescription": "Denies the dns_sd_advertise command without any pre-configured scope."
-        },
-        {
-          "description": "Enables the dns_sd_advertise_close command without any pre-configured scope.",
-          "type": "string",
-          "const": "allow-dns-sd-advertise-close",
-          "markdownDescription": "Enables the dns_sd_advertise_close command without any pre-configured scope."
-        },
-        {
-          "description": "Denies the dns_sd_advertise_close command without any pre-configured scope.",
-          "type": "string",
-          "const": "deny-dns-sd-advertise-close",
-          "markdownDescription": "Denies the dns_sd_advertise_close command without any pre-configured scope."
-        },
-        {
-          "description": "Enables the dns_sd_browse command without any pre-configured scope.",
-          "type": "string",
-          "const": "allow-dns-sd-browse",
-          "markdownDescription": "Enables the dns_sd_browse command without any pre-configured scope."
-        },
-        {
-          "description": "Denies the dns_sd_browse command without any pre-configured scope.",
-          "type": "string",
-          "const": "deny-dns-sd-browse",
-          "markdownDescription": "Denies the dns_sd_browse command without any pre-configured scope."
-        },
-        {
-          "description": "Enables the dns_sd_browse_close command without any pre-configured scope.",
-          "type": "string",
-          "const": "allow-dns-sd-browse-close",
-          "markdownDescription": "Enables the dns_sd_browse_close command without any pre-configured scope."
-        },
-        {
-          "description": "Denies the dns_sd_browse_close command without any pre-configured scope.",
-          "type": "string",
-          "const": "deny-dns-sd-browse-close",
-          "markdownDescription": "Denies the dns_sd_browse_close command without any pre-configured scope."
-        },
-        {
-          "description": "Enables the dns_sd_next_record command without any pre-configured scope.",
-          "type": "string",
-          "const": "allow-dns-sd-next-record",
-          "markdownDescription": "Enables the dns_sd_next_record command without any pre-configured scope."
-        },
-        {
-          "description": "Denies the dns_sd_next_record command without any pre-configured scope.",
-          "type": "string",
-          "const": "deny-dns-sd-next-record",
-          "markdownDescription": "Denies the dns_sd_next_record command without any pre-configured scope."
-        },
-        {
           "description": "Enables the endpoint_stats command without any pre-configured scope.",
           "type": "string",
           "const": "allow-endpoint-stats",
@@ -485,66 +545,6 @@
           "type": "string",
           "const": "deny-home-relay",
           "markdownDescription": "Denies the home_relay command without any pre-configured scope."
-        },
-        {
-          "description": "Enables the mdns_advertise command without any pre-configured scope.",
-          "type": "string",
-          "const": "allow-mdns-advertise",
-          "markdownDescription": "Enables the mdns_advertise command without any pre-configured scope."
-        },
-        {
-          "description": "Denies the mdns_advertise command without any pre-configured scope.",
-          "type": "string",
-          "const": "deny-mdns-advertise",
-          "markdownDescription": "Denies the mdns_advertise command without any pre-configured scope."
-        },
-        {
-          "description": "Enables the mdns_advertise_close command without any pre-configured scope.",
-          "type": "string",
-          "const": "allow-mdns-advertise-close",
-          "markdownDescription": "Enables the mdns_advertise_close command without any pre-configured scope."
-        },
-        {
-          "description": "Denies the mdns_advertise_close command without any pre-configured scope.",
-          "type": "string",
-          "const": "deny-mdns-advertise-close",
-          "markdownDescription": "Denies the mdns_advertise_close command without any pre-configured scope."
-        },
-        {
-          "description": "Enables the mdns_browse command without any pre-configured scope.",
-          "type": "string",
-          "const": "allow-mdns-browse",
-          "markdownDescription": "Enables the mdns_browse command without any pre-configured scope."
-        },
-        {
-          "description": "Denies the mdns_browse command without any pre-configured scope.",
-          "type": "string",
-          "const": "deny-mdns-browse",
-          "markdownDescription": "Denies the mdns_browse command without any pre-configured scope."
-        },
-        {
-          "description": "Enables the mdns_browse_close command without any pre-configured scope.",
-          "type": "string",
-          "const": "allow-mdns-browse-close",
-          "markdownDescription": "Enables the mdns_browse_close command without any pre-configured scope."
-        },
-        {
-          "description": "Denies the mdns_browse_close command without any pre-configured scope.",
-          "type": "string",
-          "const": "deny-mdns-browse-close",
-          "markdownDescription": "Denies the mdns_browse_close command without any pre-configured scope."
-        },
-        {
-          "description": "Enables the mdns_next_event command without any pre-configured scope.",
-          "type": "string",
-          "const": "allow-mdns-next-event",
-          "markdownDescription": "Enables the mdns_next_event command without any pre-configured scope."
-        },
-        {
-          "description": "Denies the mdns_next_event command without any pre-configured scope.",
-          "type": "string",
-          "const": "deny-mdns-next-event",
-          "markdownDescription": "Denies the mdns_next_event command without any pre-configured scope."
         },
         {
           "description": "Enables the next_chunk command without any pre-configured scope.",
@@ -913,10 +913,10 @@
           "markdownDescription": "Node lifecycle and introspection. Covers createNode() and close(). Add iroh-http:fetch and/or iroh-http:serve for HTTP capability.\n#### This default permission set includes:\n\n- `allow-create-endpoint`\n- `allow-close-endpoint`\n- `allow-wait-endpoint-closed`\n- `allow-ping`\n- `allow-node-addr`\n- `allow-node-ticket`\n- `allow-home-relay`\n- `allow-peer-info`\n- `allow-peer-stats`\n- `allow-endpoint-stats`\n- `allow-start-transport-events`\n- `allow-next-path-change`\n- `allow-unsubscribe-path-changes`"
         },
         {
-          "description": "Enables local-network service discovery over DNS-SD (RFC 6763) / mDNS. Covers both the iroh-http peer discovery specialization (advertisePeer / browsePeers) and the generic DNS-SD primitive (advertise / browse) for arbitrary local services — instance name, port, TXT records, and protocol.\n\n#### This permission set includes:\n\n- `allow-mdns-browse`\n- `allow-mdns-browse-close`\n- `allow-mdns-next-event`\n- `allow-mdns-advertise`\n- `allow-mdns-advertise-close`\n- `allow-dns-sd-advertise`\n- `allow-dns-sd-advertise-close`\n- `allow-dns-sd-browse`\n- `allow-dns-sd-next-record`\n- `allow-dns-sd-browse-close`",
+          "description": "Enables local-network service discovery over DNS-SD (RFC 6763) / mDNS. Covers both the iroh-http peer discovery specialization (advertisePeer / browsePeers) and the generic DNS-SD primitive (advertise / browse) for arbitrary local services — instance name, port, TXT records, and protocol.\n\n#### This permission set includes:\n\n- `allow-browse-peers`\n- `allow-browse-peers-close`\n- `allow-browse-peers-next`\n- `allow-advertise-peer`\n- `allow-advertise-peer-close`\n- `allow-advertise`\n- `allow-advertise-close`\n- `allow-browse`\n- `allow-browse-next`\n- `allow-browse-close`",
           "type": "string",
           "const": "discovery",
-          "markdownDescription": "Enables local-network service discovery over DNS-SD (RFC 6763) / mDNS. Covers both the iroh-http peer discovery specialization (advertisePeer / browsePeers) and the generic DNS-SD primitive (advertise / browse) for arbitrary local services — instance name, port, TXT records, and protocol.\n\n#### This permission set includes:\n\n- `allow-mdns-browse`\n- `allow-mdns-browse-close`\n- `allow-mdns-next-event`\n- `allow-mdns-advertise`\n- `allow-mdns-advertise-close`\n- `allow-dns-sd-advertise`\n- `allow-dns-sd-advertise-close`\n- `allow-dns-sd-browse`\n- `allow-dns-sd-next-record`\n- `allow-dns-sd-browse-close`"
+          "markdownDescription": "Enables local-network service discovery over DNS-SD (RFC 6763) / mDNS. Covers both the iroh-http peer discovery specialization (advertisePeer / browsePeers) and the generic DNS-SD primitive (advertise / browse) for arbitrary local services — instance name, port, TXT records, and protocol.\n\n#### This permission set includes:\n\n- `allow-browse-peers`\n- `allow-browse-peers-close`\n- `allow-browse-peers-next`\n- `allow-advertise-peer`\n- `allow-advertise-peer-close`\n- `allow-advertise`\n- `allow-advertise-close`\n- `allow-browse`\n- `allow-browse-next`\n- `allow-browse-close`"
         },
         {
           "description": "Enables node.fetch() — send HTTP requests to remote peers. Includes all internal body-streaming primitives required for fetch to function.\n#### This permission set includes:\n\n- `allow-fetch`\n- `allow-create-fetch-token`\n- `allow-cancel-in-flight`\n- `allow-cancel-request`\n- `allow-create-body-writer`\n- `allow-next-chunk`\n- `allow-try-next-chunk`\n- `allow-send-chunk`\n- `allow-finish-body`",

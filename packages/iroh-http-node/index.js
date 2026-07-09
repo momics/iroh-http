@@ -586,13 +586,18 @@ if (!nativeBinding) {
 }
 
 module.exports = nativeBinding
+module.exports.advertise = nativeBinding.advertise
+module.exports.advertiseClose = nativeBinding.advertiseClose
+module.exports.advertisePeer = nativeBinding.advertisePeer
+module.exports.advertisePeerClose = nativeBinding.advertisePeerClose
+module.exports.browse = nativeBinding.browse
+module.exports.browseClose = nativeBinding.browseClose
+module.exports.browseNext = nativeBinding.browseNext
+module.exports.browsePeers = nativeBinding.browsePeers
+module.exports.browsePeersClose = nativeBinding.browsePeersClose
+module.exports.browsePeersNext = nativeBinding.browsePeersNext
 module.exports.closeEndpoint = nativeBinding.closeEndpoint
 module.exports.createEndpoint = nativeBinding.createEndpoint
-module.exports.dnsSdAdvertise = nativeBinding.dnsSdAdvertise
-module.exports.dnsSdAdvertiseClose = nativeBinding.dnsSdAdvertiseClose
-module.exports.dnsSdBrowse = nativeBinding.dnsSdBrowse
-module.exports.dnsSdBrowseClose = nativeBinding.dnsSdBrowseClose
-module.exports.dnsSdNextRecord = nativeBinding.dnsSdNextRecord
 module.exports.endpointStats = nativeBinding.endpointStats
 module.exports.generateSecretKey = nativeBinding.generateSecretKey
 module.exports.homeRelay = nativeBinding.homeRelay
@@ -604,11 +609,6 @@ module.exports.jsFinishBody = nativeBinding.jsFinishBody
 module.exports.jsNextChunk = nativeBinding.jsNextChunk
 module.exports.jsSendChunk = nativeBinding.jsSendChunk
 module.exports.jsTryNextChunk = nativeBinding.jsTryNextChunk
-module.exports.mdnsAdvertise = nativeBinding.mdnsAdvertise
-module.exports.mdnsAdvertiseClose = nativeBinding.mdnsAdvertiseClose
-module.exports.mdnsBrowse = nativeBinding.mdnsBrowse
-module.exports.mdnsBrowseClose = nativeBinding.mdnsBrowseClose
-module.exports.mdnsNextEvent = nativeBinding.mdnsNextEvent
 module.exports.nextPathChange = nativeBinding.nextPathChange
 module.exports.nodeAddr = nativeBinding.nodeAddr
 module.exports.nodeTicket = nativeBinding.nodeTicket

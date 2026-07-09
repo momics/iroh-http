@@ -233,17 +233,17 @@ pub async fn dispatch(method: &str, payload: &[u8]) -> Value {
         sync  "publicKeyVerify"         => public_key_verify_dispatch,
         sync0 "generateSecretKey"       => generate_secret_key_dispatch,
         // ── mDNS ─────────────────────────────────────────────────────────────
-        async "mdnsBrowse"              => mdns_browse_dispatch,
-        async "mdnsNextEvent"           => mdns_next_event_dispatch,
-        sync  "mdnsBrowseClose"         => mdns_browse_close_dispatch,
-        sync  "mdnsAdvertise"           => mdns_advertise_dispatch,
-        sync  "mdnsAdvertiseClose"      => mdns_advertise_close_dispatch,
+        async "browsePeers"              => browse_peers_dispatch,
+        async "browsePeersNext"           => browse_peers_next_dispatch,
+        sync  "browsePeersClose"         => browse_peers_close_dispatch,
+        sync  "advertisePeer"           => advertise_peer_dispatch,
+        sync  "advertisePeerClose"      => advertise_peer_close_dispatch,
         // ── Generic DNS-SD ───────────────────────────────────────────────────
-        sync  "dnsSdAdvertise"          => dns_sd_advertise_dispatch,
-        sync  "dnsSdAdvertiseClose"     => dns_sd_advertise_close_dispatch,
-        sync  "dnsSdBrowse"             => dns_sd_browse_dispatch,
-        async "dnsSdNextRecord"         => dns_sd_next_record_dispatch,
-        sync  "dnsSdBrowseClose"        => dns_sd_browse_close_dispatch,
+        sync  "advertise"          => advertise_dispatch,
+        sync  "advertiseClose"     => advertise_close_dispatch,
+        sync  "browse"             => browse_dispatch,
+        async "browseNext"         => browse_next_dispatch,
+        sync  "browseClose"        => browse_close_dispatch,
         // ── Sessions ─────────────────────────────────────────────────────────
         async "sessionAccept"           => session_accept_dispatch,
         async "sessionConnect"          => session_connect_dispatch,
@@ -1027,7 +1027,7 @@ fn advertise_slab() -> &'static Mutex<Slab<iroh_http_discovery::AdvertiseSession
     S.get_or_init(|| Mutex::new(Slab::new()))
 }
 
-async fn mdns_browse_dispatch(_p: Value) -> Value {
+async fn browse_peers_dispatch(_p: Value) -> Value {
     #[cfg(feature = "discovery")]
     {
         let handle = match _p["endpointHandle"].as_u64() {
@@ -1062,7 +1062,7 @@ async fn mdns_browse_dispatch(_p: Value) -> Value {
     err("discovery feature not enabled in this build")
 }
 
-async fn mdns_next_event_dispatch(_p: Value) -> Value {
+async fn browse_peers_next_dispatch(_p: Value) -> Value {
     #[cfg(feature = "discovery")]
     {
         let handle = match _p["browseHandle"].as_u64() {
@@ -1092,7 +1092,7 @@ async fn mdns_next_event_dispatch(_p: Value) -> Value {
     err("discovery feature not enabled in this build")
 }
 
-fn mdns_browse_close_dispatch(_p: Value) -> Value {
+fn browse_peers_close_dispatch(_p: Value) -> Value {
     #[cfg(feature = "discovery")]
     {
         let handle = match _p["browseHandle"].as_u64() {
@@ -1107,7 +1107,7 @@ fn mdns_browse_close_dispatch(_p: Value) -> Value {
     ok(json!({}))
 }
 
-fn mdns_advertise_dispatch(_p: Value) -> Value {
+fn advertise_peer_dispatch(_p: Value) -> Value {
     #[cfg(feature = "discovery")]
     {
         let handle = match _p["endpointHandle"].as_u64() {
@@ -1142,7 +1142,7 @@ fn mdns_advertise_dispatch(_p: Value) -> Value {
     err("discovery feature not enabled in this build")
 }
 
-fn mdns_advertise_close_dispatch(_p: Value) -> Value {
+fn advertise_peer_close_dispatch(_p: Value) -> Value {
     #[cfg(feature = "discovery")]
     {
         let handle = match _p["advertiseHandle"].as_u64() {
@@ -1177,7 +1177,7 @@ fn parse_protocol(p: &Value) -> Result<iroh_http_discovery::Protocol, String> {
     }
 }
 
-fn dns_sd_advertise_dispatch(_p: Value) -> Value {
+fn advertise_dispatch(_p: Value) -> Value {
     #[cfg(feature = "discovery")]
     {
         let service_name = match _p["serviceName"].as_str() {
@@ -1236,7 +1236,7 @@ fn dns_sd_advertise_dispatch(_p: Value) -> Value {
     err("discovery feature not enabled in this build")
 }
 
-fn dns_sd_advertise_close_dispatch(_p: Value) -> Value {
+fn advertise_close_dispatch(_p: Value) -> Value {
     #[cfg(feature = "discovery")]
     {
         let handle = match _p["advertiseHandle"].as_u64() {
@@ -1251,7 +1251,7 @@ fn dns_sd_advertise_close_dispatch(_p: Value) -> Value {
     ok(json!({}))
 }
 
-fn dns_sd_browse_dispatch(_p: Value) -> Value {
+fn browse_dispatch(_p: Value) -> Value {
     #[cfg(feature = "discovery")]
     {
         let service_name = match _p["serviceName"].as_str() {
@@ -1281,7 +1281,7 @@ fn dns_sd_browse_dispatch(_p: Value) -> Value {
     err("discovery feature not enabled in this build")
 }
 
-async fn dns_sd_next_record_dispatch(_p: Value) -> Value {
+async fn browse_next_dispatch(_p: Value) -> Value {
     #[cfg(feature = "discovery")]
     {
         let handle = match _p["browseHandle"].as_u64() {
@@ -1315,7 +1315,7 @@ async fn dns_sd_next_record_dispatch(_p: Value) -> Value {
     err("discovery feature not enabled in this build")
 }
 
-fn dns_sd_browse_close_dispatch(_p: Value) -> Value {
+fn browse_close_dispatch(_p: Value) -> Value {
     #[cfg(feature = "discovery")]
     {
         let handle = match _p["browseHandle"].as_u64() {

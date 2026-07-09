@@ -189,48 +189,48 @@ export abstract class IrohAdapter {
   }
 
   // ── Optional: mDNS discovery ────────────────────────────────────────────────
-  mdnsBrowse(_endpointHandle: number, _serviceName: string): Promise<number> {
+  browsePeers(_endpointHandle: number, _serviceName: string): Promise<number> {
     return Promise.reject(
-      new Error(`mdnsBrowse() not supported by this adapter`),
+      new Error(`browsePeers() not supported by this adapter`),
     );
   }
-  mdnsNextEvent(_browseHandle: number): Promise<PeerDiscoveryEvent | null> {
+  browsePeersNext(_browseHandle: number): Promise<PeerDiscoveryEvent | null> {
     return Promise.reject(
-      new Error(`mdnsNextEvent() not supported by this adapter`),
+      new Error(`browsePeersNext() not supported by this adapter`),
     );
   }
-  mdnsBrowseClose(_browseHandle: number): void {/* no-op */}
-  mdnsAdvertise(
+  browsePeersClose(_browseHandle: number): void {/* no-op */}
+  advertisePeer(
     _endpointHandle: number,
     _serviceName: string,
   ): Promise<number> {
     return Promise.reject(
-      new Error(`mdnsAdvertise() not supported by this adapter`),
+      new Error(`advertisePeer() not supported by this adapter`),
     );
   }
-  mdnsAdvertiseClose(_advertiseHandle: number): void {/* no-op */}
+  advertisePeerClose(_advertiseHandle: number): void {/* no-op */}
 
   // ── Optional: generic DNS-SD ────────────────────────────────────────────────
-  dnsSdAdvertise(_config: ServiceConfig): Promise<number> {
+  advertise(_config: ServiceConfig): Promise<number> {
     return Promise.reject(
-      new Error(`dnsSdAdvertise() not supported by this adapter`),
+      new Error(`advertise() not supported by this adapter`),
     );
   }
-  dnsSdAdvertiseClose(_advertiseHandle: number): void {/* no-op */}
-  dnsSdBrowse(
+  advertiseClose(_advertiseHandle: number): void {/* no-op */}
+  browse(
     _serviceName: string,
     _protocol?: DnsSdProtocol,
   ): Promise<number> {
     return Promise.reject(
-      new Error(`dnsSdBrowse() not supported by this adapter`),
+      new Error(`browse() not supported by this adapter`),
     );
   }
-  dnsSdNextRecord(_browseHandle: number): Promise<ServiceRecord | null> {
+  browseNext(_browseHandle: number): Promise<ServiceRecord | null> {
     return Promise.reject(
-      new Error(`dnsSdNextRecord() not supported by this adapter`),
+      new Error(`browseNext() not supported by this adapter`),
     );
   }
-  dnsSdBrowseClose(_browseHandle: number): void {/* no-op */}
+  browseClose(_browseHandle: number): void {/* no-op */}
 
   // ── Optional: transport events ──────────────────────────────────────────────
   // Transport events are delivered via a Rust-driven push mechanism: the

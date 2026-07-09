@@ -324,44 +324,44 @@ class TauriAdapter extends IrohAdapter {
     return this.#sessionFnsCache;
   }
 
-  async mdnsBrowse(handle: number, serviceName: string): Promise<number> {
-    return invoke<number>(`${PLUGIN}|mdns_browse`, {
+  async browsePeers(handle: number, serviceName: string): Promise<number> {
+    return invoke<number>(`${PLUGIN}|browse_peers`, {
       endpointHandle: Number(handle),
       serviceName,
     });
   }
 
-  async mdnsNextEvent(
+  async browsePeersNext(
     browseHandle: number,
   ): Promise<PeerDiscoveryEvent | null> {
-    return invoke<PeerDiscoveryEvent | null>(`${PLUGIN}|mdns_next_event`, {
+    return invoke<PeerDiscoveryEvent | null>(`${PLUGIN}|browse_peers_next`, {
       browseHandle: Number(browseHandle),
     });
   }
 
-  mdnsBrowseClose(browseHandle: number): void {
-    void invoke(`${PLUGIN}|mdns_browse_close`, {
+  browsePeersClose(browseHandle: number): void {
+    void invoke(`${PLUGIN}|browse_peers_close`, {
       browseHandle: Number(browseHandle),
     });
   }
 
-  async mdnsAdvertise(handle: number, serviceName: string): Promise<number> {
-    return invoke<number>(`${PLUGIN}|mdns_advertise`, {
+  async advertisePeer(handle: number, serviceName: string): Promise<number> {
+    return invoke<number>(`${PLUGIN}|advertise_peer`, {
       endpointHandle: Number(handle),
       serviceName,
     });
   }
 
-  mdnsAdvertiseClose(advertiseHandle: number): void {
-    void invoke(`${PLUGIN}|mdns_advertise_close`, {
+  advertisePeerClose(advertiseHandle: number): void {
+    void invoke(`${PLUGIN}|advertise_peer_close`, {
       advertiseHandle: Number(advertiseHandle),
     });
   }
 
   // ── Generic DNS-SD ─────────────────────────────────────────────
 
-  async dnsSdAdvertise(config: ServiceConfig): Promise<number> {
-    return invoke<number>(`${PLUGIN}|dns_sd_advertise`, {
+  async advertise(config: ServiceConfig): Promise<number> {
+    return invoke<number>(`${PLUGIN}|advertise`, {
       config: {
         serviceName: config.serviceName,
         instanceName: config.instanceName,
@@ -373,32 +373,32 @@ class TauriAdapter extends IrohAdapter {
     });
   }
 
-  dnsSdAdvertiseClose(advertiseHandle: number): void {
-    void invoke(`${PLUGIN}|dns_sd_advertise_close`, {
+  advertiseClose(advertiseHandle: number): void {
+    void invoke(`${PLUGIN}|advertise_close`, {
       advertiseHandle: Number(advertiseHandle),
     });
   }
 
-  async dnsSdBrowse(
+  async browse(
     serviceName: string,
     protocol?: DnsSdProtocol,
   ): Promise<number> {
-    return invoke<number>(`${PLUGIN}|dns_sd_browse`, {
+    return invoke<number>(`${PLUGIN}|browse`, {
       serviceName,
       protocol,
     });
   }
 
-  async dnsSdNextRecord(
+  async browseNext(
     browseHandle: number,
   ): Promise<ServiceRecord | null> {
-    return invoke<ServiceRecord | null>(`${PLUGIN}|dns_sd_next_record`, {
+    return invoke<ServiceRecord | null>(`${PLUGIN}|browse_next`, {
       browseHandle: Number(browseHandle),
     });
   }
 
-  dnsSdBrowseClose(browseHandle: number): void {
-    void invoke(`${PLUGIN}|dns_sd_browse_close`, {
+  browseClose(browseHandle: number): void {
+    void invoke(`${PLUGIN}|browse_close`, {
       browseHandle: Number(browseHandle),
     });
   }

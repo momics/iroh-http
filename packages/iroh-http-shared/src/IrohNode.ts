@@ -339,10 +339,10 @@ export class IrohNode extends EventTarget {
         return {
           async next(): Promise<IteratorResult<DiscoveredPeer>> {
             if (browseHandle === null) {
-              browseHandle = await adapter.mdnsBrowse(handle, svcName);
+              browseHandle = await adapter.browsePeers(handle, svcName);
             }
             if (signal?.aborted) {
-              adapter.mdnsBrowseClose(browseHandle);
+              adapter.browsePeersClose(browseHandle);
               browseHandle = null;
               return { done: true as const, value: undefined };
             }
@@ -359,16 +359,16 @@ export class IrohNode extends EventTarget {
                 });
               });
               event = await Promise.race([
-                adapter.mdnsNextEvent(browseHandle),
+                adapter.browsePeersNext(browseHandle),
                 abortPromise,
               ]);
               if (signal.aborted && browseHandle !== null) {
-                adapter.mdnsBrowseClose(browseHandle);
+                adapter.browsePeersClose(browseHandle);
                 browseHandle = null;
                 return { done: true as const, value: undefined };
               }
             } else {
-              event = await adapter.mdnsNextEvent(browseHandle);
+              event = await adapter.browsePeersNext(browseHandle);
             }
 
             if (event === null) {
@@ -383,7 +383,7 @@ export class IrohNode extends EventTarget {
           },
           return(): Promise<IteratorResult<DiscoveredPeer>> {
             if (browseHandle !== null) {
-              adapter.mdnsBrowseClose(browseHandle);
+              adapter.browsePeersClose(browseHandle);
               browseHandle = null;
             }
             return Promise.resolve({ done: true as const, value: undefined });
@@ -420,18 +420,18 @@ export class IrohNode extends EventTarget {
   async advertisePeer(options?: AdvertiseOptions): Promise<void> {
     const svcName = options?.serviceName ?? "iroh-http";
     const signal = options?.signal;
-    const advHandle = await this.#adapter.mdnsAdvertise(
+    const advHandle = await this.#adapter.advertisePeer(
       this.#endpointHandle,
       svcName,
     );
     if (signal) {
       return new Promise<void>((resolve) => {
         signal.addEventListener("abort", () => {
-          this.#adapter.mdnsAdvertiseClose(advHandle);
+          this.#adapter.advertisePeerClose(advHandle);
           resolve();
         }, { once: true });
         if (signal.aborted) {
-          this.#adapter.mdnsAdvertiseClose(advHandle);
+          this.#adapter.advertisePeerClose(advHandle);
           resolve();
         }
       });

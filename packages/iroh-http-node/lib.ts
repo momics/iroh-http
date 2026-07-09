@@ -3,13 +3,18 @@
  */
 
 import {
+  advertise as napiAdvertise,
+  advertiseClose as napiAdvertiseClose,
+  advertisePeer as napiAdvertisePeer,
+  advertisePeerClose as napiAdvertisePeerClose,
+  browse as napiBrowse,
+  browseClose as napiBrowseClose,
+  browseNext as napiBrowseNext,
+  browsePeers as napiBrowsePeers,
+  browsePeersClose as napiBrowsePeersClose,
+  browsePeersNext as napiBrowsePeersNext,
   closeEndpoint,
   createEndpoint,
-  dnsSdAdvertise as napiDnsSdAdvertise,
-  dnsSdAdvertiseClose as napiDnsSdAdvertiseClose,
-  dnsSdBrowse as napiDnsSdBrowse,
-  dnsSdBrowseClose as napiDnsSdBrowseClose,
-  dnsSdNextRecord as napiDnsSdNextRecord,
   endpointStats as napiEndpointStats,
   homeRelay as napiHomeRelay,
   jsAllocBodyWriter,
@@ -20,11 +25,6 @@ import {
   jsNextChunk,
   jsSendChunk,
   jsTryNextChunk,
-  mdnsAdvertise as napiMdnsAdvertise,
-  mdnsAdvertiseClose as napiMdnsAdvertiseClose,
-  mdnsBrowse as napiMdnsBrowse,
-  mdnsBrowseClose as napiMdnsBrowseClose,
-  mdnsNextEvent as napiMdnsNextEvent,
   nextPathChange as napiNextPathChange,
   nodeAddr as napiNodeAddr,
   nodeTicket as napiNodeTicket,
@@ -373,13 +373,13 @@ class NodeAdapter extends IrohAdapter {
   }
 
   // ── mDNS discovery ──────────────────────────────────────────────────────────
-  async mdnsBrowse(handle: number, serviceName: string): Promise<number> {
-    return napiMdnsBrowse(handle, serviceName);
+  async browsePeers(handle: number, serviceName: string): Promise<number> {
+    return napiBrowsePeers(handle, serviceName);
   }
-  async mdnsNextEvent(
+  async browsePeersNext(
     browseHandle: number,
   ): Promise<PeerDiscoveryEvent | null> {
-    const ev = await napiMdnsNextEvent(browseHandle);
+    const ev = await napiBrowsePeersNext(browseHandle);
     if (!ev) return null;
     return {
       type: ev.isActive ? "discovered" : "expired",
@@ -387,19 +387,19 @@ class NodeAdapter extends IrohAdapter {
       addrs: ev.addrs,
     };
   }
-  mdnsBrowseClose(browseHandle: number): void {
-    napiMdnsBrowseClose(browseHandle);
+  browsePeersClose(browseHandle: number): void {
+    napiBrowsePeersClose(browseHandle);
   }
-  async mdnsAdvertise(handle: number, serviceName: string): Promise<number> {
-    return napiMdnsAdvertise(handle, serviceName);
+  async advertisePeer(handle: number, serviceName: string): Promise<number> {
+    return napiAdvertisePeer(handle, serviceName);
   }
-  mdnsAdvertiseClose(advertiseHandle: number): void {
-    napiMdnsAdvertiseClose(advertiseHandle);
+  advertisePeerClose(advertiseHandle: number): void {
+    napiAdvertisePeerClose(advertiseHandle);
   }
 
   // ── Generic DNS-SD ──────────────────────────────────────────────────────────
-  async dnsSdAdvertise(config: ServiceConfig): Promise<number> {
-    return napiDnsSdAdvertise({
+  async advertise(config: ServiceConfig): Promise<number> {
+    return napiAdvertise({
       serviceName: config.serviceName,
       instanceName: config.instanceName,
       port: config.port,
@@ -408,19 +408,19 @@ class NodeAdapter extends IrohAdapter {
       protocol: config.protocol,
     });
   }
-  dnsSdAdvertiseClose(advertiseHandle: number): void {
-    napiDnsSdAdvertiseClose(advertiseHandle);
+  advertiseClose(advertiseHandle: number): void {
+    napiAdvertiseClose(advertiseHandle);
   }
-  async dnsSdBrowse(
+  async browse(
     serviceName: string,
     protocol?: DnsSdProtocol,
   ): Promise<number> {
-    return napiDnsSdBrowse(serviceName, protocol);
+    return napiBrowse(serviceName, protocol);
   }
-  async dnsSdNextRecord(
+  async browseNext(
     browseHandle: number,
   ): Promise<ServiceRecord | null> {
-    const rec = await napiDnsSdNextRecord(browseHandle);
+    const rec = await napiBrowseNext(browseHandle);
     if (!rec) return null;
     return {
       isActive: rec.isActive,
@@ -432,8 +432,8 @@ class NodeAdapter extends IrohAdapter {
       txt: rec.txt,
     };
   }
-  dnsSdBrowseClose(browseHandle: number): void {
-    napiDnsSdBrowseClose(browseHandle);
+  browseClose(browseHandle: number): void {
+    napiBrowseClose(browseHandle);
   }
 
   // ── Transport events ────────────────────────────────────────────────────────
