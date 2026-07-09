@@ -21,10 +21,12 @@
  * stop either side. Pass a matching service name to scope discovery, e.g.
  *   deno task advertise my-app   &&   deno task browse my-app
  *
- * The `dnssd-*` tasks use the generic `node.dnsSd` surface to advertise and
- * browse arbitrary DNS-SD services — with a custom instance label, port, TXT
- * records and protocol — not just iroh nodes. `asIrohPeer` reinterprets any
- * record that carries an iroh public key as a peer.
+ * The `dnssd-*` tasks use the generic `node.advertise()` / `node.browse()`
+ * surface to advertise and browse arbitrary DNS-SD services — with a custom
+ * instance label, port, TXT records and protocol — not just iroh nodes.
+ * `asIrohPeer` reinterprets any record that carries an iroh public key as a
+ * peer. (`node.advertisePeer()` / `node.browsePeers()` are the iroh-http
+ * specializations used by the `advertise` / `browse` tasks above.)
  */
 
 import { asIrohPeer, createNode } from "@momics/iroh-http-deno";
@@ -134,7 +136,7 @@ switch (mode) {
     const abort = new AbortController();
     Deno.addSignalListener("SIGINT", () => abort.abort());
     console.log(`Advertising as "${serviceName}". Press Ctrl+C to stop.`);
-    await node.advertise({ serviceName, signal: abort.signal });
+    await node.advertisePeer({ serviceName, signal: abort.signal });
     await node.close();
     break;
   }
@@ -145,7 +147,7 @@ switch (mode) {
     Deno.addSignalListener("SIGINT", () => abort.abort());
     console.log(`Browsing for "${serviceName}". Press Ctrl+C to stop.`);
     for await (
-      const peer of node.browse({ serviceName, signal: abort.signal })
+      const peer of node.browsePeers({ serviceName, signal: abort.signal })
     ) {
       const status = peer.isActive ? "discovered" : "expired";
       const addrs = peer.addrs.length > 0 ? `  [${peer.addrs.join(", ")}]` : "";
@@ -165,7 +167,7 @@ switch (mode) {
       `Advertising "Front Desk Printer" as _${serviceName}._tcp on :9100. ` +
         "Press Ctrl+C to stop.",
     );
-    await node.dnsSd.advertise({
+    await node.advertise({
       serviceName,
       instanceName: "Front Desk Printer",
       port: 9100,
@@ -185,7 +187,7 @@ switch (mode) {
     Deno.addSignalListener("SIGINT", () => abort.abort());
     console.log(`Browsing for _${serviceName}. Press Ctrl+C to stop.`);
     for await (
-      const record of node.dnsSd.browse({
+      const record of node.browse({
         serviceName,
         protocol: "tcp",
         signal: abort.signal,

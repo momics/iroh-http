@@ -64,7 +64,7 @@ if (mode === "server") {
     `Advertising "Front Desk Printer" as _${DNSSD_SERVICE}._tcp on :9100. ` +
       "Press Ctrl+C to stop.",
   );
-  await node.dnsSd.advertise({
+  await node.advertise({
     serviceName: DNSSD_SERVICE,
     instanceName: "Front Desk Printer",
     port: 9100,
@@ -80,7 +80,7 @@ if (mode === "server") {
   process.on("SIGINT", () => abort.abort());
   console.log(`Browsing for _${DNSSD_SERVICE}. Press Ctrl+C to stop.`);
   for await (
-    const record of node.dnsSd.browse({
+    const record of node.browse({
       serviceName: DNSSD_SERVICE,
       protocol: "tcp",
       signal: abort.signal,

@@ -1,5 +1,5 @@
 /**
- * Discovery tests — browse(), pathChanges(), advertise() API surface.
+ * Discovery tests — browsePeers(), pathChanges(), advertisePeer() API surface.
  *
  * These test the API shape (returns AsyncIterable / Promise), not actual mDNS
  * discovery which requires multicast UDP and is unreliable in CI.
@@ -8,13 +8,13 @@
  */
 
 export function discoveryTests({ createNode, test, assert }) {
-  test("browse() returns an AsyncIterable", async () => {
+  test("browsePeers() returns an AsyncIterable", async () => {
     const node = await createNode({ disableNetworking: true });
     try {
-      const iterable = node.browse();
+      const iterable = node.browsePeers();
       assert(
         typeof iterable[Symbol.asyncIterator] === "function",
-        "browse() must return an AsyncIterable",
+        "browsePeers() must return an AsyncIterable",
       );
     } finally {
       await node.close();
@@ -58,11 +58,11 @@ export function discoveryTests({ createNode, test, assert }) {
     }
   });
 
-  test("advertise() resolves when signal is aborted", async () => {
+  test("advertisePeer() resolves when signal is aborted", async () => {
     const node = await createNode();
     try {
       const ac = new AbortController();
-      const p = node.advertise({ signal: ac.signal });
+      const p = node.advertisePeer({ signal: ac.signal });
       ac.abort();
       await p;
     } finally {

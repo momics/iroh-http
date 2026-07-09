@@ -8,12 +8,13 @@ import type {
 
 /**
  * Generic DNS-SD advertise/browse — the protocol-neutral surface underneath
- * iroh-http's own peer discovery.
+ * iroh-http's own peer discovery. Internal engine behind `node.advertise()` /
+ * `node.browse()`; not exported directly.
  *
  * Use it to announce and discover *any* local service, not just iroh nodes.
  * Records are lossless: instance label, host, port, socket addresses, and every
- * TXT property are preserved. iroh-http's `node.advertise()` / `node.browse()`
- * are thin specialisations of this same engine.
+ * TXT property are preserved. iroh-http's `node.advertisePeer()` /
+ * `node.browsePeers()` are thin specialisations of this same engine.
  */
 export class DnsSd {
   readonly #adapter: IrohAdapter;

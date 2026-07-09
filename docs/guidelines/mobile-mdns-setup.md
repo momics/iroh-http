@@ -1,15 +1,15 @@
 # Mobile mDNS / DNS-SD setup (iOS & Android)
 
 Applies to Tauri apps built with `iroh-http-tauri` that use local-network peer
-discovery — `node.advertise()` and `node.browse()`.
+discovery — `node.advertisePeer()` and `node.browsePeers()`.
 
 On desktop, mDNS works with no configuration. On mobile, the OS gates
 local-network access behind **permissions** and **static service-type
 declarations** that a plugin cannot inject into your app for you. You must add
 them to your app's own iOS `Info.plist` and Android `AndroidManifest.xml`.
 
-> **Service name → service type.** `node.advertise({ serviceName })` and
-> `node.browse({ serviceName })` map `serviceName` to the DNS-SD service type
+> **Service name → service type.** `node.advertisePeer({ serviceName })` and
+> `node.browsePeers({ serviceName })` map `serviceName` to the DNS-SD service type
 > `_<serviceName>._udp`. The default `serviceName` is `"iroh-http"`, i.e.
 > `_iroh-http._udp`. Every custom `serviceName` you use needs its own declared
 > entry on iOS (see below).

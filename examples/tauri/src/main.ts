@@ -508,7 +508,7 @@ advertiseBtn.addEventListener("click", async () => {
   setStatus(advertiseStatus, `Advertising as "${serviceName}"`, "ok");
 
   try {
-    await node.advertise({ serviceName, signal: advertiseAbort.signal });
+    await node.advertisePeer({ serviceName, signal: advertiseAbort.signal });
   } catch { /* aborted or error */ }
 
   advertiseAbort = null;
@@ -531,7 +531,7 @@ browseBtn.addEventListener("click", async () => {
 
   try {
     for await (
-      const ev of node.browse({ serviceName, signal: browseAbort.signal })
+      const ev of node.browsePeers({ serviceName, signal: browseAbort.signal })
     ) {
       const icon = ev.isActive ? "+" : "-";
       appendLog(
@@ -585,7 +585,7 @@ dnssdAdvertiseBtn.addEventListener("click", async () => {
   try {
     // A fully generic advertisement: custom instance label, port, TXT and
     // protocol — this is not an iroh node.
-    await node.dnsSd.advertise({
+    await node.advertise({
       serviceName,
       instanceName: "Front Desk Printer",
       port: 9100,
@@ -615,7 +615,7 @@ dnssdBrowseBtn.addEventListener("click", async () => {
 
   try {
     for await (
-      const record of node.dnsSd.browse({
+      const record of node.browse({
         serviceName,
         protocol: "tcp",
         signal: dnssdBrowseAbort.signal,

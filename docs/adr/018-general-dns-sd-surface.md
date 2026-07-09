@@ -71,17 +71,22 @@ the iroh-http behavior as a thin layer on top.
 
 | Option | Upside | Downside |
 | ------ | ------ | -------- |
-| Node methods only; generic via config, iroh via helpers | one surface | `node.advertise(config)` implies an endpoint coupling generic DNS-SD does not have; dishonest signature |
-| Standalone `advertiseService`/`browseService` + node methods | honest, flat | two flat exports to discover; naming collides conceptually with node methods |
-| **`dnsSd` object (generic) + `node.*` specialization** | honest signatures, one obvious escape hatch, node stays the nudge, adjustable later | two places to look (mitigated by docs) |
+| Single overloaded `node.advertise`/`node.browse` (generic via config, iroh via defaults) | one surface | one method with two meanings; the iroh path silently does more (address-lookup wiring, `pk` TXT); dishonest signature |
+| Standalone `advertiseService`/`browseService` top-level exports | flat | the FFI is loaded through the node addon, so a node-free export needs a second per-runtime init path — the "two bridges" we forbade |
+| `dnsSd` sub-object (generic) + `node.advertise`/`node.browse` (iroh) | honest signatures, one obvious escape hatch | a `dnsSd` namespace implies a separability the surface does not have (it still needs a node) |
+| **Generic `node.advertise`/`node.browse` + `node.advertisePeer`/`node.browsePeers`** | distinct names, no overloading, and the API mirrors the engine → specialization layering | the common (peer) path gets the longer name |
 
 ## Decisions
 
-1. **Expose a `dnsSd` object** on the TS side: `dnsSd.advertise(config)` and
-   `dnsSd.browse(config)`. Both return modern async-iterator / disposable
-   session interfaces driven by `AbortSignal`, matching `node.browse`.
-   `node.advertise` / `node.browse` remain and are defined as the iroh-http
-   **specialization** of the generic engine.
+1. **Generic engine on `node`, iroh path renamed.** Expose the generic engine
+   directly as `node.advertise(config)` / `node.browse(config)` (modern
+   async-iterator / disposable sessions driven by `AbortSignal`). The iroh-http
+   path is the **specialization** `node.advertisePeer()` / `node.browsePeers()`,
+   which fills in the reserved service name, the endpoint port, and the `pk`
+   TXT, wires the endpoint `AddressLookup`, and yields a `DiscoveredPeer` rather
+   than a raw `ServiceRecord`. Distinct names avoid an overloaded `advertise`
+   and make the API mirror the layering: the generic engine is the primitive;
+   the peer path is the specialization that does strictly more.
 
 2. **One engine, thin iroh seam.** Rust exposes a generic engine
    `dns_sd::advertise(ServiceConfig)` and `dns_sd::browse(BrowseConfig)` yielding
@@ -120,7 +125,8 @@ serve iroh-http, not to be a standalone Bonjour replacement.
   `start_advertise`/`start_browse` refactored onto it. Public API additive.
 - FFI (node napi, deno dispatch, tauri desktop): new `dnsSd*` entry points and a
   `JsServiceRecord`. Mobile tauri unaffected for now.
-- Shared TS: `dnsSd` object, `ServiceConfig`/`ServiceRecord`/`DiscoveredService`
+- Shared TS: generic `node.advertise`/`node.browse` + iroh-http
+  `node.advertisePeer`/`node.browsePeers`, `ServiceConfig`/`ServiceRecord`/`DiscoveredService`
   types, `IrohAdapter` gains generic methods, `DiscoveredPeer` gains optional
   fields, interop helpers exported.
 - Docs: discovery feature doc updated; examples may show a non-iroh service.
@@ -131,5 +137,5 @@ serve iroh-http, not to be a standalone Bonjour replacement.
 - [x] node napi generic FFI entries.
 - [x] deno dispatch generic FFI entries.
 - [x] tauri desktop generic commands.
-- [x] shared TS `dnsSd` object, types, adapter methods, interop helpers.
+- [x] shared TS: generic `node.advertise`/`node.browse` + iroh `advertisePeer`/`browsePeers`, types, adapter methods, interop helpers.
 - [x] discovery feature doc + example (deno / node / tauri).

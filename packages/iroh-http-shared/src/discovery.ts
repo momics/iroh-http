@@ -8,7 +8,7 @@ export interface DiscoveredPeer {
   isActive: boolean;
 }
 
-/** Options for `node.browse()` — discover peers on the local network. */
+/** Options for `node.browsePeers()` — discover peers on the local network. */
 export interface BrowseOptions {
   /** mDNS service name to browse. Defaults to the iroh-http service type. */
   serviceName?: string;
@@ -16,7 +16,7 @@ export interface BrowseOptions {
   signal?: AbortSignal;
 }
 
-/** Options for `node.advertise()` — announce this node on the local network. */
+/** Options for `node.advertisePeer()` — announce this node on the local network. */
 export interface AdvertiseOptions {
   /** mDNS service name to advertise under. Defaults to the iroh-http service type. */
   serviceName?: string;
@@ -24,7 +24,7 @@ export interface AdvertiseOptions {
   signal?: AbortSignal;
 }
 
-/** Event emitted by `node.browse()` when a peer is discovered or expires. */
+/** Event emitted by `node.browsePeers()` when a peer is discovered or expires. */
 export interface PeerDiscoveryEvent {
   /** Whether the peer was just discovered or has expired. */
   type: "discovered" | "expired";
@@ -40,7 +40,7 @@ export interface PeerDiscoveryEvent {
 export type DnsSdProtocol = "udp" | "tcp";
 
 /**
- * A generic DNS-SD service to advertise via `dnsSd.advertise()`.
+ * A generic DNS-SD service to advertise via `node.advertise()`.
  *
  * This is the lossless, protocol-neutral shape underneath iroh-http's own
  * discovery. Use it to announce any local service, not just iroh nodes.
@@ -63,13 +63,13 @@ export interface ServiceConfig {
   protocol?: DnsSdProtocol;
 }
 
-/** Options for `dnsSd.advertise()`. */
+/** Options for `node.advertise()`. */
 export interface DnsSdAdvertiseOptions extends ServiceConfig {
   /** Abort signal to stop advertising. */
   signal?: AbortSignal;
 }
 
-/** Options for `dnsSd.browse()`. */
+/** Options for `node.browse()`. */
 export interface DnsSdBrowseOptions {
   /** Bare service name to browse, e.g. `"my-app"`. */
   serviceName: string;
@@ -80,7 +80,7 @@ export interface DnsSdBrowseOptions {
 }
 
 /**
- * A fully-resolved DNS-SD service record yielded by `dnsSd.browse()`.
+ * A fully-resolved DNS-SD service record yielded by `node.browse()`.
  *
  * Records are lossless: every TXT property, the instance label, host, port and
  * resolved socket addresses are preserved.

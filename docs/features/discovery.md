@@ -5,8 +5,8 @@ Two mechanisms for discovering other iroh-http nodes:
 - **DNS discovery** — global, always-on. Any node that publishes its address
   via Pkarr can be resolved by public key using standard DNS.
 - **mDNS** — local network. Nodes announce their presence on the LAN and can
-  find each other without internet connectivity, via `node.advertise()` and
-  `node.browse()`.
+  find each other without internet connectivity, via `node.advertisePeer()` and
+  `node.browsePeers()`.
 
 ## DNS discovery
 
@@ -30,13 +30,14 @@ containing the node's relay URL and direct socket addresses. On `node.fetch`,
 if the peer's address isn't already known, Iroh resolves it via DNS before
 the QUIC handshake — transparently, with no extra code.
 
-## `node.advertise()`
+## `node.advertisePeer()`
 
-Announce this node on the local network via mDNS until the signal fires:
+Announce this node as a discoverable iroh-http peer on the local network via
+mDNS until the signal fires:
 
 ```ts
 const controller = new AbortController();
-node.advertise({ serviceName: 'my-app' }, controller.signal);
+node.advertisePeer({ serviceName: 'my-app', signal: controller.signal });
 
 // Stop advertising:
 controller.abort();
@@ -45,12 +46,12 @@ controller.abort();
 Returns a `Promise<void>` that resolves when advertising stops. Calling it
 without a signal advertises until the node is closed.
 
-## `node.browse()`
+## `node.browsePeers()`
 
 Discover peers on the local network as an async iterable:
 
 ```ts
-for await (const event of node.browse({ serviceName: 'my-app' })) {
+for await (const event of node.browsePeers({ serviceName: 'my-app' })) {
   if (event.isActive) {
     console.log('found peer:', event.nodeId, event.addrs);
   } else {
@@ -66,11 +67,11 @@ up the underlying mDNS listener:
 
 ```ts
 const controller = new AbortController();
-for await (const event of node.browse({}, controller.signal)) { ... }
+for await (const event of node.browsePeers({ signal: controller.signal })) { ... }
 controller.abort();
 
 // Or just break:
-for await (const event of node.browse({ serviceName: 'my-app' })) {
+for await (const event of node.browsePeers({ serviceName: 'my-app' })) {
   if (done) break;
 }
 ```
@@ -79,24 +80,25 @@ for await (const event of node.browse({ serviceName: 'my-app' })) {
 
 See [`MdnsOptions` in the specification](../specification.md#discovery-mdns) for the option shape.
 
-`browse` and `advertise` accept `MdnsOptions` as their first argument.
-Both can run simultaneously on the same node — they are independent.
+`browsePeers` and `advertisePeer` accept `MdnsOptions`. Both can run
+simultaneously on the same node — they are independent.
 
-## Generic DNS-SD (`node.dnsSd`)
+## Generic DNS-SD (`node.advertise()` / `node.browse()`)
 
-`node.advertise()` / `node.browse()` are the ergonomic, zero-config path for
-finding **iroh-http peers**: the instance name is the node id, the port comes
-from the endpoint, and the TXT set is fixed (`pk` + optional `relay`).
+`node.advertisePeer()` / `node.browsePeers()` are the ergonomic, zero-config
+path for finding **iroh-http peers**: the instance name is the node id, the port
+comes from the endpoint, and the TXT set is fixed (`pk` + optional `relay`).
 
 To advertise or browse **any** DNS-SD service — a printer, a game lobby, a
-non-iroh daemon — use `node.dnsSd`. It is the same wire protocol and the same
-underlying engine, but lossless and fully caller-controlled:
+non-iroh daemon — use the generic `node.advertise()` / `node.browse()`
+primitives. They are the same wire protocol and the same underlying engine, but
+lossless and fully caller-controlled:
 
 ```ts
 const ac = new AbortController();
 
 // Advertise an arbitrary service.
-await node.dnsSd.advertise({
+await node.advertise({
   serviceName: "printers",     // → _printers._tcp.local.
   instanceName: "Front Desk",
   port: 9100,
@@ -106,14 +108,14 @@ await node.dnsSd.advertise({
 });
 
 // Browse — records are lossless: instance, host, port, addrs, and every TXT key.
-for await (const rec of node.dnsSd.browse({ serviceName: "printers", protocol: "tcp" })) {
+for await (const rec of node.browse({ serviceName: "printers", protocol: "tcp" })) {
   console.log(rec.isActive ? "up" : "down", rec.instanceName, rec.port, rec.txt);
 }
 ```
 
-`node.advertise()` / `node.browse()` are defined as the iroh-http
-*specialization* of this same engine — there is one bridge, not two. The
-`dnsSd` surface hangs off the node because the native discovery FFI is loaded
+`node.advertisePeer()` / `node.browsePeers()` are defined as the iroh-http
+*specialization* of these generic primitives — there is one bridge, not two. The
+generic surface lives on the node because the native discovery FFI is loaded
 through the node addon (per [ADR-018](../adr/018-general-dns-sd-surface.md)); it
 does not otherwise use the node's identity or endpoint.
 
@@ -126,7 +128,7 @@ property. `asIrohPeer(record)` reinterprets a generic `ServiceRecord` as a
 ```ts
 import { asIrohPeer, IROH_HTTP_SERVICE } from "@momics/iroh-http-node";
 
-for await (const rec of node.dnsSd.browse({ serviceName: IROH_HTTP_SERVICE })) {
+for await (const rec of node.browse({ serviceName: IROH_HTTP_SERVICE })) {
   const peer = asIrohPeer(rec);
   if (peer) await node.fetch(`httpi://${peer.nodeId}/api`);
 }

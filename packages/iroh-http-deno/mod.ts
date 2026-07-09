@@ -35,7 +35,6 @@ export {
   TXT_KEY_RELAY,
 } from "@momics/iroh-http-shared";
 export type {
-  DnsSd,
   DnsSdAdvertiseOptions,
   DnsSdBrowseOptions,
   DnsSdProtocol,

@@ -84,17 +84,18 @@ iroh's built-in mDNS (see the [interop note](docs/features/discovery.md#interop-
 
 ```ts
 const ac = new AbortController();
-node.advertise({ serviceName: "my-app" }, ac.signal);
-for await (const event of node.browse({ serviceName: "my-app" })) {
+node.advertisePeer({ serviceName: "my-app", signal: ac.signal });
+for await (const event of node.browsePeers({ serviceName: "my-app", signal: ac.signal })) {
   if (event.isActive) await node.fetch(`httpi://${event.nodeId}/api`);
 }
 ```
 
 To advertise or browse **any** DNS-SD service (custom instance name, port, TXT,
-`udp`/`tcp`) — not just iroh nodes — use the generic `node.dnsSd` surface:
+`udp`/`tcp`) — not just iroh nodes — use the generic `node.advertise()` /
+`node.browse()` primitives that `advertisePeer` / `browsePeers` specialize:
 
 ```ts
-await node.dnsSd.advertise({
+await node.advertise({
   serviceName: "printers",
   instanceName: "Front Desk",
   port: 9100,
