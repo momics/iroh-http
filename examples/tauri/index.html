@@ -203,21 +203,21 @@
       <div class="panel" data-panel="discovery">
         <div class="columns">
           <section class="card">
-            <h2>Advertise (mDNS)</h2>
+            <h2>Advertise peer (mDNS)</h2>
             <p class="hint">Broadcast this node on the local network.</p>
-            <label for="advertise-service">Service name</label>
-            <input id="advertise-service" type="text" value="iroh-http" />
-            <button id="advertise-btn">Start advertising</button>
-            <p id="advertise-status" class="status"></p>
+            <label for="advertise-peer-service">Service name</label>
+            <input id="advertise-peer-service" type="text" value="iroh-http" />
+            <button id="advertise-peer-btn">Start advertising</button>
+            <p id="advertise-peer-status" class="status"></p>
           </section>
 
           <section class="card">
-            <h2>Browse (mDNS)</h2>
+            <h2>Browse peers (mDNS)</h2>
             <p class="hint">Discover peers advertising on the local network.</p>
-            <label for="browse-service">Service name</label>
-            <input id="browse-service" type="text" value="iroh-http" />
-            <button id="browse-btn">Start browsing</button>
-            <pre id="browse-log" class="log"></pre>
+            <label for="browse-peers-service">Service name</label>
+            <input id="browse-peers-service" type="text" value="iroh-http" />
+            <button id="browse-peers-btn">Start browsing</button>
+            <pre id="browse-peers-log" class="log"></pre>
           </section>
         </div>
 
@@ -228,14 +228,14 @@
             instance label, port, TXT records and protocol &mdash; not just iroh
             nodes. Records carrying an iroh public key are flagged as peers.
           </p>
-          <label for="dnssd-service">Service name</label>
-          <input id="dnssd-service" type="text" value="demo-printer" />
+          <label for="generic-service">Service name</label>
+          <input id="generic-service" type="text" value="demo-printer" />
           <div class="input-row">
-            <button id="dnssd-advertise-btn">Start advertising</button>
-            <button id="dnssd-browse-btn">Start browsing</button>
+            <button id="generic-advertise-btn">Start advertising</button>
+            <button id="generic-browse-btn">Start browsing</button>
           </div>
-          <p id="dnssd-status" class="status"></p>
-          <pre id="dnssd-log" class="log"></pre>
+          <p id="generic-status" class="status"></p>
+          <pre id="generic-log" class="log"></pre>
         </section>
       </div>
 
