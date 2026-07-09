@@ -102,6 +102,10 @@ echo "  → lockfile"
 node "$ROOT/scripts/check-lockfile.mjs" >/dev/null
 ok "lockfile (no empty-version optional stubs — #154)"
 
+echo "  → test:scripts"
+npm run test:scripts --silent
+ok "release-tooling (ci-churn guard — #326)"
+
 section "Tests"
 
 echo "  → test:node"
