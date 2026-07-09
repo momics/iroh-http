@@ -12,6 +12,7 @@ import app.tauri.plugin.Invoke
 import app.tauri.plugin.JSObject
 import app.tauri.plugin.Plugin
 import org.json.JSONArray
+import org.json.JSONObject
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
 
@@ -42,6 +43,24 @@ class AdvertiseStopArgs {
     var advertiseId: Long = 0
 }
 
+// Generic DNS-SD (arbitrary services, not iroh peers).
+
+@InvokeArg
+class DnsSdAdvertiseStartArgs {
+    lateinit var serviceName: String
+    lateinit var instanceName: String
+    var port: Int = 0
+    var protocol: String = "udp"
+    var addrs: List<String> = emptyList()
+    var txt: Map<String, String> = emptyMap()
+}
+
+@InvokeArg
+class DnsSdBrowseStartArgs {
+    lateinit var serviceName: String
+    var protocol: String = "udp"
+}
+
 @TauriPlugin
 class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
 
@@ -62,8 +81,19 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
         val listener: NsdManager.RegistrationListener
     )
 
+    /** A generic DNS-SD browse session, carrying full records rather than peers. */
+    private data class DnsSdBrowseSession(
+        val id: Long,
+        val manager: NsdManager,
+        val listener: NsdManager.DiscoveryListener,
+        val serviceType: String,
+        val pendingRecords: MutableList<JSObject> = mutableListOf(),
+        val knownInstances: MutableSet<String> = java.util.Collections.synchronizedSet(mutableSetOf())
+    )
+
     private val browseMap = ConcurrentHashMap<Long, BrowseSession>()
     private val advertiseMap = ConcurrentHashMap<Long, AdvertiseSession>()
+    private val dnsSdBrowseMap = ConcurrentHashMap<Long, DnsSdBrowseSession>()
 
     private fun nsd(): NsdManager? =
         activity.getSystemService(Context.NSD_SERVICE) as? NsdManager
@@ -234,6 +264,164 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
 
     @Command
     fun mdns_advertise_stop(invoke: Invoke) {
+        val args = invoke.parseArgs(AdvertiseStopArgs::class.java)
+        val session = advertiseMap.remove(args.advertiseId)
+        if (session != null) {
+            try { session.manager.unregisterService(session.listener) } catch (_: Exception) {}
+        }
+        invoke.resolve()
+    }
+
+    // ── Generic DNS-SD ────────────────────────────────────────────────────────
+
+    private fun protoSuffix(protocol: String): String =
+        if (protocol.equals("tcp", ignoreCase = true)) "_tcp" else "_udp"
+
+    @Command
+    fun dns_sd_browse_start(invoke: Invoke) {
+        val manager = nsd() ?: return invoke.reject("NsdManager unavailable")
+        val args = invoke.parseArgs(DnsSdBrowseStartArgs::class.java)
+        val browseId = nextBrowseId.getAndIncrement()
+        val serviceType = "_${args.serviceName}.${protoSuffix(args.protocol)}"
+
+        val listener = object : NsdManager.DiscoveryListener {
+            override fun onStartDiscoveryFailed(serviceType: String, errorCode: Int) {
+                Log.e("iroh-http-dnssd", "browse $browseId start failed: $errorCode")
+            }
+            override fun onStopDiscoveryFailed(serviceType: String, errorCode: Int) {}
+            override fun onDiscoveryStarted(serviceType: String) {}
+            override fun onDiscoveryStopped(serviceType: String) {}
+
+            override fun onServiceFound(serviceInfo: NsdServiceInfo) {
+                val session = dnsSdBrowseMap[browseId] ?: return
+                manager.resolveService(serviceInfo, object : NsdManager.ResolveListener {
+                    override fun onServiceResolved(resolved: NsdServiceInfo) {
+                        val name = resolved.serviceName
+                        if (!session.knownInstances.add(name)) return
+
+                        val txt = JSObject()
+                        resolved.attributes?.forEach { (k, v) ->
+                            txt.put(k, if (v != null) String(v) else "")
+                        }
+
+                        val addrs = JSONArray()
+                        val hostAddr = resolved.host?.hostAddress
+                        if (!hostAddr.isNullOrEmpty()) addrs.put(hostAddr)
+
+                        val record = JSObject()
+                        record.put("isActive", true)
+                        record.put("serviceType", session.serviceType)
+                        record.put("instanceName", name)
+                        record.put("host", hostAddr ?: JSONObject.NULL)
+                        record.put("port", resolved.port)
+                        record.put("addrs", addrs)
+                        record.put("txt", txt)
+                        synchronized(session.pendingRecords) { session.pendingRecords.add(record) }
+                    }
+
+                    override fun onResolveFailed(serviceInfo: NsdServiceInfo, errorCode: Int) {}
+                })
+            }
+
+            override fun onServiceLost(serviceInfo: NsdServiceInfo) {
+                val session = dnsSdBrowseMap[browseId] ?: return
+                val name = serviceInfo.serviceName
+                if (!session.knownInstances.remove(name)) return
+                val record = JSObject()
+                record.put("isActive", false)
+                record.put("serviceType", session.serviceType)
+                record.put("instanceName", name)
+                record.put("host", JSONObject.NULL)
+                record.put("port", 0)
+                record.put("addrs", JSONArray())
+                record.put("txt", JSObject())
+                synchronized(session.pendingRecords) { session.pendingRecords.add(record) }
+            }
+        }
+
+        val session = DnsSdBrowseSession(browseId, manager, listener, serviceType)
+        dnsSdBrowseMap[browseId] = session
+
+        try {
+            manager.discoverServices(serviceType, NsdManager.PROTOCOL_DNS_SD, listener)
+        } catch (e: Exception) {
+            dnsSdBrowseMap.remove(browseId)
+            return invoke.reject("Discovery failed: ${e.message}")
+        }
+
+        val ret = JSObject()
+        ret.put("browseId", browseId)
+        invoke.resolve(ret)
+    }
+
+    @Command
+    fun dns_sd_browse_poll(invoke: Invoke) {
+        val args = invoke.parseArgs(BrowsePollArgs::class.java)
+        val session = dnsSdBrowseMap[args.browseId]
+        val ret = JSObject()
+        if (session == null) {
+            ret.put("records", JSONArray())
+        } else {
+            val records: List<JSObject>
+            synchronized(session.pendingRecords) {
+                records = session.pendingRecords.toList()
+                session.pendingRecords.clear()
+            }
+            val arr = JSONArray()
+            records.forEach { arr.put(it) }
+            ret.put("records", arr)
+        }
+        invoke.resolve(ret)
+    }
+
+    @Command
+    fun dns_sd_browse_stop(invoke: Invoke) {
+        val args = invoke.parseArgs(BrowseStopArgs::class.java)
+        val session = dnsSdBrowseMap.remove(args.browseId)
+        if (session != null) {
+            try { session.manager.stopServiceDiscovery(session.listener) } catch (_: Exception) {}
+        }
+        invoke.resolve()
+    }
+
+    @Command
+    fun dns_sd_advertise_start(invoke: Invoke) {
+        val manager = nsd() ?: return invoke.reject("NsdManager unavailable")
+        val args = invoke.parseArgs(DnsSdAdvertiseStartArgs::class.java)
+        val advertiseId = nextAdvertiseId.getAndIncrement()
+        val serviceType = "_${args.serviceName}.${protoSuffix(args.protocol)}"
+
+        val info = NsdServiceInfo().apply {
+            serviceName = args.instanceName.take(63)
+            this.serviceType = serviceType
+            setPort(if (args.port > 0) args.port else 1)
+            args.txt.forEach { (k, v) -> setAttribute(k, v) }
+        }
+
+        val listener = object : NsdManager.RegistrationListener {
+            override fun onServiceRegistered(serviceInfo: NsdServiceInfo) {}
+            override fun onRegistrationFailed(serviceInfo: NsdServiceInfo, errorCode: Int) {
+                Log.e("iroh-http-dnssd", "advertise $advertiseId failed: $errorCode")
+            }
+            override fun onServiceUnregistered(serviceInfo: NsdServiceInfo) {}
+            override fun onUnregistrationFailed(serviceInfo: NsdServiceInfo, errorCode: Int) {}
+        }
+
+        advertiseMap[advertiseId] = AdvertiseSession(advertiseId, manager, listener)
+        try {
+            manager.registerService(info, NsdManager.PROTOCOL_DNS_SD, listener)
+        } catch (e: Exception) {
+            advertiseMap.remove(advertiseId)
+            return invoke.reject("Registration failed: ${e.message}")
+        }
+
+        val ret = JSObject()
+        ret.put("advertiseId", advertiseId)
+        invoke.resolve(ret)
+    }
+
+    @Command
+    fun dns_sd_advertise_stop(invoke: Invoke) {
         val args = invoke.parseArgs(AdvertiseStopArgs::class.java)
         val session = advertiseMap.remove(args.advertiseId)
         if (session != null) {

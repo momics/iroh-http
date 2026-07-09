@@ -15,8 +15,8 @@ use crate::state;
 
 use iroh_http_adapter::{
     coerce_endpoint_options, coerce_fetch_options, coerce_serve_options, core_error_to_json,
-    deliver_request, format_error_json, validate_header_rows, DeliverableRequest, RawEndpointOptions,
-    RawFetchOptions, RawServeOptions, RequestTransport, Undeliverable,
+    deliver_request, format_error_json, validate_header_rows, DeliverableRequest,
+    RawEndpointOptions, RawFetchOptions, RawServeOptions, RequestTransport, Undeliverable,
 };
 
 // ── Endpoint ──────────────────────────────────────────────────────────────────
@@ -365,9 +365,7 @@ pub async fn send_chunk(request: tauri::ipc::Request<'_>) -> Result<(), String> 
         .get("iroh-ep")
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse().ok())
-        .ok_or_else(|| {
-            format_error_json("INVALID_INPUT", "missing or invalid iroh-ep header")
-        })?;
+        .ok_or_else(|| format_error_json("INVALID_INPUT", "missing or invalid iroh-ep header"))?;
     let handle: u64 = headers
         .get("iroh-handle")
         .and_then(|v| v.to_str().ok())
@@ -814,7 +812,9 @@ pub struct SessionAcceptedPayload {
 }
 
 #[command]
-pub async fn session_accept(endpoint_handle: u64) -> Result<Option<SessionAcceptedPayload>, String> {
+pub async fn session_accept(
+    endpoint_handle: u64,
+) -> Result<Option<SessionAcceptedPayload>, String> {
     let ep = state::get_endpoint(endpoint_handle).ok_or_else(|| {
         format_error_json(
             "INVALID_HANDLE",
@@ -832,7 +832,10 @@ pub async fn session_accept(endpoint_handle: u64) -> Result<Option<SessionAccept
         .remote_id()
         .map(|pk| iroh_http_core::base32_encode(pk.as_bytes()))
         .unwrap_or_default();
-    Ok(Some(SessionAcceptedPayload { session_handle: session.handle(), node_id }))
+    Ok(Some(SessionAcceptedPayload {
+        session_handle: session.handle(),
+        node_id,
+    }))
 }
 
 /// Open a new bidirectional stream on an existing session.
@@ -922,10 +925,7 @@ pub async fn session_closed(
         )
     })?;
     let session = iroh_http_core::Session::from_handle(ep, session_handle);
-    let info = session
-        .closed()
-        .await
-        .map_err(|e| core_error_to_json(&e))?;
+    let info = session.closed().await.map_err(|e| core_error_to_json(&e))?;
     Ok(CloseInfoPayload {
         close_code: info.close_code,
         reason: info.reason,
@@ -1304,9 +1304,7 @@ pub async fn mdns_next_event<R: tauri::Runtime>(
         // Buffer remaining events.
         if !events.is_empty() {
             let mut map = buffer.lock().unwrap_or_else(|e| e.into_inner());
-            map.entry(browse_handle)
-                .or_default()
-                .extend(events);
+            map.entry(browse_handle).or_default().extend(events);
         }
 
         if let Some(ev) = first {
@@ -1448,6 +1446,48 @@ fn generic_browse_slab() -> &'static Mutex<slab::Slab<GenericBrowseHandle>> {
     S.get_or_init(|| Mutex::new(slab::Slab::new()))
 }
 
+/// Mobile generic DNS-SD browse buffer, mirroring the peer path's
+/// `mobile_mdns_buffer`: holds records polled from the native layer that have
+/// not yet been drained by `dns_sd_next_record`.
+#[cfg(mobile)]
+#[allow(clippy::type_complexity)]
+fn mobile_dns_sd_buffer() -> &'static Mutex<
+    std::collections::HashMap<
+        u64,
+        std::collections::VecDeque<crate::mobile_mdns::MobileServiceRecord>,
+    >,
+> {
+    static BUFFER: OnceLock<
+        Mutex<
+            std::collections::HashMap<
+                u64,
+                std::collections::VecDeque<crate::mobile_mdns::MobileServiceRecord>,
+            >,
+        >,
+    > = OnceLock::new();
+    BUFFER.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Set of generic browse handles still open, mirroring `mobile_active_browses`.
+#[cfg(mobile)]
+fn mobile_active_dns_sd_browses() -> &'static Mutex<std::collections::HashSet<u64>> {
+    static S: OnceLock<Mutex<std::collections::HashSet<u64>>> = OnceLock::new();
+    S.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+}
+
+#[cfg(mobile)]
+fn service_record_from_mobile(r: crate::mobile_mdns::MobileServiceRecord) -> ServiceRecordPayload {
+    ServiceRecordPayload {
+        is_active: r.is_active,
+        service_type: r.service_type,
+        instance_name: r.instance_name,
+        host: r.host,
+        port: r.port,
+        addrs: r.addrs,
+        txt: r.txt,
+    }
+}
+
 /// A generic DNS-SD service to advertise, mirroring the shared `ServiceConfig`.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1529,11 +1569,22 @@ pub async fn dns_sd_advertise(_config: ServiceConfigPayload) -> Result<u64, Stri
 
 #[command]
 #[cfg(mobile)]
-pub async fn dns_sd_advertise(_config: ServiceConfigPayload) -> Result<u64, String> {
-    Err(format_error_json(
-        "UNKNOWN",
-        "generic DNS-SD is not supported on mobile",
-    ))
+pub fn dns_sd_advertise<R: tauri::Runtime>(
+    _app: tauri::AppHandle<R>,
+    state: tauri::State<'_, crate::mobile_mdns::MobileMdns<R>>,
+    config: ServiceConfigPayload,
+) -> Result<u64, String> {
+    let protocol = config.protocol.as_deref().unwrap_or("udp");
+    state
+        .dns_sd_advertise_start(
+            &config.service_name,
+            &config.instance_name,
+            config.port,
+            protocol,
+            &config.addrs,
+            &config.txt,
+        )
+        .map_err(|e| format_error_json("REFUSED", e))
 }
 
 /// Stop a generic DNS-SD advertisement.
@@ -1551,7 +1602,13 @@ pub fn dns_sd_advertise_close(advertise_handle: u64) {
 
 #[command]
 #[cfg(mobile)]
-pub fn dns_sd_advertise_close(_advertise_handle: u64) {}
+pub fn dns_sd_advertise_close<R: tauri::Runtime>(
+    _app: tauri::AppHandle<R>,
+    state: tauri::State<'_, crate::mobile_mdns::MobileMdns<R>>,
+    advertise_handle: u64,
+) {
+    let _ = state.dns_sd_advertise_stop(advertise_handle);
+}
 
 /// Browse for a generic DNS-SD service.
 #[command]
@@ -1585,14 +1642,21 @@ pub async fn dns_sd_browse(
 
 #[command]
 #[cfg(mobile)]
-pub async fn dns_sd_browse(
-    _service_name: String,
-    _protocol: Option<String>,
+pub fn dns_sd_browse<R: tauri::Runtime>(
+    _app: tauri::AppHandle<R>,
+    state: tauri::State<'_, crate::mobile_mdns::MobileMdns<R>>,
+    service_name: String,
+    protocol: Option<String>,
 ) -> Result<u64, String> {
-    Err(format_error_json(
-        "UNKNOWN",
-        "generic DNS-SD is not supported on mobile",
-    ))
+    let protocol = protocol.as_deref().unwrap_or("udp");
+    let browse_id = state
+        .dns_sd_browse_start(&service_name, protocol)
+        .map_err(|e| format_error_json("REFUSED", e))?;
+    mobile_active_dns_sd_browses()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(browse_id);
+    Ok(browse_id)
 }
 
 /// Poll the next record from a generic DNS-SD browse session.
@@ -1639,13 +1703,52 @@ pub async fn dns_sd_next_record(
 
 #[command]
 #[cfg(mobile)]
-pub async fn dns_sd_next_record(
-    _browse_handle: u64,
+pub async fn dns_sd_next_record<R: tauri::Runtime>(
+    _app: tauri::AppHandle<R>,
+    state: tauri::State<'_, crate::mobile_mdns::MobileMdns<R>>,
+    browse_handle: u64,
 ) -> Result<Option<ServiceRecordPayload>, String> {
-    Err(format_error_json(
-        "UNKNOWN",
-        "generic DNS-SD is not supported on mobile",
-    ))
+    // The native NsdManager / NWBrowser layer is poll-based and non-blocking
+    // (`dns_sd_browse_poll` returns `[]` until a record appears), whereas the
+    // shared async iterator treats `None` as "stream finished". Long-poll so
+    // `None` keeps its cross-platform meaning — mirrors `mdns_next_event`.
+    let buffer = mobile_dns_sd_buffer();
+    loop {
+        // 1. Drain any record buffered by a previous poll first.
+        {
+            let mut map = buffer.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(queue) = map.get_mut(&browse_handle) {
+                if let Some(rec) = queue.pop_front() {
+                    return Ok(Some(service_record_from_mobile(rec)));
+                }
+            }
+        }
+
+        // 2. Stop long-polling once the session has been closed.
+        let active = mobile_active_dns_sd_browses()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(&browse_handle);
+        if !active {
+            return Ok(None);
+        }
+
+        // 3. Poll the native layer for freshly resolved records.
+        let mut records = state
+            .dns_sd_browse_poll(browse_handle)
+            .map_err(|e| format_error_json("INVALID_HANDLE", e))?;
+        let first = records.drain(..1.min(records.len())).next();
+        if !records.is_empty() {
+            let mut map = buffer.lock().unwrap_or_else(|e| e.into_inner());
+            map.entry(browse_handle).or_default().extend(records);
+        }
+        if let Some(rec) = first {
+            return Ok(Some(service_record_from_mobile(rec)));
+        }
+
+        // 4. Nothing yet — wait briefly, then poll again.
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
 }
 
 /// Close a generic DNS-SD browse session.
@@ -1654,7 +1757,9 @@ pub async fn dns_sd_next_record(
 pub fn dns_sd_browse_close(browse_handle: u64) {
     #[cfg(feature = "discovery")]
     {
-        let mut slab = generic_browse_slab().lock().unwrap_or_else(|e| e.into_inner());
+        let mut slab = generic_browse_slab()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         if slab.contains(browse_handle as usize) {
             slab.remove(browse_handle as usize);
         }
@@ -1663,7 +1768,23 @@ pub fn dns_sd_browse_close(browse_handle: u64) {
 
 #[command]
 #[cfg(mobile)]
-pub fn dns_sd_browse_close(_browse_handle: u64) {}
+pub fn dns_sd_browse_close<R: tauri::Runtime>(
+    _app: tauri::AppHandle<R>,
+    state: tauri::State<'_, crate::mobile_mdns::MobileMdns<R>>,
+    browse_handle: u64,
+) {
+    // Retire the handle first so any in-flight `dns_sd_next_record` long-poll
+    // observes the closure and returns `None` (stream finished).
+    mobile_active_dns_sd_browses()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&browse_handle);
+    let _ = state.dns_sd_browse_stop(browse_handle);
+    mobile_dns_sd_buffer()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&browse_handle);
+}
 
 // ── Transport events ──────────────────────────────────────────────────────────
 
