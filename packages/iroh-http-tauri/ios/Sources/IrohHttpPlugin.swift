@@ -66,6 +66,15 @@ private final class AdvertiseSession {
     }
 }
 
+/// Snapshot of the resolved portion of a generic DNS-SD record, used to detect
+/// when a known instance's TXT/addrs actually change so `browse_start` can
+/// re-emit — instead of a one-shot "seen it once" dedup that would otherwise
+/// never re-surface updates (unlike desktop, which re-announces on change).
+private struct DnsSdRecordSnapshot: Equatable {
+    let txt: [String: String]
+    let addrs: [String]
+}
+
 /// A generic DNS-SD browse session. Unlike `BrowseSession` (which reduces every
 /// result to a `(nodeId, addrs)` peer tuple), this keeps the full record shape.
 private final class DnsSdBrowseSession {
@@ -73,7 +82,7 @@ private final class DnsSdBrowseSession {
     let browser: NWBrowser
     let serviceType: String
     var pendingRecords: [[String: Any]] = []
-    var knownInstances: Set<String> = []
+    var knownInstances: [String: DnsSdRecordSnapshot] = [:]
 
     init(id: UInt64, browser: NWBrowser, serviceType: String) {
         self.id = id
@@ -143,9 +152,13 @@ class IrohHttpPlugin: Plugin {
     /// i.e. exactly 52 characters drawn from the `a-z` / `2-7` alphabet.
     ///
     /// Used to safely accept the DNS-SD instance name as the node-id when a
-    /// desktop advertiser emits no `pk` TXT (issue #318). The advertise side
-    /// truncates instance names to 63 chars, which does not truncate a 52-char
-    /// id, so the recovered id is always complete.
+    /// peer's advertisement carries no `pk` TXT. Every current
+    /// `advertise_peer` implementation (desktop's `mdns-sd`-backed advertiser
+    /// included) sets `pk`, so this is a defensive fallback for
+    /// advertisements from older or third-party peers rather than the normal
+    /// path. The advertise side truncates instance names to 63 chars, which
+    /// does not truncate a 52-char id, so the recovered id is always
+    /// complete.
     private func isValidEndpointId(_ s: String) -> Bool {
         guard s.count == 52 else { return false }
         return s.allSatisfy { c in
@@ -205,17 +218,19 @@ class IrohHttpPlugin: Plugin {
                 }
             }
 
-            // The DNS-SD instance name doubles as the node-id fallback: desktop
-            // advertisers (iroh swarm-discovery) publish the base32 endpoint id
-            // as the instance name and emit no `pk` TXT (issue #318).
+            // The DNS-SD instance name doubles as the node-id fallback for
+            // advertisements with no `pk` TXT. Desktop's `mdns-sd`-backed
+            // advertiser publishes the base32 endpoint id as the instance
+            // name *and* sets `pk`, so this only matters for older or
+            // third-party advertisers.
             var instanceName: String? = nil
             if case .service(let name, _, _, _) = result.endpoint {
                 instanceName = name
             }
 
-            // Resolve the node-id: prefer the `pk` TXT (set by mobile
-            // advertisers), then fall back to the instance name for desktop
-            // advertisers. Reject records where neither yields a valid id.
+            // Resolve the node-id: prefer the `pk` TXT (set by every current
+            // advertiser), then fall back to the instance name. Reject
+            // records where neither yields a valid id.
             let nodeId: String
             if let pk = txt["pk"], !pk.isEmpty {
                 nodeId = pk
@@ -400,12 +415,13 @@ class IrohHttpPlugin: Plugin {
                 }
             }
 
-            if session.knownInstances.contains(name) { continue }
-            session.knownInstances.insert(name)
-
             var addrs: [String] = []
             if let addr = txt["address"], !addr.isEmpty { addrs.append(addr) }
             if let relay = txt["relay"], !relay.isEmpty { addrs.append(relay) }
+
+            let snapshot = DnsSdRecordSnapshot(txt: txt, addrs: addrs)
+            if session.knownInstances[name] == snapshot { continue }
+            session.knownInstances[name] = snapshot
 
             session.pendingRecords.append([
                 "isActive": true,
@@ -419,9 +435,9 @@ class IrohHttpPlugin: Plugin {
         }
 
         // Emit inactive records for instances that vanished.
-        let expired = session.knownInstances.subtracting(current)
+        let expired = Set(session.knownInstances.keys).subtracting(current)
         for name in expired {
-            session.knownInstances.remove(name)
+            session.knownInstances.removeValue(forKey: name)
             session.pendingRecords.append([
                 "isActive": false,
                 "serviceType": session.serviceType,

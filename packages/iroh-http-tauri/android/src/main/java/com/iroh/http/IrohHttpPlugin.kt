@@ -98,15 +98,69 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
     private fun nsd(): NsdManager? =
         activity.getSystemService(Context.NSD_SERVICE) as? NsdManager
 
+    // ── Resolve queue ────────────────────────────────────────────────────────
+    //
+    // `NsdManager` allows only one outstanding `resolveService()` call at a
+    // time; a second concurrent call fails with `FAILURE_ALREADY_ACTIVE` and
+    // `onResolveFailed` is effectively a silent no-op, so records get dropped
+    // whenever several peers/services appear together. Both the peer
+    // (`browse_peers_start`) and generic (`browse_start`) browse paths share
+    // this single queue so resolves across sessions are serialized too.
+    private val resolveQueue = java.util.ArrayDeque<Pair<NsdServiceInfo, NsdManager.ResolveListener>>()
+    private var resolveInProgress = false
+
+    private fun enqueueResolve(serviceInfo: NsdServiceInfo, listener: NsdManager.ResolveListener) {
+        synchronized(resolveQueue) {
+            resolveQueue.addLast(Pair(serviceInfo, listener))
+            if (resolveInProgress) return
+            resolveInProgress = true
+        }
+        drainResolveQueue()
+    }
+
+    private fun drainResolveQueue() {
+        val next: Pair<NsdServiceInfo, NsdManager.ResolveListener>?
+        synchronized(resolveQueue) {
+            next = resolveQueue.pollFirst()
+            if (next == null) {
+                resolveInProgress = false
+                return
+            }
+        }
+        val manager = nsd()
+        if (manager == null) {
+            drainResolveQueue()
+            return
+        }
+        val (serviceInfo, listener) = next
+        val wrapped = object : NsdManager.ResolveListener {
+            override fun onServiceResolved(resolved: NsdServiceInfo) {
+                try { listener.onServiceResolved(resolved) } finally { drainResolveQueue() }
+            }
+            override fun onResolveFailed(serviceInfo: NsdServiceInfo, errorCode: Int) {
+                try { listener.onResolveFailed(serviceInfo, errorCode) } finally { drainResolveQueue() }
+            }
+        }
+        try {
+            manager.resolveService(serviceInfo, wrapped)
+        } catch (e: Exception) {
+            drainResolveQueue()
+        }
+    }
+
     /**
      * Validate that a string is a canonical iroh endpoint id: a 32-byte Ed25519
      * public key encoded as lowercase RFC 4648 base32 without padding, i.e.
      * exactly 52 characters drawn from the `a-z` / `2-7` alphabet.
      *
      * Used to safely accept the DNS-SD instance name as the node-id when a
-     * desktop advertiser emits no `pk` attribute (issue #318). The advertise
-     * side truncates instance names to 63 chars, which does not truncate a
-     * 52-char id, so the recovered id is always complete.
+     * peer's advertisement carries no `pk` attribute. Every current
+     * `advertise_peer` implementation (desktop's `mdns-sd`-backed advertiser
+     * included) sets `pk`, so this is a defensive fallback for
+     * advertisements from older or third-party peers rather than the normal
+     * path. The advertise side truncates instance names to 63 chars, which
+     * does not truncate a 52-char id, so the recovered id is always
+     * complete.
      */
     private fun isValidEndpointId(s: String): Boolean {
         if (s.length != 52) return false
@@ -132,12 +186,14 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
 
             override fun onServiceFound(serviceInfo: NsdServiceInfo) {
                 val session = browseMap[browseId] ?: return
-                manager.resolveService(serviceInfo, object : NsdManager.ResolveListener {
+                enqueueResolve(serviceInfo, object : NsdManager.ResolveListener {
                     override fun onServiceResolved(resolved: NsdServiceInfo) {
-                        // Prefer the `pk` attribute (set by mobile advertisers);
-                        // fall back to the DNS-SD instance name for desktop
-                        // advertisers, which publish the base32 endpoint id there
-                        // and emit no `pk` attribute (issue #318).
+                        // Prefer the `pk` attribute (set by every current
+                        // advertiser, mobile and desktop alike); fall back to
+                        // the DNS-SD instance name — which desktop's
+                        // `mdns-sd`-backed advertiser publishes as the base32
+                        // endpoint id too — for advertisements from older or
+                        // third-party peers that carry no `pk` attribute.
                         val pkAttr = resolved.attributes["pk"]?.let { String(it) }
                         val nodeId = if (!pkAttr.isNullOrEmpty()) {
                             pkAttr
@@ -294,7 +350,7 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
 
             override fun onServiceFound(serviceInfo: NsdServiceInfo) {
                 val session = dnsSdBrowseMap[browseId] ?: return
-                manager.resolveService(serviceInfo, object : NsdManager.ResolveListener {
+                enqueueResolve(serviceInfo, object : NsdManager.ResolveListener {
                     override fun onServiceResolved(resolved: NsdServiceInfo) {
                         val name = resolved.serviceName
                         if (!session.knownInstances.add(name)) return

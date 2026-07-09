@@ -129,14 +129,14 @@ sessions, mDNS discovery, and Ed25519 crypto. See the
 Tauri's capability system controls what the frontend can access. Declare
 permissions in `capabilities/default.json`:
 
-| Permission          | Covers                                        |
-| ------------------- | --------------------------------------------- |
-| `iroh-http:default` | `createNode()`, `close()`, node introspection |
-| `iroh-http:fetch`   | `node.fetch()` + body streaming               |
-| `iroh-http:serve`   | `node.serve()` + body streaming               |
-| `iroh-http:connect` | Raw QUIC sessions (bidi streams, datagrams)   |
+| Permission            | Covers                                                                                |
+| --------------------- | ------------------------------------------------------------------------------------- |
+| `iroh-http:default`   | `createNode()`, `close()`, node introspection                                         |
+| `iroh-http:fetch`     | `node.fetch()` + body streaming                                                       |
+| `iroh-http:serve`     | `node.serve()` + body streaming                                                       |
+| `iroh-http:connect`   | Raw QUIC sessions (bidi streams, datagrams)                                           |
 | `iroh-http:discovery` | Local-network discovery: `advertisePeer`/`browsePeers` + generic `advertise`/`browse` |
-| `iroh-http:crypto`  | Key generation, signing, verification         |
+| `iroh-http:crypto`    | Key generation, signing, verification                                                 |
 
 A typical app using fetch and serve:
 

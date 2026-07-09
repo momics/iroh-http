@@ -334,9 +334,17 @@ class TauriAdapter extends IrohAdapter {
   async browsePeersNext(
     browseHandle: number,
   ): Promise<PeerDiscoveryEvent | null> {
-    return invoke<PeerDiscoveryEvent | null>(`${PLUGIN}|browse_peers_next`, {
+    const ev = await invoke<
+      { isActive: boolean; nodeId: string; addrs: string[] } | null
+    >(`${PLUGIN}|browse_peers_next`, {
       browseHandle: Number(browseHandle),
     });
+    if (!ev) return null;
+    return {
+      type: ev.isActive ? "discovered" : "expired",
+      nodeId: ev.nodeId,
+      addrs: ev.addrs,
+    };
   }
 
   browsePeersClose(browseHandle: number): void {
