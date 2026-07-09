@@ -105,6 +105,33 @@ else
     exit 1
   fi
   ok "All checks passed"
+
+  # ── 3b. Clean up CI's artifact churn ────────────────────────────────────────
+  # `npm run ci` regenerates tracked build artifacts (deno.lock, node index.js).
+  # On machines whose toolchain differs from CI's, these differ from the
+  # committed baseline and leave the tree dirty, which would trip version.sh's
+  # dirty-tree guard *after* the slow CI pass (see #326). Auto-revert ONLY when
+  # every dirty path is a known-churn artifact; if anything else is dirty, abort
+  # and revert nothing (fail-closed preserved). Decision logic lives in
+  # scripts/lib/ci-churn.sh so it can be unit-tested without publishing.
+  # shellcheck source=lib/ci-churn.sh
+  source "$ROOT/scripts/lib/ci-churn.sh"
+
+  PORCELAIN="$(git status --porcelain)"
+  if [[ -n "$PORCELAIN" ]]; then
+    UNEXPECTED="$(printf '%s\n' "$PORCELAIN" | ci_churn_unexpected_paths)"
+    if [[ -n "$UNEXPECTED" ]]; then
+      echo ""
+      fail "CI left unexpected changes in the working tree:"
+      echo "$UNEXPECTED" | sed 's/^/       /'
+      echo "     These are not known regenerated artifacts. Aborting to avoid"
+      echo "     tangling uncommitted work into the release commit."
+      exit 1
+    fi
+
+    git checkout -- "${CI_CHURN_ARTIFACTS[@]}" 2>/dev/null || true
+    ok "Reverted CI-regenerated artifacts (deno.lock, index.js)"
+  fi
 fi
 
 # ── 4. Version bump ───────────────────────────────────────────────────────────
