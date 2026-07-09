@@ -34,7 +34,9 @@ pub struct SchemeState {
 
 impl SchemeState {
     pub fn new() -> Self {
-        Self { active: AtomicU64::new(0) }
+        Self {
+            active: AtomicU64::new(0),
+        }
     }
 
     /// Bind to `handle`. Only stores if nothing is bound yet (first-wins).
@@ -51,12 +53,9 @@ impl SchemeState {
         if current != 0 && get_endpoint(current).is_none() {
             // compare_exchange: if another thread already cleared or rebound,
             // that outcome is also correct — just proceed to the binding CAS.
-            let _ = self.active.compare_exchange(
-                current,
-                0,
-                Ordering::AcqRel,
-                Ordering::Relaxed,
-            );
+            let _ = self
+                .active
+                .compare_exchange(current, 0, Ordering::AcqRel, Ordering::Relaxed);
         }
         self.active
             .compare_exchange(0, handle, Ordering::AcqRel, Ordering::Relaxed)

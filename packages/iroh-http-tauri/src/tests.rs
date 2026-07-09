@@ -32,28 +32,31 @@ mod command_tests {
 
     /// Create a real endpoint in loopback/offline mode for testing.
     async fn make_test_endpoint() -> u64 {
-        let result = create_endpoint(mock_handle(), Some(CreateEndpointArgs {
-            key: None,
-            idle_timeout: None,
-            relay_mode: Some("disabled".into()),
-            relays: None,
-            bind_addrs: Some(vec!["127.0.0.1:0".into()]),
-            dns_discovery: None,
-            dns_discovery_enabled: Some(false),
-            channel_capacity: None,
-            max_chunk_size_bytes: None,
-            handle_ttl: None,
-            sweep_interval: None,
-            disable_networking: Some(true),
-            proxy_url: None,
-            proxy_from_env: None,
-            keylog: None,
-            compression_min_body_bytes: None,
-            compression_level: None,
-            max_header_bytes: None,
-            max_pooled_connections: None,
-            pool_idle_timeout_ms: None,
-        }))
+        let result = create_endpoint(
+            mock_handle(),
+            Some(CreateEndpointArgs {
+                key: None,
+                idle_timeout: None,
+                relay_mode: Some("disabled".into()),
+                relays: None,
+                bind_addrs: Some(vec!["127.0.0.1:0".into()]),
+                dns_discovery: None,
+                dns_discovery_enabled: Some(false),
+                channel_capacity: None,
+                max_chunk_size_bytes: None,
+                handle_ttl: None,
+                sweep_interval: None,
+                disable_networking: Some(true),
+                proxy_url: None,
+                proxy_from_env: None,
+                keylog: None,
+                compression_min_body_bytes: None,
+                compression_level: None,
+                max_header_bytes: None,
+                max_pooled_connections: None,
+                pool_idle_timeout_ms: None,
+            }),
+        )
         .await
         .expect("create_endpoint should succeed");
 
@@ -73,7 +76,9 @@ mod command_tests {
         assert!(alive.unwrap(), "ping should return true");
 
         // Close it.
-        close_endpoint(handle, None).await.expect("close should succeed");
+        close_endpoint(handle, None)
+            .await
+            .expect("close should succeed");
 
         // Note: we do NOT assert ping(handle) fails here because the global
         // slab reuses freed indices — a concurrent test may have already
@@ -95,7 +100,10 @@ mod command_tests {
         let err = close_endpoint(99999, None).await;
         assert!(err.is_err(), "closing invalid handle should error");
         let msg = err.unwrap_err();
-        assert!(msg.contains("INVALID_HANDLE"), "error should mention INVALID_HANDLE: {msg}");
+        assert!(
+            msg.contains("INVALID_HANDLE"),
+            "error should mention INVALID_HANDLE: {msg}"
+        );
     }
 
     #[tokio::test]
@@ -239,7 +247,10 @@ mod command_tests {
         let ep_handle = make_test_endpoint().await;
         // cancel_request on a non-existent handle — should not panic, just no-op.
         let result = cancel_request(ep_handle, 99999);
-        assert!(result.is_ok(), "cancel_request should not error on unknown handle");
+        assert!(
+            result.is_ok(),
+            "cancel_request should not error on unknown handle"
+        );
         close_endpoint(ep_handle, None).await.ok();
     }
 
@@ -263,28 +274,31 @@ mod command_tests {
             .expect("valid base64");
         let sk_b64 = B64.encode(&sk_bytes);
 
-        let info = create_endpoint(mock_handle(), Some(CreateEndpointArgs {
-            key: Some(sk_b64.clone()),
-            idle_timeout: None,
-            relay_mode: Some("disabled".into()),
-            relays: None,
-            bind_addrs: Some(vec!["127.0.0.1:0".into()]),
-            dns_discovery: None,
-            dns_discovery_enabled: Some(false),
-            channel_capacity: None,
-            max_chunk_size_bytes: None,
-            handle_ttl: None,
-            sweep_interval: None,
-            disable_networking: Some(true),
-            proxy_url: None,
-            proxy_from_env: None,
-            keylog: None,
-            compression_min_body_bytes: None,
-            compression_level: None,
-            max_header_bytes: None,
-            max_pooled_connections: None,
-            pool_idle_timeout_ms: None,
-        }))
+        let info = create_endpoint(
+            mock_handle(),
+            Some(CreateEndpointArgs {
+                key: Some(sk_b64.clone()),
+                idle_timeout: None,
+                relay_mode: Some("disabled".into()),
+                relays: None,
+                bind_addrs: Some(vec!["127.0.0.1:0".into()]),
+                dns_discovery: None,
+                dns_discovery_enabled: Some(false),
+                channel_capacity: None,
+                max_chunk_size_bytes: None,
+                handle_ttl: None,
+                sweep_interval: None,
+                disable_networking: Some(true),
+                proxy_url: None,
+                proxy_from_env: None,
+                keylog: None,
+                compression_min_body_bytes: None,
+                compression_level: None,
+                max_header_bytes: None,
+                max_pooled_connections: None,
+                pool_idle_timeout_ms: None,
+            }),
+        )
         .await
         .expect("create_endpoint");
 
@@ -338,7 +352,9 @@ mod command_tests {
     #[tokio::test]
     async fn test_force_close() {
         let handle = make_test_endpoint().await;
-        close_endpoint(handle, Some(true)).await.expect("force close should succeed");
+        close_endpoint(handle, Some(true))
+            .await
+            .expect("force close should succeed");
         // Note: we do NOT assert ping(handle) fails here because the global
         // slab reuses freed indices — a concurrent test may have already
         // inserted a new endpoint at the same slot.

@@ -251,10 +251,7 @@ impl<R: Runtime> MobileMdns<R> {
     /// Stop a generic DNS-SD advertisement.
     pub fn advertise_stop(&self, advertise_id: u64) -> Result<(), String> {
         self.0
-            .run_mobile_plugin::<()>(
-                "advertise_stop",
-                AdvertiseStopPayload { advertise_id },
-            )
+            .run_mobile_plugin::<()>("advertise_stop", AdvertiseStopPayload { advertise_id })
             .map_err(|e| e.to_string())
     }
 

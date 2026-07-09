@@ -31,7 +31,9 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
 use iroh::{
-    address_lookup::{AddressLookup, EndpointData, EndpointInfo, Error as AddressLookupError, Item},
+    address_lookup::{
+        AddressLookup, EndpointData, EndpointInfo, Error as AddressLookupError, Item,
+    },
     EndpointId, RelayUrl, TransportAddr,
 };
 use n0_future::{boxed::BoxStream, stream};
@@ -195,7 +197,11 @@ mod tests {
     async fn expired_event_evicts_node() {
         let lookup = MobileAddressLookup::new();
         let id = endpoint_id(2);
-        lookup.apply_event("discovered", &id.to_string(), &["10.0.0.1:1234".to_string()]);
+        lookup.apply_event(
+            "discovered",
+            &id.to_string(),
+            &["10.0.0.1:1234".to_string()],
+        );
         assert!(resolve_one(&lookup, id).await.is_some());
 
         lookup.apply_event("expired", &id.to_string(), &[]);
@@ -210,8 +216,16 @@ mod tests {
     async fn discovered_event_updates_addrs() {
         let lookup = MobileAddressLookup::new();
         let id = endpoint_id(3);
-        lookup.apply_event("discovered", &id.to_string(), &["10.0.0.1:1111".to_string()]);
-        lookup.apply_event("discovered", &id.to_string(), &["10.0.0.2:2222".to_string()]);
+        lookup.apply_event(
+            "discovered",
+            &id.to_string(),
+            &["10.0.0.1:1111".to_string()],
+        );
+        lookup.apply_event(
+            "discovered",
+            &id.to_string(),
+            &["10.0.0.2:2222".to_string()],
+        );
 
         let item = resolve_one(&lookup, id).await.expect("resolves");
         let addrs: Vec<String> = item
@@ -222,7 +236,11 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(addrs, vec!["10.0.0.2:2222".to_string()], "upsert replaces addrs");
+        assert_eq!(
+            addrs,
+            vec!["10.0.0.2:2222".to_string()],
+            "upsert replaces addrs"
+        );
         assert_eq!(lookup.len(), 1);
     }
 
@@ -245,7 +263,10 @@ mod tests {
     fn invalid_node_id_returns_err_without_panic() {
         let lookup = MobileAddressLookup::new();
         let err = lookup.upsert("not-a-valid-node-id", &["127.0.0.1:1:1".to_string()]);
-        assert!(err.is_err(), "invalid node id should be a recoverable error");
+        assert!(
+            err.is_err(),
+            "invalid node id should be a recoverable error"
+        );
         assert_eq!(lookup.len(), 0);
     }
 

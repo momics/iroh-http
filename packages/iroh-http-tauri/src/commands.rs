@@ -1630,10 +1630,7 @@ pub async fn browse(service_name: String, protocol: Option<String>) -> Result<u6
 
 #[command]
 #[cfg(all(not(feature = "discovery"), not(mobile)))]
-pub async fn browse(
-    _service_name: String,
-    _protocol: Option<String>,
-) -> Result<u64, String> {
+pub async fn browse(_service_name: String, _protocol: Option<String>) -> Result<u64, String> {
     Err(format_error_json(
         "UNKNOWN",
         "discovery feature not enabled in this build",
@@ -1662,9 +1659,7 @@ pub fn browse<R: tauri::Runtime>(
 /// Poll the next record from a generic DNS-SD browse session.
 #[command]
 #[cfg(all(feature = "discovery", not(mobile)))]
-pub async fn browse_next(
-    browse_handle: u64,
-) -> Result<Option<ServiceRecordPayload>, String> {
+pub async fn browse_next(browse_handle: u64) -> Result<Option<ServiceRecordPayload>, String> {
     let session = {
         generic_browse_slab()
             .lock()
@@ -1692,9 +1687,7 @@ pub async fn browse_next(
 
 #[command]
 #[cfg(all(not(feature = "discovery"), not(mobile)))]
-pub async fn browse_next(
-    _browse_handle: u64,
-) -> Result<Option<ServiceRecordPayload>, String> {
+pub async fn browse_next(_browse_handle: u64) -> Result<Option<ServiceRecordPayload>, String> {
     Err(format_error_json(
         "UNKNOWN",
         "discovery feature not enabled in this build",

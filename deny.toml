@@ -104,14 +104,6 @@ reason = "0.2/0.3 coexist across ring and other crypto libs in iroh"
 name = "convert_case"
 reason = "0.6/0.10 split across iroh transitive deps (proc-macro crates)"
 
-[[bans.skip]]
-name = "r-efi"
-reason = "5.x/6.x split across iroh transitive deps"
-
-[[bans.skip]]
-name = "netlink-packet-route"
-reason = "0.28/0.29 split across iroh transitive deps"
-
 [licenses]
 allow = [
   "Apache-2.0",
