@@ -10,6 +10,7 @@
     "iroh-http:serve",
     "iroh-http:connect",
     "iroh-http:crypto",
-    "iroh-http:mdns"
+    "iroh-http:mdns",
+    "iroh-http:dns-sd"
   ]
 }
