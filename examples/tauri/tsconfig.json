@@ -17,17 +17,7 @@
     "strict": true,
     "noUnusedLocals": true,
     "noUnusedParameters": true,
-    "noFallthroughCasesInSwitch": true,
-
-    /* Monorepo path aliases (resolved by Vite at build time) */
-    "paths": {
-      "@momics/iroh-http-tauri": [
-        "../../packages/iroh-http-tauri/guest-js/index.ts"
-      ],
-      "@momics/iroh-http-shared": [
-        "../../packages/iroh-http-shared/src/index.ts"
-      ]
-    }
+    "noFallthroughCasesInSwitch": true
   },
   "include": ["src", "vite.config.ts"]
 }
