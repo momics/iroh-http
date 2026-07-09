@@ -53,8 +53,11 @@ jobs:
           set -euo pipefail
           TAG="${{ inputs.tag }}"
           echo "Resolving commit SHA for tag $TAG"
-          # Works for both lightweight and annotated tags — the commits endpoint
-          # dereferences the tag to its underlying commit.
+          # Dereference the tag to its underlying COMMIT sha. The commits endpoint
+          # resolves a ref (lightweight OR annotated tag) straight to the commit,
+          # so annotated tags don't leave us holding the tag-object sha. This is
+          # the same commit a tag-push run reports as its head_sha, so the Build
+          # lookup and the extended-tests verify poll below both match it.
           SHA=$(gh api "repos/${{ github.repository }}/commits/$TAG" --jq '.sha')
           if [ -z "$SHA" ] || [ "$SHA" = "null" ]; then
             echo "::error::Could not resolve tag $TAG to a commit SHA"
@@ -63,11 +66,17 @@ jobs:
           echo "Tag $TAG points at commit $SHA"
 
           echo "Looking for a successful Build run for $SHA"
+          # Pick the newest Build run that (a) ran against this exact commit,
+          # (b) succeeded, and (c) was triggered by the tag push — so a manual
+          # re-run, a branch build, or an unrelated run on the same commit can't
+          # be mis-selected. The API returns runs newest-first.
           BUILD_RUN_ID=$(gh api \
-            "repos/${{ github.repository }}/actions/workflows/build.yml/runs?head_sha=$SHA&per_page=100" \
-            --jq '[.workflow_runs[] | select(.status == "completed" and .conclusion == "success")] | first | .id')
+            "repos/${{ github.repository }}/actions/workflows/build.yml/runs?head_sha=$SHA&event=push&per_page=100" \
+            --jq "[.workflow_runs[]
+                   | select(.head_sha == \"$SHA\" and .status == \"completed\" and .conclusion == \"success\")]
+                   | first | .id")
           if [ -z "$BUILD_RUN_ID" ] || [ "$BUILD_RUN_ID" = "null" ]; then
-            echo "::error::No successful Build run found for tag $TAG ($SHA) — refusing to publish"
+            echo "::error::No successful tag-push Build run found for tag $TAG ($SHA) — refusing to publish"
             exit 1
           fi
           echo "Publishing artifacts from Build run $BUILD_RUN_ID (commit $SHA)"
