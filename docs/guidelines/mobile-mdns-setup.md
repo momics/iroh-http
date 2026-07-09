@@ -1,7 +1,20 @@
 # Mobile mDNS / DNS-SD setup (iOS & Android)
 
-Applies to Tauri apps built with `iroh-http-tauri` that use local-network peer
-discovery — `node.advertisePeer()` and `node.browsePeers()`.
+Applies to Tauri apps built with `iroh-http-tauri` that use local-network
+discovery — the iroh peer path (`node.advertisePeer()` / `node.browsePeers()`)
+and the generic DNS-SD path (`node.advertise()` / `node.browse()`). Both run over
+the same native bridge (`NsdManager` on Android, `NWBrowser` / `NWListener` on
+iOS) and need the same permissions and service-type declarations below.
+
+> **Generic records on iOS.** Android resolves full generic records (host, port,
+> TXT, addresses). On iOS, `NWBrowser` yields the instance name, service type
+> and TXT but not the host/port/addresses (resolving those needs an
+> `NWConnection`), so iOS generic records arrive with `host = null`, `port = 0`
+> and best-effort `addrs`. The iroh peer path is unaffected — it resolves peers
+> by node id through the in-process address lookup.
+
+> **Tauri permission.** Grant `iroh-http:discovery` in your capability file; it
+> covers both the peer and generic discovery commands.
 
 On desktop, mDNS works with no configuration. On mobile, the OS gates
 local-network access behind **permissions** and **static service-type

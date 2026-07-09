@@ -115,6 +115,23 @@ the iroh-http behavior as a thin layer on top.
    `IROH_HTTP_SERVICE` and the reserved TXT keys, plus `asIrohPeer(record)` to
    recognize an iroh-http peer inside a generic browse.
 
+7. **One discovery permission.** The Tauri plugin previously shipped two
+   permission sets — `iroh-http:mdns` (peer discovery) and `iroh-http:dns-sd`
+   (generic). Since the peer path is a specialization of the generic one and
+   both drive the same commands, collapse them into a single
+   `iroh-http:discovery` set covering all ten discovery commands
+   (`mdns_*` + `dns_sd_*`). A capability grants discovery once and gets both.
+
+8. **Mobile parity.** Generic DNS-SD is implemented on mobile, not just
+   desktop. The mobile bridge (`mobile_mdns.rs`) gains generic
+   advertise/browse methods, and the native plugins add `dns_sd_*`
+   commands over the same NsdManager (Android) / NWBrowser–NWListener (iOS)
+   machinery already used for peer discovery. Android resolves full records
+   (host, port, TXT, addresses) via `resolveService`; iOS surfaces the instance
+   name, service type and TXT but leaves host/port/addresses unresolved, because
+   `NWBrowser` does not resolve an endpoint without opening an `NWConnection` —
+   a documented best-effort limitation rather than a hard "not supported".
+
 Accepted trade-off: generic DNS-SD via this library requires an iroh node
 (the FFI is loaded through the node addon). This is fine — the library exists to
 serve iroh-http, not to be a standalone Bonjour replacement.
@@ -124,7 +141,11 @@ serve iroh-http, not to be a standalone Bonjour replacement.
 - Rust `iroh-http-discovery`: new `dns_sd` module (config, record, engine);
   `start_advertise`/`start_browse` refactored onto it. Public API additive.
 - FFI (node napi, deno dispatch, tauri desktop): new `dnsSd*` entry points and a
-  `JsServiceRecord`. Mobile tauri unaffected for now.
+  `JsServiceRecord`.
+- Mobile tauri: generic DNS-SD bridged to native NsdManager / NWBrowser, at
+  parity with desktop (iOS records are metadata-only — see decision 8).
+- Tauri permissions: `iroh-http:mdns` and `iroh-http:dns-sd` are replaced by a
+  single `iroh-http:discovery` set (breaking; capabilities must be updated).
 - Shared TS: generic `node.advertise`/`node.browse` + iroh-http
   `node.advertisePeer`/`node.browsePeers`, `ServiceConfig`/`ServiceRecord`/`DiscoveredService`
   types, `IrohAdapter` gains generic methods, `DiscoveredPeer` gains optional
@@ -139,3 +160,5 @@ serve iroh-http, not to be a standalone Bonjour replacement.
 - [x] tauri desktop generic commands.
 - [x] shared TS: generic `node.advertise`/`node.browse` + iroh `advertisePeer`/`browsePeers`, types, adapter methods, interop helpers.
 - [x] discovery feature doc + example (deno / node / tauri).
+- [x] unify `iroh-http:mdns` + `iroh-http:dns-sd` into `iroh-http:discovery`.
+- [x] mobile generic DNS-SD (Android full records; iOS metadata-only) — native Swift/Kotlin pending on-device verification.

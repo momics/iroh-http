@@ -1435,7 +1435,7 @@ pub fn mdns_advertise_close<R: tauri::Runtime>(
     let _ = state.advertise_stop(advertise_handle);
 }
 
-// ── Generic DNS-SD (desktop only) ─────────────────────────────────────────────
+// ── Generic DNS-SD ─────────────────────────────────────────────────────────────────────────
 
 #[cfg(all(feature = "discovery", not(mobile)))]
 type GenericBrowseHandle = Arc<TokioMutex<iroh_http_discovery::ServiceBrowseSession>>;
