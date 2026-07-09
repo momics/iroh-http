@@ -1,6 +1,6 @@
 import { PublicKey, resolveNodeId } from "./PublicKey.js";
 import { SecretKey } from "./SecretKey.js";
-import { DnsSd } from "./DnsSd.js";
+import { advertiseService, browseServices } from "./dns-sd.js";
 import { type FetchFn, makeFetch } from "./fetch.js";
 import {
   makeServe,
@@ -64,7 +64,6 @@ export class IrohNode extends EventTarget {
   #resolveClose!: (info: WebTransportCloseInfo) => void;
   #fetchFn: FetchFn;
   #serveFn: ServeFn;
-  #dnsSd?: DnsSd;
 
   private constructor(
     guard: symbol,
@@ -439,10 +438,6 @@ export class IrohNode extends EventTarget {
     }
   }
 
-  #dns(): DnsSd {
-    return (this.#dnsSd ??= new DnsSd(this.#adapter));
-  }
-
   /**
    * Advertise a generic DNS-SD service on the local network.
    *
@@ -469,7 +464,7 @@ export class IrohNode extends EventTarget {
    * ```
    */
   advertise(options: DnsSdAdvertiseOptions): Promise<void> {
-    return this.#dns().advertise(options);
+    return advertiseService(this.#adapter, options);
   }
 
   /**
@@ -488,7 +483,7 @@ export class IrohNode extends EventTarget {
    * ```
    */
   browse(options: DnsSdBrowseOptions): AsyncIterable<ServiceRecord> {
-    return this.#dns().browse(options);
+    return browseServices(this.#adapter, options);
   }
 
   /**
