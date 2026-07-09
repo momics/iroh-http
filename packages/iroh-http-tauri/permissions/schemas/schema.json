@@ -913,22 +913,16 @@
           "markdownDescription": "Node lifecycle and introspection. Covers createNode() and close(). Add iroh-http:fetch and/or iroh-http:serve for HTTP capability.\n#### This default permission set includes:\n\n- `allow-create-endpoint`\n- `allow-close-endpoint`\n- `allow-wait-endpoint-closed`\n- `allow-ping`\n- `allow-node-addr`\n- `allow-node-ticket`\n- `allow-home-relay`\n- `allow-peer-info`\n- `allow-peer-stats`\n- `allow-endpoint-stats`\n- `allow-start-transport-events`\n- `allow-next-path-change`\n- `allow-unsubscribe-path-changes`"
         },
         {
-          "description": "Enables generic DNS-SD service discovery — advertise and browse arbitrary local services with full control over instance name, port, TXT records, and protocol.\n#### This permission set includes:\n\n- `allow-dns-sd-advertise`\n- `allow-dns-sd-advertise-close`\n- `allow-dns-sd-browse`\n- `allow-dns-sd-next-record`\n- `allow-dns-sd-browse-close`",
+          "description": "Enables local-network service discovery over DNS-SD (RFC 6763) / mDNS. Covers both the iroh-http peer discovery specialization (advertisePeer / browsePeers) and the generic DNS-SD primitive (advertise / browse) for arbitrary local services — instance name, port, TXT records, and protocol.\n\n#### This permission set includes:\n\n- `allow-mdns-browse`\n- `allow-mdns-browse-close`\n- `allow-mdns-next-event`\n- `allow-mdns-advertise`\n- `allow-mdns-advertise-close`\n- `allow-dns-sd-advertise`\n- `allow-dns-sd-advertise-close`\n- `allow-dns-sd-browse`\n- `allow-dns-sd-next-record`\n- `allow-dns-sd-browse-close`",
           "type": "string",
-          "const": "dns-sd",
-          "markdownDescription": "Enables generic DNS-SD service discovery — advertise and browse arbitrary local services with full control over instance name, port, TXT records, and protocol.\n#### This permission set includes:\n\n- `allow-dns-sd-advertise`\n- `allow-dns-sd-advertise-close`\n- `allow-dns-sd-browse`\n- `allow-dns-sd-next-record`\n- `allow-dns-sd-browse-close`"
+          "const": "discovery",
+          "markdownDescription": "Enables local-network service discovery over DNS-SD (RFC 6763) / mDNS. Covers both the iroh-http peer discovery specialization (advertisePeer / browsePeers) and the generic DNS-SD primitive (advertise / browse) for arbitrary local services — instance name, port, TXT records, and protocol.\n\n#### This permission set includes:\n\n- `allow-mdns-browse`\n- `allow-mdns-browse-close`\n- `allow-mdns-next-event`\n- `allow-mdns-advertise`\n- `allow-mdns-advertise-close`\n- `allow-dns-sd-advertise`\n- `allow-dns-sd-advertise-close`\n- `allow-dns-sd-browse`\n- `allow-dns-sd-next-record`\n- `allow-dns-sd-browse-close`"
         },
         {
           "description": "Enables node.fetch() — send HTTP requests to remote peers. Includes all internal body-streaming primitives required for fetch to function.\n#### This permission set includes:\n\n- `allow-fetch`\n- `allow-create-fetch-token`\n- `allow-cancel-in-flight`\n- `allow-cancel-request`\n- `allow-create-body-writer`\n- `allow-next-chunk`\n- `allow-try-next-chunk`\n- `allow-send-chunk`\n- `allow-finish-body`",
           "type": "string",
           "const": "fetch",
           "markdownDescription": "Enables node.fetch() — send HTTP requests to remote peers. Includes all internal body-streaming primitives required for fetch to function.\n#### This permission set includes:\n\n- `allow-fetch`\n- `allow-create-fetch-token`\n- `allow-cancel-in-flight`\n- `allow-cancel-request`\n- `allow-create-body-writer`\n- `allow-next-chunk`\n- `allow-try-next-chunk`\n- `allow-send-chunk`\n- `allow-finish-body`"
-        },
-        {
-          "description": "Enables local peer discovery via mDNS — browse for peers on the local network and advertise this node.\n#### This permission set includes:\n\n- `allow-mdns-browse`\n- `allow-mdns-browse-close`\n- `allow-mdns-next-event`\n- `allow-mdns-advertise`\n- `allow-mdns-advertise-close`",
-          "type": "string",
-          "const": "mdns",
-          "markdownDescription": "Enables local peer discovery via mDNS — browse for peers on the local network and advertise this node.\n#### This permission set includes:\n\n- `allow-mdns-browse`\n- `allow-mdns-browse-close`\n- `allow-mdns-next-event`\n- `allow-mdns-advertise`\n- `allow-mdns-advertise-close`"
         },
         {
           "description": "Enables node.serve() — accept incoming HTTP requests from remote peers. Includes all internal body-streaming primitives required for handlers to read and write bodies.\n#### This permission set includes:\n\n- `allow-serve`\n- `allow-stop-serve`\n- `allow-wait-serve-stop`\n- `allow-respond-to-request`\n- `allow-next-chunk`\n- `allow-try-next-chunk`\n- `allow-send-chunk`\n- `allow-finish-body`\n- `allow-create-body-writer`\n- `allow-cancel-request`",

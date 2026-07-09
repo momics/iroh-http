@@ -135,7 +135,7 @@ permissions in `capabilities/default.json`:
 | `iroh-http:fetch`   | `node.fetch()` + body streaming               |
 | `iroh-http:serve`   | `node.serve()` + body streaming               |
 | `iroh-http:connect` | Raw QUIC sessions (bidi streams, datagrams)   |
-| `iroh-http:mdns`    | mDNS peer discovery                           |
+| `iroh-http:discovery` | Local-network discovery: `advertisePeer`/`browsePeers` + generic `advertise`/`browse` |
 | `iroh-http:crypto`  | Key generation, signing, verification         |
 
 A typical app using fetch and serve:
@@ -211,7 +211,7 @@ value.
 - All crypto functions are async (round-trip through the Rust plugin via Tauri
   invoke).
 - QUIC sessions require the `iroh-http:connect` permission.
-- mDNS requires the `iroh-http:mdns` permission.
+- Local-network discovery requires the `iroh-http:discovery` permission.
 - The `httpi://` scheme handler (opt-in via `.with_scheme()`) enables native URL
   resolution without IPC overhead.
 

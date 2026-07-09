@@ -43,13 +43,13 @@ fn main() {
         "secret_key_sign",
         "public_key_verify",
         "generate_secret_key",
-        // mDNS discovery (iroh-http:mdns)
+        // Local-network discovery — iroh peer (iroh-http:discovery)
         "mdns_browse",
         "mdns_next_event",
         "mdns_browse_close",
         "mdns_advertise",
         "mdns_advertise_close",
-        // Generic DNS-SD (iroh-http:dns-sd)
+        // Local-network discovery — generic DNS-SD (iroh-http:discovery)
         "dns_sd_advertise",
         "dns_sd_advertise_close",
         "dns_sd_browse",

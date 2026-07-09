@@ -1356,12 +1356,13 @@ Enables low-level key operations — generate keypairs, sign with a secret key, 
 <tr>
 <td>
 
-`iroh-http:dns-sd`
+`iroh-http:discovery`
 
 </td>
 <td>
 
-Enables generic DNS-SD service discovery — advertise and browse arbitrary local services with full control over instance name, port, TXT records, and protocol.
+Enables local-network service discovery over DNS-SD (RFC 6763) / mDNS. Covers both the iroh-http peer discovery specialization (advertisePeer / browsePeers) and the generic DNS-SD primitive (advertise / browse) for arbitrary local services — instance name, port, TXT records, and protocol.
+
 
 </td>
 </tr>
@@ -1375,19 +1376,6 @@ Enables generic DNS-SD service discovery — advertise and browse arbitrary loca
 <td>
 
 Enables node.fetch() — send HTTP requests to remote peers. Includes all internal body-streaming primitives required for fetch to function.
-
-</td>
-</tr>
-
-<tr>
-<td>
-
-`iroh-http:mdns`
-
-</td>
-<td>
-
-Enables local peer discovery via mDNS — browse for peers on the local network and advertise this node.
 
 </td>
 </tr>
