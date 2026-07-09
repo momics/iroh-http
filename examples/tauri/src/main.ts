@@ -484,8 +484,12 @@ const advertisePeerServiceInput = document.querySelector<HTMLInputElement>(
   "#advertise-peer-service",
 )!;
 
-const browsePeersBtn = document.querySelector<HTMLButtonElement>("#browse-peers-btn")!;
-const browsePeersLog = document.querySelector<HTMLElement>("#browse-peers-log")!;
+const browsePeersBtn = document.querySelector<HTMLButtonElement>(
+  "#browse-peers-btn",
+)!;
+const browsePeersLog = document.querySelector<HTMLElement>(
+  "#browse-peers-log",
+)!;
 const browsePeersServiceInput = document.querySelector<HTMLInputElement>(
   "#browse-peers-service",
 )!;
@@ -508,7 +512,10 @@ advertisePeerBtn.addEventListener("click", async () => {
   setStatus(advertisePeerStatus, `Advertising as "${serviceName}"`, "ok");
 
   try {
-    await node.advertisePeer({ serviceName, signal: advertisePeerAbort.signal });
+    await node.advertisePeer({
+      serviceName,
+      signal: advertisePeerAbort.signal,
+    });
   } catch { /* aborted or error */ }
 
   advertisePeerAbort = null;
@@ -531,7 +538,10 @@ browsePeersBtn.addEventListener("click", async () => {
 
   try {
     for await (
-      const ev of node.browsePeers({ serviceName, signal: browsePeersAbort.signal })
+      const ev of node.browsePeers({
+        serviceName,
+        signal: browsePeersAbort.signal,
+      })
     ) {
       const icon = ev.isActive ? "+" : "-";
       appendLog(
