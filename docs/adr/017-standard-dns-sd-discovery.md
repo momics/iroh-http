@@ -56,7 +56,9 @@ not the mobile browser.
 - **The public API is unchanged.** `start_advertise` / `start_browse` /
   `BrowseSession` / `AdvertiseSession` / `PeerDiscoveryEvent` / `DiscoveryError`
   keep their signatures, so node, deno, and tauri-desktop consumers are
-  untouched. Mobile targets already gate the crate out.
+  untouched. Mobile targets already gate the crate out. (ADR-018 later renamed
+  the core seam functions to `advertise_peer` / `browse_peers`; signatures were
+  unaffected.)
 - **Everything ADR-016 wanted to avoid still holds.** We re-implement `resolve`,
   expiry, and address selection — but that is now the *only* way to be
   browsable, and the desktop `MdnsSdAddressLookup` (parity with the mobile one)

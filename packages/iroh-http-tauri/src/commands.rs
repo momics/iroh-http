@@ -1448,7 +1448,7 @@ fn generic_browse_slab() -> &'static Mutex<slab::Slab<GenericBrowseHandle>> {
 
 /// Mobile generic DNS-SD browse buffer, mirroring the peer path's
 /// `mobile_mdns_buffer`: holds records polled from the native layer that have
-/// not yet been drained by `dns_sd_next_record`.
+/// not yet been drained by `browse_next`.
 #[cfg(mobile)]
 #[allow(clippy::type_complexity)]
 fn mobile_dns_sd_buffer() -> &'static Mutex<
@@ -1773,7 +1773,7 @@ pub fn browse_close<R: tauri::Runtime>(
     state: tauri::State<'_, crate::mobile_mdns::MobileMdns<R>>,
     browse_handle: u64,
 ) {
-    // Retire the handle first so any in-flight `dns_sd_next_record` long-poll
+    // Retire the handle first so any in-flight `browse_next` long-poll
     // observes the closure and returns `None` (stream finished).
     mobile_active_dns_sd_browses()
         .lock()

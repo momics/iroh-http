@@ -58,7 +58,7 @@ the iroh-http behavior as a thin layer on top.
   - **advertise:** the authoritative SRV port is `ep.bound_sockets()`. Parsing
     it out of `ep.addr()` strings is fragile (relay-only nodes have no direct
     socket addr).
-  - **browse:** LAN `fetch(nodeId)` works because `start_browse` registers an
+  - **browse:** LAN `fetch(nodeId)` works because `browse_peers` registers an
     in-process `AddressLookup` on the endpoint and feeds it from the browse
     pump. This is a registered provider fed over time — inherently a Rust-side
     seam, not a per-record JS call.
@@ -90,15 +90,15 @@ the iroh-http behavior as a thin layer on top.
 
 2. **One engine, thin iroh seam.** Rust exposes a generic engine
    `dns_sd::advertise(ServiceConfig)` and `dns_sd::browse(BrowseConfig)` yielding
-   a full `ServiceRecord`. `start_advertise`/`start_browse` become ~15-line
+   a full `ServiceRecord`. `advertise_peer`/`browse_peers` become ~15-line
    adapters: advertise builds a `ServiceConfig` from the endpoint; browse calls
    the generic engine and additionally registers + feeds the `AddressLookup`.
    Both funnel through the same daemon slab, pump, and record marshalling.
 
 3. **Two FFI entry points, one engine.** Because the endpoint is genuinely
    required for the iroh path (authoritative port; address-lookup wiring), we
-   keep endpoint-bound `mdnsAdvertise`/`mdnsBrowse` *and* add endpoint-free
-   `dnsSdAdvertise`/`dnsSdBrowse`/`dnsSdNextRecord`. These are thin entry points
+   keep endpoint-bound `advertisePeer`/`browsePeers` *and* add endpoint-free
+   `advertise`/`browse`/`browseNext`. These are thin entry points
    over the single `dns_sd` engine — not a second bridge. This is the accepted
    "separate FFI calls where required" from the design decision.
 
@@ -139,9 +139,9 @@ serve iroh-http, not to be a standalone Bonjour replacement.
 ## Consequences
 
 - Rust `iroh-http-discovery`: new `dns_sd` module (config, record, engine);
-  `start_advertise`/`start_browse` refactored onto it. Public API additive.
-- FFI (node napi, deno dispatch, tauri desktop): new `dnsSd*` entry points and a
-  `JsServiceRecord`.
+  `advertise_peer`/`browse_peers` refactored onto it. Public API additive.
+- FFI (node napi, deno dispatch, tauri desktop): new generic
+  `advertise`/`browse`/`browseNext` entry points and a `JsServiceRecord`.
 - Mobile tauri: generic DNS-SD bridged to native NsdManager / NWBrowser, at
   parity with desktop (iOS records are metadata-only — see decision 8).
 - Tauri permissions: `iroh-http:mdns` and `iroh-http:dns-sd` are replaced by a
@@ -162,3 +162,28 @@ serve iroh-http, not to be a standalone Bonjour replacement.
 - [x] discovery feature doc + example (deno / node / tauri).
 - [x] unify `iroh-http:mdns` + `iroh-http:dns-sd` into `iroh-http:discovery`.
 - [x] mobile generic DNS-SD (Android full records; iOS metadata-only) — native Swift/Kotlin pending on-device verification.
+
+## Naming convention (as shipped)
+
+The final implementation names every layer along the **peer-vs-generic axis**,
+not the misleading `mdns` / `dns_sd` transport split it was prototyped under
+(both paths are DNS-SD-over-mDNS; the real distinction is the generic primitive
+versus the iroh-peer specialization that adds `AddressLookup` wiring). Names
+mirror the TypeScript API surface at every layer:
+
+| Layer | Generic primitive | Peer specialization |
+| ----- | ----------------- | ------------------- |
+| TS API (`node`) | `advertise` / `browse` | `advertisePeer` / `browsePeers` |
+| Rust core seam (`iroh-http-discovery`) | `dns_sd::advertise` / `dns_sd::browse` | `advertise_peer` / `browse_peers` |
+| Node napi export | `advertise` / `browse` / `browseNext` / `advertiseClose` / `browseClose` | `advertisePeer` / `browsePeers` / `browsePeersNext` / `advertisePeerClose` / `browsePeersClose` |
+| Deno dispatch key | `advertise` / `browse` / `browseNext` / … | `advertisePeer` / `browsePeers` / `browsePeersNext` / … |
+| Tauri command | `advertise` / `browse` / `browse_next` / … | `advertise_peer` / `browse_peers` / `browse_peers_next` / … |
+| Tauri permission leaf | `allow-advertise` / `allow-browse` / `allow-browse-next` / … | `allow-advertise-peer` / `allow-browse-peers` / `allow-browse-peers-next` / … |
+| Mobile native method | `advertise_start/stop` / `browse_start/poll/stop` | `advertise_peer_start/stop` / `browse_peers_start/poll/stop` |
+
+The single `iroh-http:discovery` permission set and the high-level `node`
+methods are the stable surface; the FFI export, Tauri command, permission-leaf,
+and mobile-native names below them are renamed together and are breaking for
+low-level consumers. The `DnsSdAdvertiseOptions` / `DnsSdBrowseOptions` option
+types keep their names — they describe generic DNS-SD configuration and remain
+accurate.
