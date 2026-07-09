@@ -278,6 +278,42 @@ label {
   white-space: nowrap;
 }
 
+/* ── Discovered peer list ───────────────────────────────────────────────────── */
+
+.peer-list {
+  list-style: none;
+  margin: 0 0 0.6rem;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.peer-item {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.4rem 0.6rem;
+  background: #f4f4f5;
+  border: 1px solid #e4e4e7;
+  border-radius: 6px;
+}
+
+.peer-item .peer-id {
+  flex: 1;
+  min-width: 0;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: 0.78rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.peer-item button {
+  padding: 0.3em 0.7em;
+  font-size: 0.78rem;
+}
+
 select {
   font-family: inherit;
   font-size: 0.9rem;

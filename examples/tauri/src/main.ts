@@ -493,9 +493,63 @@ const browsePeersLog = document.querySelector<HTMLElement>(
 const browsePeersServiceInput = document.querySelector<HTMLInputElement>(
   "#browse-peers-service",
 )!;
+const browsePeersList = document.querySelector<HTMLUListElement>(
+  "#browse-peers-list",
+)!;
+const browsePeersEmpty = document.querySelector<HTMLElement>(
+  "#browse-peers-empty",
+)!;
 
 let advertisePeerAbort: AbortController | null = null;
 let browsePeersAbort: AbortController | null = null;
+
+// Live view of currently-discovered peers, keyed by node id. `browsePeers`
+// yields an event per peer coming (isActive) or going (!isActive); we add a row
+// on arrival and remove it on departure so the list always reflects who's
+// reachable right now. Each row copies the full node id — paste it into the
+// HTTP tab's peer field to fetch from that peer.
+const discoveredPeers = new Map<string, HTMLLIElement>();
+
+function refreshPeerEmptyState(): void {
+  browsePeersEmpty.classList.toggle("hidden", discoveredPeers.size > 0);
+}
+
+function addDiscoveredPeer(nodeId: string): void {
+  if (discoveredPeers.has(nodeId)) return;
+
+  const li = document.createElement("li");
+  li.className = "peer-item";
+  li.dataset.nodeId = nodeId;
+
+  const code = document.createElement("code");
+  code.className = "peer-id";
+  code.textContent = `${nodeId.slice(0, 16)}…`;
+  code.title = nodeId;
+
+  const copyBtn = document.createElement("button");
+  copyBtn.className = "btn-secondary";
+  copyBtn.textContent = "Copy";
+  copyBtn.addEventListener("click", () => copyText(copyBtn, () => nodeId));
+
+  li.append(code, copyBtn);
+  browsePeersList.append(li);
+  discoveredPeers.set(nodeId, li);
+  refreshPeerEmptyState();
+}
+
+function removeDiscoveredPeer(nodeId: string): void {
+  const li = discoveredPeers.get(nodeId);
+  if (!li) return;
+  li.remove();
+  discoveredPeers.delete(nodeId);
+  refreshPeerEmptyState();
+}
+
+function clearDiscoveredPeers(): void {
+  discoveredPeers.clear();
+  browsePeersList.replaceChildren();
+  refreshPeerEmptyState();
+}
 
 advertisePeerBtn.addEventListener("click", async () => {
   if (advertisePeerAbort) {
@@ -528,6 +582,7 @@ browsePeersBtn.addEventListener("click", async () => {
     browsePeersAbort.abort();
     browsePeersAbort = null;
     browsePeersBtn.textContent = "Start browsing";
+    clearDiscoveredPeers();
     return;
   }
 
@@ -535,6 +590,7 @@ browsePeersBtn.addEventListener("click", async () => {
   browsePeersAbort = new AbortController();
   browsePeersBtn.textContent = "Stop browsing";
   browsePeersLog.textContent = "";
+  clearDiscoveredPeers();
 
   try {
     for await (
@@ -543,6 +599,9 @@ browsePeersBtn.addEventListener("click", async () => {
         signal: browsePeersAbort.signal,
       })
     ) {
+      if (ev.isActive) addDiscoveredPeer(ev.nodeId);
+      else removeDiscoveredPeer(ev.nodeId);
+
       const icon = ev.isActive ? "+" : "-";
       appendLog(
         browsePeersLog,
@@ -555,6 +614,7 @@ browsePeersBtn.addEventListener("click", async () => {
 
   browsePeersAbort = null;
   browsePeersBtn.textContent = "Start browsing";
+  clearDiscoveredPeers();
 });
 
 // ── Generic DNS-SD ─────────────────────────────────────────────────────────────
