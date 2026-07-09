@@ -1,13 +1,20 @@
 ---
-id: "016"
+id: "018"
 title: "General DNS-SD surface with an iroh-http specialization"
 status: accepted
 date: 2026-07-09
 area: api
 tags: [discovery, dns-sd, mdns, ffi, api]
+supersedes: ["016"]
 ---
 
-# [016] General DNS-SD surface with an iroh-http specialization
+# [018] General DNS-SD surface with an iroh-http specialization
+
+> Builds on [ADR-017](017-standard-dns-sd-discovery.md) (standard DNS-SD wire
+> format via `mdns-sd`) and reverses decisions 1 & 2 of the superseded
+> [ADR-016](016-mdns-discovery-scope.md) ("no general DNS-SD"): the wire format
+> is already standard, so exposing a generic, lossless advertise/browse surface
+> is now cheap and additive.
 
 ## Context
 
@@ -125,4 +132,4 @@ serve iroh-http, not to be a standalone Bonjour replacement.
 - [x] deno dispatch generic FFI entries.
 - [x] tauri desktop generic commands.
 - [x] shared TS `dnsSd` object, types, adapter methods, interop helpers.
-- [ ] discovery feature doc + example.
+- [x] discovery feature doc + example (deno / node / tauri).

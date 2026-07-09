@@ -5,7 +5,9 @@
     "host": "deno run --allow-ffi --allow-read --allow-env --allow-sys=inspector main.ts host",
     "client": "deno run --allow-ffi --allow-read --allow-env --allow-sys=inspector main.ts client",
     "advertise": "deno run --allow-ffi --allow-read --allow-env --allow-sys=inspector main.ts advertise",
-    "browse": "deno run --allow-ffi --allow-read --allow-env --allow-sys=inspector main.ts browse"
+    "browse": "deno run --allow-ffi --allow-read --allow-env --allow-sys=inspector main.ts browse",
+    "dnssd-advertise": "deno run --allow-ffi --allow-read --allow-env --allow-sys=inspector main.ts dnssd-advertise",
+    "dnssd-browse": "deno run --allow-ffi --allow-read --allow-env --allow-sys=inspector main.ts dnssd-browse"
   },
   "imports": {
     "@momics/iroh-http-deno": "jsr:@momics/iroh-http-deno@^0.6.0",

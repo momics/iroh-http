@@ -9,7 +9,7 @@
 //! The iroh-http–specific path ([`crate::start_advertise`] /
 //! [`crate::start_browse`]) is a thin specialization layered on top of this
 //! module: it builds a [`ServiceConfig`] from an [`iroh::Endpoint`] and wires
-//! browse results into the endpoint's address lookup. See ADR-016.
+//! browse results into the endpoint's address lookup. See ADR-018.
 
 use std::net::{IpAddr, SocketAddr};
 

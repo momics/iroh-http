@@ -82,6 +82,71 @@ See [`MdnsOptions` in the specification](../specification.md#discovery-mdns) for
 `browse` and `advertise` accept `MdnsOptions` as their first argument.
 Both can run simultaneously on the same node — they are independent.
 
+## Generic DNS-SD (`node.dnsSd`)
+
+`node.advertise()` / `node.browse()` are the ergonomic, zero-config path for
+finding **iroh-http peers**: the instance name is the node id, the port comes
+from the endpoint, and the TXT set is fixed (`pk` + optional `relay`).
+
+To advertise or browse **any** DNS-SD service — a printer, a game lobby, a
+non-iroh daemon — use `node.dnsSd`. It is the same wire protocol and the same
+underlying engine, but lossless and fully caller-controlled:
+
+```ts
+const ac = new AbortController();
+
+// Advertise an arbitrary service.
+await node.dnsSd.advertise({
+  serviceName: "printers",     // → _printers._tcp.local.
+  instanceName: "Front Desk",
+  port: 9100,
+  protocol: "tcp",             // "udp" (default) | "tcp"
+  txt: { model: "LaserJet 9000", color: "true" },
+  signal: ac.signal,
+});
+
+// Browse — records are lossless: instance, host, port, addrs, and every TXT key.
+for await (const rec of node.dnsSd.browse({ serviceName: "printers", protocol: "tcp" })) {
+  console.log(rec.isActive ? "up" : "down", rec.instanceName, rec.port, rec.txt);
+}
+```
+
+`node.advertise()` / `node.browse()` are defined as the iroh-http
+*specialization* of this same engine — there is one bridge, not two. The
+`dnsSd` surface hangs off the node because the native discovery FFI is loaded
+through the node addon (per [ADR-018](../adr/018-general-dns-sd-surface.md)); it
+does not otherwise use the node's identity or endpoint.
+
+### Recognizing iroh-http peers in a generic browse
+
+iroh-http advertises under a known service name with the node id in a `pk` TXT
+property. `asIrohPeer(record)` reinterprets a generic `ServiceRecord` as a
+`DiscoveredPeer` when it carries one, and returns `null` otherwise:
+
+```ts
+import { asIrohPeer, IROH_HTTP_SERVICE } from "@momics/iroh-http-node";
+
+for await (const rec of node.dnsSd.browse({ serviceName: IROH_HTTP_SERVICE })) {
+  const peer = asIrohPeer(rec);
+  if (peer) await node.fetch(`httpi://${peer.nodeId}/api`);
+}
+```
+
+## Interop with iroh's built-in mDNS
+
+iroh-http discovery is **not** interoperable with plain-iroh's built-in mDNS
+(`swarm-discovery` / `iroh-mdns-address-lookup`). The two use different wire
+formats: iroh-http speaks standard DNS-SD with a `PTR` record so it is browsable
+by Bonjour, iOS `NWBrowser`, and Android `NsdManager`, whereas iroh's own
+backend omits `PTR` and is invisible to those browsers. This trade — dropping
+plain-iroh mDNS interop to gain standards-compliant, mobile-visible discovery —
+is the whole point of the change; see
+[ADR-017](../adr/017-standard-dns-sd-discovery.md) for the wire-format decision.
+
+Nodes on the same LAN still connect fine regardless: once a peer's node id and
+addresses are known (via DNS discovery, a ticket, or a direct address), the QUIC
+handshake is identical. Only the *mDNS enumeration* differs.
+
 ## Without discovery
 
 When DNS is disabled and neither `browse` nor `advertise` is called, the node

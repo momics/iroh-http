@@ -84,7 +84,7 @@ pub struct PeerDiscoveryEvent {
 
 /// TXT property carrying the peer's base32 endpoint id.
 ///
-/// Part of the iroh-http DNS-SD convention (ADR-016); also exported so generic
+/// Part of the iroh-http DNS-SD convention (ADR-018); also exported so generic
 /// [`dns_sd`] browsers can recognize iroh-http peers.
 pub const TXT_PK: &str = "pk";
 /// TXT property carrying the peer's home relay URL, if any.

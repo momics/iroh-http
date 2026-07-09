@@ -77,14 +77,31 @@ const { readable, writable } = await session.createBidirectionalStream();
 
 ### mDNS discovery
 
-Find peers on the local network without exchanging keys out-of-band.
+Find peers on the local network without exchanging keys out-of-band. Discovery
+speaks **standard DNS-SD** (RFC 6763), so desktop nodes are visible to Bonjour,
+iOS `NWBrowser`, and Android `NsdManager` — but **not** to plain-iroh peers using
+iroh's built-in mDNS (see the [interop note](docs/features/discovery.md#interop-with-irohs-built-in-mdns)).
 
 ```ts
-await node.advertise("my-app.iroh-http");
-for await (const event of node.browse("my-app.iroh-http")) {
-  if (event.type === "discovered")
-    await node.fetch(`httpi://${event.nodeId}/api`);
+const ac = new AbortController();
+node.advertise({ serviceName: "my-app" }, ac.signal);
+for await (const event of node.browse({ serviceName: "my-app" })) {
+  if (event.isActive) await node.fetch(`httpi://${event.nodeId}/api`);
 }
+```
+
+To advertise or browse **any** DNS-SD service (custom instance name, port, TXT,
+`udp`/`tcp`) — not just iroh nodes — use the generic `node.dnsSd` surface:
+
+```ts
+await node.dnsSd.advertise({
+  serviceName: "printers",
+  instanceName: "Front Desk",
+  port: 9100,
+  protocol: "tcp",
+  txt: { model: "LaserJet 9000" },
+  signal: ac.signal,
+});
 ```
 
 ### Crypto

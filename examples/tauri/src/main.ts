@@ -7,11 +7,16 @@
  *   - HTTP serve & fetch (with WebTransport echo)
  *   - Peer address info & connection stats
  *   - mDNS discovery (browse + advertise)
+ *   - Generic DNS-SD (advertise/browse any service)
  *   - QUIC sessions (bidi streams + datagrams)
  *   - Ed25519 sign, verify, and key generation
  */
-import { createNode } from "@momics/iroh-http-tauri";
-import { PublicKey, SecretKey } from "@momics/iroh-http-shared";
+import {
+  asIrohPeer,
+  createNode,
+  PublicKey,
+  SecretKey,
+} from "@momics/iroh-http-tauri";
 import type { IrohSession } from "@momics/iroh-http-shared";
 
 // ── Utilities ──────────────────────────────────────────────────────────────────
@@ -540,6 +545,100 @@ browseBtn.addEventListener("click", async () => {
 
   browseAbort = null;
   browseBtn.textContent = "Start browsing";
+});
+
+// ── Generic DNS-SD ─────────────────────────────────────────────────────────────
+
+const dnssdServiceInput = document.querySelector<HTMLInputElement>(
+  "#dnssd-service",
+)!;
+const dnssdAdvertiseBtn = document.querySelector<HTMLButtonElement>(
+  "#dnssd-advertise-btn",
+)!;
+const dnssdBrowseBtn = document.querySelector<HTMLButtonElement>(
+  "#dnssd-browse-btn",
+)!;
+const dnssdStatus = document.querySelector<HTMLElement>("#dnssd-status")!;
+const dnssdLog = document.querySelector<HTMLElement>("#dnssd-log")!;
+
+let dnssdAdvertiseAbort: AbortController | null = null;
+let dnssdBrowseAbort: AbortController | null = null;
+
+dnssdAdvertiseBtn.addEventListener("click", async () => {
+  if (dnssdAdvertiseAbort) {
+    dnssdAdvertiseAbort.abort();
+    dnssdAdvertiseAbort = null;
+    dnssdAdvertiseBtn.textContent = "Start advertising";
+    setStatus(dnssdStatus, "Stopped");
+    return;
+  }
+
+  const serviceName = dnssdServiceInput.value.trim() || "demo-printer";
+  dnssdAdvertiseAbort = new AbortController();
+  dnssdAdvertiseBtn.textContent = "Stop advertising";
+  setStatus(
+    dnssdStatus,
+    `Advertising "Front Desk Printer" on _${serviceName}._tcp`,
+    "ok",
+  );
+
+  try {
+    // A fully generic advertisement: custom instance label, port, TXT and
+    // protocol — this is not an iroh node.
+    await node.dnsSd.advertise({
+      serviceName,
+      instanceName: "Front Desk Printer",
+      port: 9100,
+      protocol: "tcp",
+      txt: { model: "LaserJet 9000", color: "true", pdl: "application/pdf" },
+      signal: dnssdAdvertiseAbort.signal,
+    });
+  } catch { /* aborted or error */ }
+
+  dnssdAdvertiseAbort = null;
+  dnssdAdvertiseBtn.textContent = "Start advertising";
+  setStatus(dnssdStatus, "Done");
+});
+
+dnssdBrowseBtn.addEventListener("click", async () => {
+  if (dnssdBrowseAbort) {
+    dnssdBrowseAbort.abort();
+    dnssdBrowseAbort = null;
+    dnssdBrowseBtn.textContent = "Start browsing";
+    return;
+  }
+
+  const serviceName = dnssdServiceInput.value.trim() || "demo-printer";
+  dnssdBrowseAbort = new AbortController();
+  dnssdBrowseBtn.textContent = "Stop browsing";
+  dnssdLog.textContent = "";
+
+  try {
+    for await (
+      const record of node.dnsSd.browse({
+        serviceName,
+        protocol: "tcp",
+        signal: dnssdBrowseAbort.signal,
+      })
+    ) {
+      const icon = record.isActive ? "+" : "-";
+      const txt = Object.entries(record.txt)
+        .map(([k, v]) => `${k}=${v}`)
+        .join(", ");
+      const peer = asIrohPeer(record);
+      const tag = peer ? `  (iroh peer ${peer.nodeId.slice(0, 12)}…)` : "";
+      appendLog(
+        dnssdLog,
+        `${icon} ${record.instanceName} :${record.port}${tag}` +
+          (txt ? `\n    ${txt}` : ""),
+      );
+    }
+  } catch (e) {
+    appendLog(dnssdLog, `Error: ${e}`);
+  }
+
+  dnssdBrowseAbort = null;
+  dnssdBrowseBtn.textContent = "Start browsing";
 });
 
 // ── Sessions (QUIC) ────────────────────────────────────────────────────────────

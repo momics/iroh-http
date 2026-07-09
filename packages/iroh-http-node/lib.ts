@@ -470,8 +470,27 @@ class NodeAdapter extends IrohAdapter {
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
-export { PublicKey, SecretKey } from "@momics/iroh-http-shared";
-export type { IrohNode, IrohNodeWithSecret, NodeOptions };
+export {
+  asIrohPeer,
+  IROH_HTTP_SERVICE,
+  PublicKey,
+  SecretKey,
+  TXT_KEY_PUBLIC_KEY,
+  TXT_KEY_RELAY,
+} from "@momics/iroh-http-shared";
+export type {
+  DnsSd,
+  DnsSdAdvertiseOptions,
+  DnsSdBrowseOptions,
+} from "@momics/iroh-http-shared";
+export type {
+  DnsSdProtocol,
+  IrohNode,
+  IrohNodeWithSecret,
+  NodeOptions,
+  ServiceConfig,
+  ServiceRecord,
+};
 
 /**
  * Create an Iroh node — the entry point for peer-to-peer HTTP.

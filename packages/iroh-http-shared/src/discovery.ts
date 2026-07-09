@@ -50,7 +50,7 @@ export interface ServiceConfig {
   serviceName: string;
   /** DNS-SD instance label that uniquely names this advertisement. */
   instanceName: string;
-  /** SRV port peers connect to. */
+  /** SRV port peers connect to. Must fit an unsigned 16-bit integer (0–65535). */
   port: number;
   /** TXT key/value properties. Defaults to none. */
   txt?: Record<string, string>;

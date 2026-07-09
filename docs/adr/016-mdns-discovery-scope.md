@@ -2,7 +2,7 @@
 id: "016"
 title: "mDNS discovery scope: iroh-only, not general DNS-SD"
 status: superseded
-superseded-by: ["017"]
+superseded-by: ["017", "018"]
 date: 2026-07-07
 area: ecosystem
 tags: [discovery, mdns, dns-sd, mobile, address-lookup, iroh, packaging]
@@ -14,8 +14,11 @@ tags: [discovery, mdns, dns-sd, mobile, address-lookup, iroh, packaging]
 > Decision 3 (keep `iroh-mdns-address-lookup`, reject `mdns-sd`) is reversed:
 > the official crate's `swarm-discovery` backend emits no `PTR` record, so
 > desktop nodes were invisible to standard DNS-SD browsers (iOS `NWBrowser`,
-> Android `NsdManager`, `dns-sd`). ADR-017 adopts `mdns-sd`. Decisions 1, 2, and
-> 4 (iroh-scoped, no general DNS-SD, separate optional crate) still stand.
+> Android `NsdManager`, `dns-sd`). ADR-017 adopts `mdns-sd`. Decisions 1 and 2
+> (iroh-scoped, no general DNS-SD) are in turn reversed by
+> [ADR-018](018-general-dns-sd-surface.md), which exposes a generic DNS-SD
+> surface now that the wire format is standard. Decision 4 (separate optional
+> crate) still stands.
 
 
 ## Context

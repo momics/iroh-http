@@ -220,6 +220,23 @@
             <pre id="browse-log" class="log"></pre>
           </section>
         </div>
+
+        <section class="card">
+          <h2>Generic DNS-SD</h2>
+          <p class="hint">
+            Advertise or browse <em>any</em> DNS-SD service &mdash; custom
+            instance label, port, TXT records and protocol &mdash; not just iroh
+            nodes. Records carrying an iroh public key are flagged as peers.
+          </p>
+          <label for="dnssd-service">Service name</label>
+          <input id="dnssd-service" type="text" value="demo-printer" />
+          <div class="input-row">
+            <button id="dnssd-advertise-btn">Start advertising</button>
+            <button id="dnssd-browse-btn">Start browsing</button>
+          </div>
+          <p id="dnssd-status" class="status"></p>
+          <pre id="dnssd-log" class="log"></pre>
+        </section>
       </div>
 
       <!-- ── Sessions ──────────────────────────────────────────────────────── -->

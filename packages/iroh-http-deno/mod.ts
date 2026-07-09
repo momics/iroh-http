@@ -26,7 +26,22 @@ import {
   waitEndpointClosed,
 } from "./src/adapter.ts";
 export { generateSecretKey, publicKeyVerify, secretKeySign };
-export { PublicKey, SecretKey } from "@momics/iroh-http-shared";
+export {
+  asIrohPeer,
+  IROH_HTTP_SERVICE,
+  PublicKey,
+  SecretKey,
+  TXT_KEY_PUBLIC_KEY,
+  TXT_KEY_RELAY,
+} from "@momics/iroh-http-shared";
+export type {
+  DnsSd,
+  DnsSdAdvertiseOptions,
+  DnsSdBrowseOptions,
+  DnsSdProtocol,
+  ServiceConfig,
+  ServiceRecord,
+} from "@momics/iroh-http-shared";
 
 /**
  * Create an Iroh node — the entry point for peer-to-peer HTTP.
