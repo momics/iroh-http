@@ -116,7 +116,7 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
     // ── Browse ────────────────────────────────────────────────────────────────
 
     @Command
-    fun mdns_browse_start(invoke: Invoke) {
+    fun browse_peers_start(invoke: Invoke) {
         val manager = nsd() ?: return invoke.reject("NsdManager unavailable")
         val args = invoke.parseArgs(BrowseStartArgs::class.java)
         val browseId = nextBrowseId.getAndIncrement()
@@ -194,7 +194,7 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
     }
 
     @Command
-    fun mdns_browse_poll(invoke: Invoke) {
+    fun browse_peers_poll(invoke: Invoke) {
         val args = invoke.parseArgs(BrowsePollArgs::class.java)
         val session = browseMap[args.browseId]
         val ret = JSObject()
@@ -214,7 +214,7 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
     }
 
     @Command
-    fun mdns_browse_stop(invoke: Invoke) {
+    fun browse_peers_stop(invoke: Invoke) {
         val args = invoke.parseArgs(BrowseStopArgs::class.java)
         val session = browseMap.remove(args.browseId)
         if (session != null) {
@@ -226,7 +226,7 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
     // ── Advertise ─────────────────────────────────────────────────────────────
 
     @Command
-    fun mdns_advertise_start(invoke: Invoke) {
+    fun advertise_peer_start(invoke: Invoke) {
         val manager = nsd() ?: return invoke.reject("NsdManager unavailable")
         val args = invoke.parseArgs(AdvertiseStartArgs::class.java)
         val advertiseId = nextAdvertiseId.getAndIncrement()
@@ -263,7 +263,7 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
     }
 
     @Command
-    fun mdns_advertise_stop(invoke: Invoke) {
+    fun advertise_peer_stop(invoke: Invoke) {
         val args = invoke.parseArgs(AdvertiseStopArgs::class.java)
         val session = advertiseMap.remove(args.advertiseId)
         if (session != null) {
@@ -278,7 +278,7 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
         if (protocol.equals("tcp", ignoreCase = true)) "_tcp" else "_udp"
 
     @Command
-    fun dns_sd_browse_start(invoke: Invoke) {
+    fun browse_start(invoke: Invoke) {
         val manager = nsd() ?: return invoke.reject("NsdManager unavailable")
         val args = invoke.parseArgs(DnsSdBrowseStartArgs::class.java)
         val browseId = nextBrowseId.getAndIncrement()
@@ -355,7 +355,7 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
     }
 
     @Command
-    fun dns_sd_browse_poll(invoke: Invoke) {
+    fun browse_poll(invoke: Invoke) {
         val args = invoke.parseArgs(BrowsePollArgs::class.java)
         val session = dnsSdBrowseMap[args.browseId]
         val ret = JSObject()
@@ -375,7 +375,7 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
     }
 
     @Command
-    fun dns_sd_browse_stop(invoke: Invoke) {
+    fun browse_stop(invoke: Invoke) {
         val args = invoke.parseArgs(BrowseStopArgs::class.java)
         val session = dnsSdBrowseMap.remove(args.browseId)
         if (session != null) {
@@ -385,7 +385,7 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
     }
 
     @Command
-    fun dns_sd_advertise_start(invoke: Invoke) {
+    fun advertise_start(invoke: Invoke) {
         val manager = nsd() ?: return invoke.reject("NsdManager unavailable")
         val args = invoke.parseArgs(DnsSdAdvertiseStartArgs::class.java)
         val advertiseId = nextAdvertiseId.getAndIncrement()
@@ -421,7 +421,7 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
     }
 
     @Command
-    fun dns_sd_advertise_stop(invoke: Invoke) {
+    fun advertise_stop(invoke: Invoke) {
         val args = invoke.parseArgs(AdvertiseStopArgs::class.java)
         val session = advertiseMap.remove(args.advertiseId)
         if (session != null) {

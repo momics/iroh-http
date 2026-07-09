@@ -155,7 +155,7 @@ class IrohHttpPlugin: Plugin {
 
     // MARK: - Browse Commands
 
-    @objc public func mdns_browse_start(_ invoke: Invoke) throws {
+    @objc public func browse_peers_start(_ invoke: Invoke) throws {
         let args = try invoke.parseArgs(BrowseStartArgs.self)
         let browseId = allocBrowseId()
 
@@ -250,7 +250,7 @@ class IrohHttpPlugin: Plugin {
         }
     }
 
-    @objc public func mdns_browse_poll(_ invoke: Invoke) throws {
+    @objc public func browse_peers_poll(_ invoke: Invoke) throws {
         let args = try invoke.parseArgs(BrowsePollArgs.self)
         queue.async {
             guard let session = self.browseSessions[args.browseId] else {
@@ -263,7 +263,7 @@ class IrohHttpPlugin: Plugin {
         }
     }
 
-    @objc public func mdns_browse_stop(_ invoke: Invoke) throws {
+    @objc public func browse_peers_stop(_ invoke: Invoke) throws {
         let args = try invoke.parseArgs(BrowseStopArgs.self)
         queue.async {
             if let session = self.browseSessions.removeValue(forKey: args.browseId) {
@@ -275,7 +275,7 @@ class IrohHttpPlugin: Plugin {
 
     // MARK: - Advertise Commands
 
-    @objc public func mdns_advertise_start(_ invoke: Invoke) throws {
+    @objc public func advertise_peer_start(_ invoke: Invoke) throws {
         let args = try invoke.parseArgs(AdvertiseStartArgs.self)
         let advertiseId = allocAdvertiseId()
 
@@ -319,7 +319,7 @@ class IrohHttpPlugin: Plugin {
         invoke.resolve(["advertiseId": advertiseId])
     }
 
-    @objc public func mdns_advertise_stop(_ invoke: Invoke) throws {
+    @objc public func advertise_peer_stop(_ invoke: Invoke) throws {
         let args = try invoke.parseArgs(AdvertiseStopArgs.self)
         queue.async {
             if let session = self.advertiseSessions.removeValue(forKey: args.advertiseId) {
@@ -337,7 +337,7 @@ class IrohHttpPlugin: Plugin {
         proto.lowercased() == "tcp" ? .tcp : .udp
     }
 
-    @objc public func dns_sd_browse_start(_ invoke: Invoke) throws {
+    @objc public func browse_start(_ invoke: Invoke) throws {
         let args = try invoke.parseArgs(DnsSdBrowseStartArgs.self)
         let browseId = allocBrowseId()
 
@@ -434,7 +434,7 @@ class IrohHttpPlugin: Plugin {
         }
     }
 
-    @objc public func dns_sd_browse_poll(_ invoke: Invoke) throws {
+    @objc public func browse_poll(_ invoke: Invoke) throws {
         let args = try invoke.parseArgs(BrowsePollArgs.self)
         queue.async {
             guard let session = self.dnsSdBrowseSessions[args.browseId] else {
@@ -447,7 +447,7 @@ class IrohHttpPlugin: Plugin {
         }
     }
 
-    @objc public func dns_sd_browse_stop(_ invoke: Invoke) throws {
+    @objc public func browse_stop(_ invoke: Invoke) throws {
         let args = try invoke.parseArgs(BrowseStopArgs.self)
         queue.async {
             if let session = self.dnsSdBrowseSessions.removeValue(forKey: args.browseId) {
@@ -457,7 +457,7 @@ class IrohHttpPlugin: Plugin {
         invoke.resolve()
     }
 
-    @objc public func dns_sd_advertise_start(_ invoke: Invoke) throws {
+    @objc public func advertise_start(_ invoke: Invoke) throws {
         let args = try invoke.parseArgs(DnsSdAdvertiseStartArgs.self)
         let advertiseId = allocAdvertiseId()
 
@@ -505,7 +505,7 @@ class IrohHttpPlugin: Plugin {
         invoke.resolve(["advertiseId": advertiseId])
     }
 
-    @objc public func dns_sd_advertise_stop(_ invoke: Invoke) throws {
+    @objc public func advertise_stop(_ invoke: Invoke) throws {
         let args = try invoke.parseArgs(AdvertiseStopArgs.self)
         queue.async {
             if let session = self.advertiseSessions.removeValue(forKey: args.advertiseId) {

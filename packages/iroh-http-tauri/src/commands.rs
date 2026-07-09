@@ -1120,7 +1120,7 @@ fn mobile_mdns_buffer() -> &'static Mutex<
 }
 
 /// Set of browse handles that are still open. The native mDNS poll
-/// (`browse_poll`) is non-blocking and, once a session is stopped, resolves
+/// (`browse_peers_poll`) is non-blocking and, once a session is stopped, resolves
 /// with an empty event list rather than an error. `browse_peers_next` long-polls
 /// that layer, so it consults this set to detect closure and terminate with
 /// `None` (stream finished) instead of spinning forever after
@@ -1190,7 +1190,7 @@ pub async fn browse_peers<R: tauri::Runtime>(
     service_name: String,
 ) -> Result<u64, String> {
     let browse_id = state
-        .browse_start(&service_name)
+        .browse_peers_start(&service_name)
         .map_err(|e| format_error_json("REFUSED", e))?;
     // Mark the session active so `browse_peers_next` knows to keep long-polling
     // until `browse_peers_close` retires the handle.
@@ -1248,7 +1248,7 @@ pub async fn browse_peers_next<R: tauri::Runtime>(
     browse_handle: u64,
 ) -> Result<Option<PeerDiscoveryEventPayload>, String> {
     // The native NWBrowser / NsdManager layer is poll-based and non-blocking:
-    // `browse_poll` returns `[]` whenever nothing has been discovered *yet*.
+    // `browse_peers_poll` returns `[]` whenever nothing has been discovered *yet*.
     // The shared JS async iterator, however, treats a `null` event as
     // "stream ended" — matching the desktop `next_event().await` contract,
     // where `None` only ever means the browse session finished. Returning
@@ -1288,7 +1288,7 @@ pub async fn browse_peers_next<R: tauri::Runtime>(
 
         // 3. Poll the native layer for freshly discovered / expired peers.
         let mut events = state
-            .browse_poll(browse_handle)
+            .browse_peers_poll(browse_handle)
             .map_err(|e| format_error_json("INVALID_HANDLE", e))?;
 
         // #310: feed every freshly polled event into the in-process AddressLookup so
@@ -1346,7 +1346,7 @@ pub fn browse_peers_close<R: tauri::Runtime>(
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .remove(&browse_handle);
-    let _ = state.browse_stop(browse_handle);
+    let _ = state.browse_peers_stop(browse_handle);
     // ISS-017: clear stale buffered events for the closed browse session.
     mobile_mdns_buffer()
         .lock()
@@ -1408,7 +1408,7 @@ pub fn advertise_peer<R: tauri::Runtime>(
     let node_id = ep.node_id().to_string();
     let relay = ep.home_relay();
     state
-        .advertise_start(&service_name, &node_id, relay.as_deref())
+        .advertise_peer_start(&service_name, &node_id, relay.as_deref())
         .map_err(|e| format_error_json("REFUSED", e))
 }
 
@@ -1432,7 +1432,7 @@ pub fn advertise_peer_close<R: tauri::Runtime>(
     state: tauri::State<'_, crate::mobile_mdns::MobileMdns<R>>,
     advertise_handle: u64,
 ) {
-    let _ = state.advertise_stop(advertise_handle);
+    let _ = state.advertise_peer_stop(advertise_handle);
 }
 
 // ── Generic DNS-SD ─────────────────────────────────────────────────────────────────────────
@@ -1576,7 +1576,7 @@ pub fn advertise<R: tauri::Runtime>(
 ) -> Result<u64, String> {
     let protocol = config.protocol.as_deref().unwrap_or("udp");
     state
-        .dns_sd_advertise_start(
+        .advertise_start(
             &config.service_name,
             &config.instance_name,
             config.port,
@@ -1607,7 +1607,7 @@ pub fn advertise_close<R: tauri::Runtime>(
     state: tauri::State<'_, crate::mobile_mdns::MobileMdns<R>>,
     advertise_handle: u64,
 ) {
-    let _ = state.dns_sd_advertise_stop(advertise_handle);
+    let _ = state.advertise_stop(advertise_handle);
 }
 
 /// Browse for a generic DNS-SD service.
@@ -1650,7 +1650,7 @@ pub fn browse<R: tauri::Runtime>(
 ) -> Result<u64, String> {
     let protocol = protocol.as_deref().unwrap_or("udp");
     let browse_id = state
-        .dns_sd_browse_start(&service_name, protocol)
+        .browse_start(&service_name, protocol)
         .map_err(|e| format_error_json("REFUSED", e))?;
     mobile_active_dns_sd_browses()
         .lock()
@@ -1709,7 +1709,7 @@ pub async fn browse_next<R: tauri::Runtime>(
     browse_handle: u64,
 ) -> Result<Option<ServiceRecordPayload>, String> {
     // The native NsdManager / NWBrowser layer is poll-based and non-blocking
-    // (`dns_sd_browse_poll` returns `[]` until a record appears), whereas the
+    // (`browse_poll` returns `[]` until a record appears), whereas the
     // shared async iterator treats `None` as "stream finished". Long-poll so
     // `None` keeps its cross-platform meaning — mirrors `browse_peers_next`.
     let buffer = mobile_dns_sd_buffer();
@@ -1735,7 +1735,7 @@ pub async fn browse_next<R: tauri::Runtime>(
 
         // 3. Poll the native layer for freshly resolved records.
         let mut records = state
-            .dns_sd_browse_poll(browse_handle)
+            .browse_poll(browse_handle)
             .map_err(|e| format_error_json("INVALID_HANDLE", e))?;
         let first = records.drain(..1.min(records.len())).next();
         if !records.is_empty() {
@@ -1779,7 +1779,7 @@ pub fn browse_close<R: tauri::Runtime>(
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .remove(&browse_handle);
-    let _ = state.dns_sd_browse_stop(browse_handle);
+    let _ = state.browse_stop(browse_handle);
     mobile_dns_sd_buffer()
         .lock()
         .unwrap_or_else(|e| e.into_inner())
