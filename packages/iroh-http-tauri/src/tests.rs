@@ -360,3 +360,212 @@ mod command_tests {
         // inserted a new endpoint at the same slot.
     }
 }
+
+/// FFI string-parity contract tests for the mobile discovery boundary.
+///
+/// The mobile mDNS/DNS-SD commands cross a Rust ↔ Swift/Kotlin boundary that is
+/// matched **by string at runtime**: the Rust plugin calls
+/// `run_mobile_plugin("browse_peers_start", …)`, which dispatches to the native
+/// handler declared as `@objc public func browse_peers_start` (Swift) and
+/// `@Command fun browse_peers_start` (Kotlin). Each side compiles independently,
+/// so a rename or a dropped handler on one side is a *silent* contract drift
+/// that only surfaces as an `unknown method` runtime error during manual
+/// on-device testing (exactly the failure PR #330 risked introducing).
+///
+/// `mobile_mdns.rs` is `#[cfg(mobile)]`, so it is not compiled on the host and
+/// its symbols cannot be reflected on here. Instead these tests scan the three
+/// source files as text and assert the command-string sets are identical in
+/// both directions — a deterministic, millisecond check that runs in the
+/// existing host-side `cargo test` and would have caught the #330 rename with
+/// certainty. See issue #333.
+mod ffi_contract {
+    use std::collections::BTreeSet;
+    use std::fs;
+    use std::path::PathBuf;
+
+    /// Absolute path to a repo file, resolved from this crate's manifest dir so
+    /// the test is independent of the process working directory.
+    fn crate_file(rel: &str) -> PathBuf {
+        let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        p.push(rel);
+        p
+    }
+
+    fn read(rel: &str) -> String {
+        let path = crate_file(rel);
+        fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()))
+    }
+
+    /// Extract the identifier that follows `marker` in `haystack`, i.e. the run
+    /// of `[A-Za-z0-9_]` characters starting at the first non-identifier byte
+    /// after each occurrence of `marker`. Used to pull the command name out of
+    /// `func NAME(`, `run_mobile_plugin("NAME"`, etc.
+    fn names_after(haystack: &str, marker: &str) -> BTreeSet<String> {
+        let bytes = haystack.as_bytes();
+        let mut out = BTreeSet::new();
+        let mut search_from = 0;
+        while let Some(rel) = haystack[search_from..].find(marker) {
+            let mut i = search_from + rel + marker.len();
+            // Skip separators (whitespace, quotes, generics like `::<()>`)
+            // between the marker and the identifier.
+            while i < bytes.len() && !is_ident(bytes[i]) {
+                i += 1;
+            }
+            let start = i;
+            while i < bytes.len() && is_ident(bytes[i]) {
+                i += 1;
+            }
+            if i > start {
+                out.insert(haystack[start..i].to_string());
+            }
+            search_from = start.max(search_from + rel + marker.len());
+        }
+        out
+    }
+
+    fn is_ident(b: u8) -> bool {
+        b.is_ascii_alphanumeric() || b == b'_'
+    }
+
+    /// Command strings the Rust plugin invokes via `run_mobile_plugin`.
+    ///
+    /// Matches `run_mobile_plugin` optionally followed by a turbofish
+    /// (`::<()>`) and `(`, then the first string-literal argument.
+    fn rust_commands() -> BTreeSet<String> {
+        let src = read("src/mobile_mdns.rs");
+        let mut out = BTreeSet::new();
+        let marker = "run_mobile_plugin";
+        for (idx, _) in src.match_indices(marker) {
+            // Find the opening quote of the first argument, skipping an optional
+            // turbofish and the opening paren / whitespace / newlines.
+            let after = &src[idx + marker.len()..];
+            let Some(q) = after.find('"') else { continue };
+            // Guard: the string literal must be the *first* argument, i.e. only
+            // separators / turbofish / `(` may appear before the quote.
+            if after[..q]
+                .chars()
+                .any(|c| c.is_ascii_alphanumeric() && c != '(')
+            {
+                // Defensive: an alnum before the quote would mean we matched a
+                // different construct. `::<()>` contains no alnum, `(` is fine.
+                continue;
+            }
+            let name: String = after[q + 1..].chars().take_while(|&c| c != '"').collect();
+            if !name.is_empty() {
+                out.insert(name);
+            }
+        }
+        out
+    }
+
+    /// Handlers exposed by the Swift plugin: `@objc public func NAME(`.
+    fn swift_commands() -> BTreeSet<String> {
+        let src = read("ios/Sources/IrohHttpPlugin.swift");
+        names_after(&src, "@objc public func")
+    }
+
+    /// Handlers exposed by the Kotlin plugin: `@Command` on the line(s)
+    /// preceding a `fun NAME(`. `@Command` and `fun` may be separated by
+    /// whitespace / newlines (annotation on its own line).
+    fn kotlin_commands() -> BTreeSet<String> {
+        let src = read("android/src/main/java/com/iroh/http/IrohHttpPlugin.kt");
+        let bytes = src.as_bytes();
+        let mut out = BTreeSet::new();
+        for (idx, _) in src.match_indices("@Command") {
+            let rest = &src[idx + "@Command".len()..];
+            let Some(fpos) = rest.find("fun ") else {
+                continue;
+            };
+            // Only accept `fun` that belongs to this annotation: reject if
+            // another `@Command` appears between the annotation and the `fun`.
+            if rest[..fpos].contains("@Command") {
+                continue;
+            }
+            let mut i = idx + "@Command".len() + fpos + "fun ".len();
+            while i < bytes.len() && !is_ident(bytes[i]) {
+                i += 1;
+            }
+            let start = i;
+            while i < bytes.len() && is_ident(bytes[i]) {
+                i += 1;
+            }
+            if i > start {
+                out.insert(src[start..i].to_string());
+            }
+        }
+        out
+    }
+
+    /// Human-readable diff between two command sets.
+    fn diff(a: &BTreeSet<String>, b: &BTreeSet<String>) -> String {
+        let only_a: Vec<_> = a.difference(b).cloned().collect();
+        let only_b: Vec<_> = b.difference(a).cloned().collect();
+        format!("only in first: {only_a:?}; only in second: {only_b:?}")
+    }
+
+    #[test]
+    fn rust_and_swift_commands_match() {
+        let rust = rust_commands();
+        let swift = swift_commands();
+        assert!(
+            !rust.is_empty(),
+            "no run_mobile_plugin command strings found in src/mobile_mdns.rs \
+             — the scanner is broken, not the contract"
+        );
+        assert!(
+            !swift.is_empty(),
+            "no @objc handlers found in ios/Sources/IrohHttpPlugin.swift \
+             — the scanner is broken, not the contract"
+        );
+        assert_eq!(
+            rust,
+            swift,
+            "Rust ↔ Swift mobile command contract drift ({}). Every \
+             run_mobile_plugin(\"…\") string must have a matching \
+             `@objc public func` in ios/Sources/IrohHttpPlugin.swift, and \
+             vice-versa. See issue #333.",
+            diff(&rust, &swift)
+        );
+    }
+
+    #[test]
+    fn rust_and_kotlin_commands_match() {
+        let rust = rust_commands();
+        let kotlin = kotlin_commands();
+        assert!(
+            !rust.is_empty(),
+            "no run_mobile_plugin command strings found in src/mobile_mdns.rs \
+             — the scanner is broken, not the contract"
+        );
+        assert!(
+            !kotlin.is_empty(),
+            "no @Command handlers found in IrohHttpPlugin.kt \
+             — the scanner is broken, not the contract"
+        );
+        assert_eq!(
+            rust,
+            kotlin,
+            "Rust ↔ Kotlin mobile command contract drift ({}). Every \
+             run_mobile_plugin(\"…\") string must have a matching \
+             `@Command fun` in android/.../IrohHttpPlugin.kt, and vice-versa. \
+             See issue #333.",
+            diff(&rust, &kotlin)
+        );
+    }
+
+    #[test]
+    fn swift_and_kotlin_commands_match() {
+        // Transitively implied by the two tests above, but asserted directly so
+        // a native-only drift (Swift vs Kotlin) reports against the right pair.
+        let swift = swift_commands();
+        let kotlin = kotlin_commands();
+        assert_eq!(
+            swift,
+            kotlin,
+            "Swift ↔ Kotlin mobile command contract drift ({}). The two native \
+             plugins must expose the same handler set. See issue #333.",
+            diff(&swift, &kotlin)
+        );
+    }
+}

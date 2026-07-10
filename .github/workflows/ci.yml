@@ -211,6 +211,44 @@ jobs:
         run: cargo test -p iroh-http-core
       - name: cargo test (iroh-http-discovery)
         run: cargo test -p iroh-http-discovery
+      # ── Mobile FFI contract: compile the iOS Swift plugin sources ────────────
+      # Build-only (no simulator, no device, no Rust cross-compile). Compiles
+      # ios/Sources/IrohHttpPlugin.swift against the matching Tauri iOS API so a
+      # renamed/removed `@objc` handler or a signature drift on the native side
+      # of the Rust ↔ Swift FFI boundary fails here instead of only on-device.
+      # Folded into this existing macOS runner to avoid a second billed
+      # macOS job. See issue #333.
+      - name: Compile iOS Swift plugin (FFI contract, #333)
+        run: bash packages/iroh-http-tauri/scripts/ci-ios-swift-build.sh
+
+  # ── Mobile FFI contract: compile the Android Kotlin plugin sources ───────────
+  # Ubuntu (no macOS cost), build-only: no emulator, no NDK, no Rust
+  # cross-compile. Compiles android/.../IrohHttpPlugin.kt against the matching
+  # Tauri Android API so a renamed/removed `@Command` handler or a signature
+  # drift fails here instead of only on-device. See issue #333.
+  mobile-android:
+    name: Android Kotlin plugin compile
+    if: github.event_name == 'pull_request' || startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - name: Install Android SDK packages
+        # compileSdk: 34 (plugin) + 36 (tauri-android); build-tools 35.0.0 is
+        # AGP 8.11's default. Kept minimal — Kotlin compile needs no NDK.
+        run: |
+          sdkmanager "platforms;android-34" "platforms;android-36" "build-tools;35.0.0"
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.14.3'
+      - name: Compile Android Kotlin plugin (FFI contract, #333)
+        run: bash packages/iroh-http-tauri/scripts/ci-android-gradle-build.sh
 
   rust-check-windows:
     name: Rust check (Windows)
