@@ -237,10 +237,54 @@ must pass:
 10. Deno E2E tests
 11. Cross-runtime compliance (node↔deno via `tests/http-compliance/run.sh`)
 12. PR dependency review (`actions/dependency-review-action`)
+13. Mobile discovery FFI contract — string-parity test + native compile
+    (PR-gated; see below)
 
 See [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) for the full
 pipeline. Fuzz + sanitizer/miri hardening runs on a separate nightly schedule
 — see [`.github/workflows/fuzz.yml`](../.github/workflows/fuzz.yml).
+
+### Mobile discovery: what CI covers vs. manual on-device testing
+
+The Tauri plugin's mobile discovery commands cross a Rust ↔ Swift/Kotlin FFI
+boundary that is matched **by string at runtime** (`run_mobile_plugin("name")`
+in [`mobile_mdns.rs`](../packages/iroh-http-tauri/src/mobile_mdns.rs) dispatches
+to `@objc func name` in `IrohHttpPlugin.swift` and `@Command fun name` in
+`IrohHttpPlugin.kt`). CI closes the gap on the **contract/wiring**; the
+**behavior** still needs a device on a real LAN.
+
+**Covered by CI** (deterministic, no device — issue #333):
+
+| Check | Where | Runner |
+|-------|-------|--------|
+| String-parity of command names across Rust/Swift/Kotlin (both directions) | `cargo test` in the `verify` job (`tests::ffi_contract` in `packages/iroh-http-tauri/src/tests.rs`) | ubuntu |
+| iOS Swift plugin **compiles** against the Tauri iOS API | `Compile iOS Swift plugin` step, `rust-check-macos` job (`scripts/ci-ios-swift-build.sh`) | macOS |
+| Android Kotlin plugin **compiles** against the Tauri Android API | `mobile-android` job (`scripts/ci-android-gradle-build.sh`) | ubuntu |
+
+The parity test and both compile jobs are build-only: no simulator/emulator, no
+NDK, and no Rust mobile cross-compile — they materialize the Tauri mobile API
+that the crate's `Cargo.lock` already resolves and compile the native sources
+against it. The two compile jobs are gated to `pull_request` and tag builds
+(like the other macOS/Windows jobs), so a native contract break blocks merge.
+
+**NOT covered by CI — requires manual on-device verification** (tracked in
+issue #334): real multicast mDNS behavior over a LAN — advertise, browse,
+self-echo suppression, TXT/`pk` resolution, and endpoint-resolution timing.
+A green pipeline proves the symbols line up and the native sources build; it
+does **not** prove discovery works on a phone.
+
+To run the mobile contract checks locally:
+
+```sh
+# String-parity contract test (no toolchain beyond Rust):
+cargo test --manifest-path packages/iroh-http-tauri/Cargo.toml ffi_contract
+
+# iOS Swift compile (macOS + Xcode):
+bash packages/iroh-http-tauri/scripts/ci-ios-swift-build.sh
+
+# Android Kotlin compile (JDK 17 + Android SDK + Gradle):
+bash packages/iroh-http-tauri/scripts/ci-android-gradle-build.sh
+```
 
 ### Running compliance tests locally
 
