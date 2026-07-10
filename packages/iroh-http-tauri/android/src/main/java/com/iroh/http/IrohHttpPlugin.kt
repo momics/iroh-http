@@ -119,14 +119,15 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
     }
 
     private fun drainResolveQueue() {
-        val next: Pair<NsdServiceInfo, NsdManager.ResolveListener>?
-        synchronized(resolveQueue) {
-            next = resolveQueue.pollFirst()
-            if (next == null) {
-                resolveInProgress = false
-                return
+        val next: Pair<NsdServiceInfo, NsdManager.ResolveListener> =
+            synchronized(resolveQueue) {
+                val polled = resolveQueue.pollFirst()
+                if (polled == null) {
+                    resolveInProgress = false
+                    return
+                }
+                polled
             }
-        }
         val manager = nsd()
         if (manager == null) {
             drainResolveQueue()
