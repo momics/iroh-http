@@ -131,6 +131,29 @@ impl IrohEndpoint {
             }
         }
 
+        // Custom DNS nameservers. iroh's default resolver reads the system DNS
+        // config, but that is unavailable on some platforms (notably Android,
+        // which has no `/etc/resolv.conf` and needs a JNI-initialised
+        // `ndk_context`). When explicit nameservers are supplied, build a
+        // resolver from them so relay, pkarr, and DNS-discovery lookups resolve
+        // instead of timing out. Unparseable entries are skipped.
+        if !opts.discovery.dns_nameservers.is_empty() {
+            let mut resolver = iroh::dns::DnsResolver::builder();
+            let mut added = 0usize;
+            for ns in &opts.discovery.dns_nameservers {
+                if let Ok(ip) = ns.parse::<std::net::IpAddr>() {
+                    resolver = resolver.with_nameserver(
+                        std::net::SocketAddr::new(ip, 53),
+                        iroh::dns::DnsProtocol::Udp,
+                    );
+                    added += 1;
+                }
+            }
+            if added > 0 {
+                builder = builder.dns_resolver(resolver.build());
+            }
+        }
+
         if let Some(key_bytes) = opts.key {
             builder = builder.secret_key(SecretKey::from_bytes(&key_bytes));
         }

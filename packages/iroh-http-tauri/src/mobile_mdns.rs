@@ -92,6 +92,11 @@ struct AdvertiseStartResponse {
     advertise_id: u64,
 }
 
+#[derive(Deserialize)]
+struct DnsServersResponse {
+    servers: Vec<String>,
+}
+
 /// A single discovery event from the native layer.
 #[derive(Deserialize)]
 pub struct MobileDiscoveryEvent {
@@ -162,6 +167,19 @@ impl<R: Runtime> MobileMdns<R> {
         self.0
             .run_mobile_plugin::<()>("advertise_peer_stop", AdvertiseStopPayload { advertise_id })
             .map_err(|e| e.to_string())
+    }
+
+    /// Query the platform's active-network DNS nameservers (IP strings).
+    ///
+    /// iroh's default resolver can't read the system DNS config on Android, so
+    /// the native layer reads it (via `ConnectivityManager`/`LinkProperties`)
+    /// and returns the servers to configure iroh's resolver explicitly.
+    pub fn get_dns_servers(&self) -> Result<Vec<String>, String> {
+        let resp: DnsServersResponse = self
+            .0
+            .run_mobile_plugin("get_dns_servers", ())
+            .map_err(|e| e.to_string())?;
+        Ok(resp.servers)
     }
 }
 

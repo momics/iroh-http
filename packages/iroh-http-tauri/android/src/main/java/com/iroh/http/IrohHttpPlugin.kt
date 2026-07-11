@@ -2,6 +2,7 @@ package com.iroh.http
 
 import android.app.Activity
 import android.content.Context
+import android.net.ConnectivityManager
 import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
 import android.util.Log
@@ -97,6 +98,36 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
 
     private fun nsd(): NsdManager? =
         activity.getSystemService(Context.NSD_SERVICE) as? NsdManager
+
+    // ── DNS ───────────────────────────────────────────────────────────────────
+
+    /**
+     * Return the active network's configured DNS servers (IP strings).
+     *
+     * iroh's Rust DNS resolver cannot read Android's system DNS config (there is
+     * no `/etc/resolv.conf`; servers live in `LinkProperties`, reachable only
+     * via JNI/`ndk_context`). The Rust side calls this at endpoint creation and
+     * configures iroh's resolver with the returned servers so relay, pkarr, and
+     * DNS-discovery lookups resolve instead of timing out.
+     */
+    @Command
+    fun get_dns_servers(invoke: Invoke) {
+        val servers = JSONArray()
+        try {
+            val cm = activity.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+            val network = cm?.activeNetwork
+            val props = network?.let { cm.getLinkProperties(it) }
+            props?.dnsServers?.forEach { addr ->
+                val host = addr.hostAddress
+                if (!host.isNullOrEmpty()) servers.put(host)
+            }
+        } catch (e: Exception) {
+            Log.e("iroh-http-dns", "get_dns_servers failed: ${e.message}")
+        }
+        val ret = JSObject()
+        ret.put("servers", servers)
+        invoke.resolve(ret)
+    }
 
     // ── Resolve queue ────────────────────────────────────────────────────────
     //

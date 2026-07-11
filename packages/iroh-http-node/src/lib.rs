@@ -356,6 +356,7 @@ pub async fn create_endpoint(options: Option<JsNodeOptions>) -> napi::Result<JsE
                 discovery: DiscoveryOptions {
                     dns_server: o.dns_discovery,
                     enabled: o.dns_discovery_enabled.unwrap_or(true),
+                    dns_nameservers: Vec::new(),
                 },
                 pool: PoolOptions {
                     max_connections: o.max_pooled_connections.map(|v| v as usize),
