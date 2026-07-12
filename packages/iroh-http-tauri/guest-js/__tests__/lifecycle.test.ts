@@ -237,3 +237,75 @@ describe("installForegroundHealthCheck", () => {
     remove();
   });
 });
+
+describe("reconnect policy (#336)", () => {
+  function memoryStorage(): LifecycleStorage & { data: Map<string, string> } {
+    const data = new Map<string, string>();
+    return {
+      data,
+      getItem: (key) => data.get(key) ?? null,
+      setItem: (key, value) => {
+        data.set(key, value);
+      },
+      removeItem: (key) => {
+        data.delete(key);
+      },
+    };
+  }
+
+  it(
+    "restarts a running serve task cleanly when foreground health fails, " +
+      "leaving no half-running state",
+    async () => {
+      const storage = memoryStorage();
+      const cleanups: number[] = [];
+      const signals: AbortSignal[] = [];
+      let attempts = 0;
+
+      const serve = withLifecycle(
+        "server",
+        ({ signal }) => {
+          signals.push(signal);
+          attempts += 1;
+          const n = attempts;
+          return () => {
+            cleanups.push(n);
+          };
+        },
+        { storage },
+      );
+
+      await serve.start();
+      expect(serve.state).toBe("running");
+      expect(attempts).toBe(1);
+
+      // Foreground health probe reports the transport is dead; the reconnect
+      // policy tears the old run down and restarts it.
+      let recovery: Promise<void> = Promise.resolve();
+      const remove = installForegroundHealthCheck({
+        probe: () => Promise.resolve(false),
+        onUnhealthy: () => {
+          recovery = serve.restart("foreground-health-failed");
+        },
+        enabled: true,
+        maxRetries: 1,
+        backoffMs: () => 0,
+      });
+
+      document.dispatchEvent(new Event("visibilitychange"));
+      await flush();
+      await recovery;
+
+      // The first run was cleaned up and its signal aborted — nothing is left
+      // half-running — and a fresh run is active.
+      expect(cleanups).toContain(1);
+      expect(signals[0].aborted).toBe(true);
+      expect(attempts).toBe(2);
+      expect(signals[1].aborted).toBe(false);
+      expect(serve.state).toBe("running");
+
+      remove();
+      await serve.close();
+    },
+  );
+});
