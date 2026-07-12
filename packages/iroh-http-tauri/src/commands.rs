@@ -577,14 +577,6 @@ pub async fn fetch(args: RawFetchArgs) -> Result<FfiResponsePayload, String> {
         .req_body_handle
         .and_then(|h| ep.handles().claim_pending_reader(h));
 
-    // IROH346_DIAG: temporary greppable diagnostic of the raw direct addresses
-    // handed to the dialer, before parse. Revert once the on-device dial path
-    // is confirmed. This is where a bare, port-less address (#346) is rejected.
-    tracing::info!(
-        "IROH346_DIAG dial: node_id={} direct_addrs={:?}",
-        opts.node_id,
-        opts.direct_addrs,
-    );
     let addrs = parse_direct_addrs(&opts.direct_addrs)?;
     let timeout = opts.timeout_ms.map(std::time::Duration::from_millis);
     let max_response_body_bytes = opts.max_response_body_bytes;
@@ -1467,15 +1459,6 @@ pub fn advertise_peer<R: tauri::Runtime>(
     // (reconciled from `bound_sockets`), never port 0 — which is what made iOS
     // nodes undialable ("invalid socket address syntax" at the dialer).
     let address = primary_direct_addr(&ep);
-    // IROH346_DIAG: temporary greppable diagnostic — surfaces via iOS [stdout].
-    // Revert once the on-device advertise path is confirmed.
-    tracing::info!(
-        "IROH346_DIAG advertise: ip_addrs={:?} bound_sockets={:?} reconciled={:?} address={:?}",
-        ep.direct_addr_candidates(),
-        ep.bound_sockets(),
-        ep.direct_socket_addrs(),
-        address,
-    );
     state
         .advertise_peer_start(&service_name, &node_id, relay.as_deref(), address.as_deref())
         .map_err(|e| format_error_json("REFUSED", e))
@@ -1521,9 +1504,12 @@ fn local_routable_ip() -> Option<std::net::IpAddr> {
 
 /// Choose the primary direct address to advertise (#346), pure for testing.
 ///
-/// Returns the first routable reconciled address (real port, not loopback or
-/// unspecified); otherwise synthesises one from `fallback_ip` + `bound_port`.
-/// Returns `None` when neither yields a dialable address.
+/// Picks a routable IP (a reconciled address that is not loopback/unspecified,
+/// else `fallback_ip`) and pairs it with the **real bound QUIC port**. iOS
+/// enumerates `ip_addrs()` with a placeholder port (`:1`) while the true port
+/// lives in `bound_sockets()`, so `bound_port` is preferred; the routable
+/// reconciled address's own port is only a fallback when no bound port exists.
+/// Returns `None` when neither a routable IP nor a usable port can be found.
 #[cfg(any(mobile, test))]
 fn select_primary_direct_addr(
     reconciled: &[std::net::SocketAddr],
@@ -1533,15 +1519,16 @@ fn select_primary_direct_addr(
     let is_routable = |a: &std::net::SocketAddr| {
         a.port() != 0 && !a.ip().is_loopback() && !a.ip().is_unspecified()
     };
-    if let Some(a) = reconciled.iter().copied().find(|a| is_routable(a)) {
-        return Some(a);
-    }
-    match (fallback_ip, bound_port) {
-        (Some(ip), Some(port)) if port != 0 && !ip.is_loopback() && !ip.is_unspecified() => {
-            Some(std::net::SocketAddr::new(ip, port))
-        }
-        _ => None,
-    }
+    let routable = reconciled.iter().copied().find(is_routable);
+    let ip = routable.map(|a| a.ip()).or_else(|| {
+        fallback_ip.filter(|ip| !ip.is_loopback() && !ip.is_unspecified())
+    })?;
+    // Prefer the real bound QUIC port; the reconciled port (e.g. iOS `:1`) is
+    // only a last resort so a working advertisement is never dropped.
+    let port = bound_port
+        .filter(|p| *p != 0)
+        .or_else(|| routable.map(|a| a.port()))?;
+    Some(std::net::SocketAddr::new(ip, port))
 }
 
 /// Stop advertising this node on the local network.
@@ -2074,6 +2061,25 @@ mod primary_direct_addr_tests {
         let reconciled = vec![v4([192, 168, 50, 227], 62546)];
         let out = select_primary_direct_addr(&reconciled, Some(62546), None);
         assert_eq!(out, Some(v4([192, 168, 50, 227], 62546)));
+    }
+
+    #[test]
+    fn overrides_bogus_ip_addrs_port_with_real_bound_quic_port() {
+        // #346: iOS `ip_addrs()` reports a placeholder port (`:1`), while the
+        // real QUIC port lives in `bound_sockets()`. The advertised address must
+        // carry the real bound port, not the placeholder.
+        let reconciled = vec![v4([192, 168, 50, 227], 1)];
+        let out = select_primary_direct_addr(&reconciled, Some(62546), None);
+        assert_eq!(out, Some(v4([192, 168, 50, 227], 62546)));
+    }
+
+    #[test]
+    fn keeps_reconciled_port_when_no_bound_port_available() {
+        // Non-regression: without a bound port to prefer, fall back to the
+        // routable reconciled addr's own port rather than dropping the address.
+        let reconciled = vec![v4([192, 168, 50, 227], 1)];
+        let out = select_primary_direct_addr(&reconciled, None, None);
+        assert_eq!(out, Some(v4([192, 168, 50, 227], 1)));
     }
 
     #[test]

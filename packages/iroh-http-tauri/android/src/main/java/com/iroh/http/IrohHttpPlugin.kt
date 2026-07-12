@@ -448,12 +448,6 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
                         if (!hostAddr.isNullOrEmpty() && resolved.port > 0) {
                             addrs.put(formatSocketAddr(hostAddr, resolved.port))
                         }
-                        // IROH346_DIAG: temporary greppable diagnostic. Revert
-                        // once the on-device browse/dial path is confirmed.
-                        Log.d(
-                            "IROH346_DIAG",
-                            "dnssd browse resolved name=$name host=$hostAddr port=${resolved.port} txt=$txt addrs=$addrs",
-                        )
 
                         val record = JSObject()
                         record.put("isActive", true)
