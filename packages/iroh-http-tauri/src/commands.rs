@@ -1474,9 +1474,12 @@ fn local_routable_ip() -> Option<std::net::IpAddr> {
 
 /// Choose the primary direct address to advertise (#346), pure for testing.
 ///
-/// Returns the first routable reconciled address (real port, not loopback or
-/// unspecified); otherwise synthesises one from `fallback_ip` + `bound_port`.
-/// Returns `None` when neither yields a dialable address.
+/// Picks a routable IP (a reconciled address that is not loopback/unspecified,
+/// else `fallback_ip`) and pairs it with the **real bound QUIC port**. iOS
+/// enumerates `ip_addrs()` with a placeholder port (`:1`) while the true port
+/// lives in `bound_sockets()`, so `bound_port` is preferred; the routable
+/// reconciled address's own port is only a fallback when no bound port exists.
+/// Returns `None` when neither a routable IP nor a usable port can be found.
 #[cfg(any(mobile, test))]
 fn select_primary_direct_addr(
     reconciled: &[std::net::SocketAddr],
@@ -1486,15 +1489,16 @@ fn select_primary_direct_addr(
     let is_routable = |a: &std::net::SocketAddr| {
         a.port() != 0 && !a.ip().is_loopback() && !a.ip().is_unspecified()
     };
-    if let Some(a) = reconciled.iter().copied().find(|a| is_routable(a)) {
-        return Some(a);
-    }
-    match (fallback_ip, bound_port) {
-        (Some(ip), Some(port)) if port != 0 && !ip.is_loopback() && !ip.is_unspecified() => {
-            Some(std::net::SocketAddr::new(ip, port))
-        }
-        _ => None,
-    }
+    let routable = reconciled.iter().copied().find(is_routable);
+    let ip = routable.map(|a| a.ip()).or_else(|| {
+        fallback_ip.filter(|ip| !ip.is_loopback() && !ip.is_unspecified())
+    })?;
+    // Prefer the real bound QUIC port; the reconciled port (e.g. iOS `:1`) is
+    // only a last resort so a working advertisement is never dropped.
+    let port = bound_port
+        .filter(|p| *p != 0)
+        .or_else(|| routable.map(|a| a.port()))?;
+    Some(std::net::SocketAddr::new(ip, port))
 }
 
 /// Stop advertising this node on the local network.
