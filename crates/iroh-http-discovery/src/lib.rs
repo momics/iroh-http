@@ -219,6 +219,26 @@ pub async fn browse_peers(
 
 // ── iroh-http advertise (specialization of dns_sd::advertise) ────────────────
 
+/// Select a dialable `ip:<port>` address to advertise from the endpoint's
+/// direct addresses.
+///
+/// Picks the first routable IP (skipping loopback and unspecified addresses)
+/// and pairs it with `bound_port` — the endpoint's real bound QUIC port — since
+/// the ports reported by `ip_addrs()` can be placeholders (`:0`/`:1`) rather
+/// than the socket the endpoint actually listens on (#346). Returns `None` when
+/// no routable address is available (e.g. loopback-only), in which case no
+/// `address` TXT is published and peers fall back to relay/SRV.
+///
+/// Interface ranking (preferring the LAN subnet of the browsing peer over a
+/// VPN/egress NIC) is tracked separately in #348.
+fn select_advertise_address(ip_addrs: &[SocketAddr], bound_port: u16) -> Option<String> {
+    ip_addrs
+        .iter()
+        .map(SocketAddr::ip)
+        .find(|ip| !ip.is_loopback() && !ip.is_unspecified())
+        .map(|ip| SocketAddr::new(ip, bound_port).to_string())
+}
+
 /// Start advertising this node on the local network via DNS-SD.
 ///
 /// Publishes `_<service_name>._udp.local` with the instance name and `pk` TXT
@@ -243,11 +263,19 @@ pub fn advertise_peer(
         .ok_or_else(|| DiscoveryError::Setup("endpoint has no bound socket".into()))?;
 
     let node_addr = ep.addr();
-    let addrs: Vec<IpAddr> = node_addr.ip_addrs().map(|s| s.ip()).collect();
+    let socket_addrs: Vec<SocketAddr> = node_addr.ip_addrs().copied().collect();
+    let addrs: Vec<IpAddr> = socket_addrs.iter().map(SocketAddr::ip).collect();
 
     let mut txt: Vec<(String, String)> = vec![(TXT_PK.to_string(), instance.clone())];
     if let Some(relay) = node_addr.relay_urls().next() {
         txt.push((TXT_RELAY.to_string(), relay.to_string()));
+    }
+    // #350 review W1: publish a dialable `ip:<bound QUIC port>` so mobile
+    // browsers — which read only the `address`/`relay` TXT and never resolve
+    // this record's SRV/A — can direct-dial this node over the LAN instead of
+    // falling back to relay-only.
+    if let Some(address) = select_advertise_address(&socket_addrs, port) {
+        txt.push((TXT_ADDRESS.to_string(), address));
     }
 
     dns_sd::advertise(ServiceConfig {
@@ -400,5 +428,38 @@ mod tests {
         assert!(!ev.is_active);
         assert_eq!(ev.node_id, "gone");
         assert!(ev.addrs.is_empty());
+    }
+
+    #[test]
+    fn select_advertise_address_pairs_routable_ip_with_bound_port() {
+        // Regression: #350 review W1 — a desktop advertiser must publish a
+        // dialable `ip:<bound QUIC port>` in the `address` TXT so mobile
+        // browsers (iOS NWBrowser can't resolve SRV/A at all; Android
+        // browse_peers reads only the `address`/`relay` attrs) can direct-dial
+        // it over the LAN instead of falling back to relay-only.
+        let ip_addrs = vec![
+            "127.0.0.1:1".parse().unwrap(),
+            "192.168.1.42:1".parse().unwrap(),
+        ];
+        let addr = select_advertise_address(&ip_addrs, 59234)
+            .expect("a routable address must be selected");
+        assert_eq!(addr, "192.168.1.42:59234");
+    }
+
+    #[test]
+    fn select_advertise_address_skips_loopback_and_unspecified() {
+        let ip_addrs = vec![
+            "127.0.0.1:5000".parse().unwrap(),
+            "0.0.0.0:5000".parse().unwrap(),
+            "[::1]:5000".parse().unwrap(),
+        ];
+        assert_eq!(select_advertise_address(&ip_addrs, 59234), None);
+    }
+
+    #[test]
+    fn select_advertise_address_brackets_ipv6() {
+        let ip_addrs = vec!["[2001:db8::1]:1".parse().unwrap()];
+        let addr = select_advertise_address(&ip_addrs, 443).expect("address");
+        assert_eq!(addr, "[2001:db8::1]:443");
     }
 }
