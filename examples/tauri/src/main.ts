@@ -1201,9 +1201,18 @@ interface TestPeer {
     gridBody.append(tr);
   }
 
-  // The compliance corpus, minus JSON comment entries.
+  // The compliance corpus, minus JSON comment entries and skip-annotated
+  // cases (documented known-limitations). Matches the canonical filter used by
+  // every other runner (deno compliance, run-node, clients): `c.id && !c.skip`.
+  // Without the `!c.skip` guard the Test tab ran skip-marked cases
+  // (header-empty-value, path-dot-segments) and mis-reported them as failures.
   // deno-lint-ignore no-explicit-any
-  const allCases = (complianceCases as any[]).filter((c) => c && c.id);
+  const allCases = (complianceCases as any[]).filter((c) => c && c.id && !c.skip);
+
+  // Documented known-limitations, surfaced in the summary for transparency so
+  // the pass/fail counts stay honest instead of silently shrinking the corpus.
+  // deno-lint-ignore no-explicit-any
+  const skippedCases = (complianceCases as any[]).filter((c) => c && c.id && c.skip);
 
   // Case 0: self/loopback baseline (ADR-015) to isolate transport vs platform.
   const selfLoopbackCase = {
@@ -1258,11 +1267,13 @@ interface TestPeer {
 
     const passed = rows.filter((r) => r.ok).length;
     const failed = rows.length - passed;
+    const skipped = skippedCases.length;
+    const skipSuffix = skipped > 0 ? ` (${skipped} skipped)` : "";
     setStatus(
       runSummary,
       failed > 0
-        ? `✗ ${failed} failed, ${passed} passed`
-        : `✓ all ${passed} passed`,
+        ? `✗ ${failed} failed, ${passed} passed${skipSuffix}`
+        : `✓ all ${passed} passed${skipSuffix}`,
       failed > 0 ? "error" : "ok",
     );
 
@@ -1273,7 +1284,14 @@ interface TestPeer {
       direction: "outbound",
       self: { publicKey: selfId, platform: selfPlatform },
       target: { publicKey: target.nodeId, platform: target.platform },
-      summary: { total: rows.length, passed, failed },
+      summary: {
+        total: rows.length,
+        passed,
+        failed,
+        skipped,
+        // deno-lint-ignore no-explicit-any
+        skippedIds: skippedCases.map((c: any) => c.id),
+      },
       cases: rows,
     };
     const json = JSON.stringify(report, null, 2);
