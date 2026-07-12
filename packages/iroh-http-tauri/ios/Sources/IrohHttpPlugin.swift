@@ -203,11 +203,14 @@ class IrohHttpPlugin: Plugin {
         browser.stateUpdateHandler = { [weak self] state in
             if case .failed(let error) = state {
                 if case .dns(let code) = error, code == -65569 {
-                    browser.cancel()
-                    self?.queue.async { self?.browseSessions.removeValue(forKey: browseId) }
+                    // Expected on duplicate/teardown; not worth logging.
                 } else {
                     NSLog("[iroh-http-mdns] browse \(browseId) failed: \(error.localizedDescription)")
                 }
+                // #350 review L4: on any terminal failure cancel and drop the
+                // session so it doesn't leak in the map.
+                browser.cancel()
+                self?.queue.async { self?.browseSessions.removeValue(forKey: browseId) }
             }
         }
 
@@ -347,11 +350,14 @@ class IrohHttpPlugin: Plugin {
         listener.stateUpdateHandler = { [weak self] state in
             if case .failed(let error) = state {
                 if case .dns(let code) = error, code == -65569 {
-                    listener.cancel()
-                    self?.queue.async { self?.advertiseSessions.removeValue(forKey: advertiseId) }
+                    // Expected on duplicate/teardown; not worth logging.
                 } else {
                     NSLog("[iroh-http-mdns] advertise \(advertiseId) failed: \(error.localizedDescription)")
                 }
+                // #350 review L4: on any terminal failure cancel and drop the
+                // session so it doesn't leak in the map.
+                listener.cancel()
+                self?.queue.async { self?.advertiseSessions.removeValue(forKey: advertiseId) }
             }
         }
 
@@ -401,11 +407,14 @@ class IrohHttpPlugin: Plugin {
         browser.stateUpdateHandler = { [weak self] state in
             if case .failed(let error) = state {
                 if case .dns(let code) = error, code == -65569 {
-                    browser.cancel()
-                    self?.queue.async { self?.dnsSdBrowseSessions.removeValue(forKey: browseId) }
+                    // Expected on duplicate/teardown; not worth logging.
                 } else {
                     NSLog("[iroh-http-dnssd] browse \(browseId) failed: \(error.localizedDescription)")
                 }
+                // #350 review L4: on any terminal failure cancel and drop the
+                // session so it doesn't leak in the map.
+                browser.cancel()
+                self?.queue.async { self?.dnsSdBrowseSessions.removeValue(forKey: browseId) }
             }
         }
 
@@ -534,11 +543,14 @@ class IrohHttpPlugin: Plugin {
         listener.stateUpdateHandler = { [weak self] state in
             if case .failed(let error) = state {
                 if case .dns(let code) = error, code == -65569 {
-                    listener.cancel()
-                    self?.queue.async { self?.advertiseSessions.removeValue(forKey: advertiseId) }
+                    // Expected on duplicate/teardown; not worth logging.
                 } else {
                     NSLog("[iroh-http-dnssd] advertise \(advertiseId) failed: \(error.localizedDescription)")
                 }
+                // #350 review L4: on any terminal failure cancel and drop the
+                // session so it doesn't leak in the map.
+                listener.cancel()
+                self?.queue.async { self?.advertiseSessions.removeValue(forKey: advertiseId) }
             }
         }
 

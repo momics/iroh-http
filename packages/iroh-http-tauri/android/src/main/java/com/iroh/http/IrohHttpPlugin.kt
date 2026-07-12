@@ -195,6 +195,9 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
         val listener = object : NsdManager.DiscoveryListener {
             override fun onStartDiscoveryFailed(serviceType: String, errorCode: Int) {
                 Log.e("iroh-http-mdns", "browse $browseId start failed: $errorCode")
+                // #350 review L4: drop the session so a failed browse doesn't
+                // leak in the map.
+                browseMap.remove(browseId)
             }
             override fun onStopDiscoveryFailed(serviceType: String, errorCode: Int) {}
             override fun onDiscoveryStarted(serviceType: String) {}
@@ -343,6 +346,9 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
             override fun onServiceRegistered(serviceInfo: NsdServiceInfo) {}
             override fun onRegistrationFailed(serviceInfo: NsdServiceInfo, errorCode: Int) {
                 Log.e("iroh-http-mdns", "advertise $advertiseId failed: $errorCode")
+                // #350 review L4: drop the session so a failed advertise doesn't
+                // leak in the map.
+                advertiseMap.remove(advertiseId)
             }
             override fun onServiceUnregistered(serviceInfo: NsdServiceInfo) {}
             override fun onUnregistrationFailed(serviceInfo: NsdServiceInfo, errorCode: Int) {}
@@ -398,6 +404,9 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
         val listener = object : NsdManager.DiscoveryListener {
             override fun onStartDiscoveryFailed(serviceType: String, errorCode: Int) {
                 Log.e("iroh-http-dnssd", "browse $browseId start failed: $errorCode")
+                // #350 review L4: drop the session so a failed browse doesn't
+                // leak in the map.
+                dnsSdBrowseMap.remove(browseId)
             }
             override fun onStopDiscoveryFailed(serviceType: String, errorCode: Int) {}
             override fun onDiscoveryStarted(serviceType: String) {}
@@ -534,6 +543,9 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
             override fun onServiceRegistered(serviceInfo: NsdServiceInfo) {}
             override fun onRegistrationFailed(serviceInfo: NsdServiceInfo, errorCode: Int) {
                 Log.e("iroh-http-dnssd", "advertise $advertiseId failed: $errorCode")
+                // #350 review L4: drop the session so a failed advertise doesn't
+                // leak in the map.
+                advertiseMap.remove(advertiseId)
             }
             override fun onServiceUnregistered(serviceInfo: NsdServiceInfo) {}
             override fun onUnregistrationFailed(serviceInfo: NsdServiceInfo, errorCode: Int) {}
