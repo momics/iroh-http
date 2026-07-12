@@ -371,7 +371,10 @@ describe("serve restart cycles", () => {
     const node = await createNode({ disableNetworking: true });
 
     const controller = new AbortController();
-    const handle = node.serve({ signal: controller.signal }, () => new Response("ok"));
+    const handle = node.serve(
+      { signal: controller.signal },
+      () => new Response("ok"),
+    );
 
     // Flush microtasks: `serve` has been invoked but is still pending.
     await new Promise((r) => setTimeout(r, 0));
@@ -416,7 +419,9 @@ describe("serve restart cycles", () => {
 
     // A fourth serve() must still be allowed (guard fully reset every cycle).
     const controller = new AbortController();
-    expect(() => node.serve({ signal: controller.signal }, () => new Response("ok")))
+    expect(() =>
+      node.serve({ signal: controller.signal }, () => new Response("ok"))
+    )
       .not.toThrow();
     controller.abort();
   });

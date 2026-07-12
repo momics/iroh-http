@@ -2569,6 +2569,7 @@ dependencies = [
  "mdns-sd",
  "n0-future",
  "tokio",
+ "tracing",
 ]
 
 [[package]]

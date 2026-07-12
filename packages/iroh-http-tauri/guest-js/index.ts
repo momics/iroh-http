@@ -800,9 +800,8 @@ export function _createAdapterForTesting(epHandle: number): IrohAdapter {
 }
 
 export {
-  installForegroundHealthCheck,
   type ForegroundHealthCheckOptions,
-  withLifecycle,
+  installForegroundHealthCheck,
   type LifecycleContext,
   type LifecycleHandle,
   type LifecycleOptions,
@@ -810,6 +809,7 @@ export {
   type LifecycleStartReason,
   type LifecycleState,
   type LifecycleStorage,
+  withLifecycle,
 } from "./lifecycle.js";
 export {
   asIrohPeer,

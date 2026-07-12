@@ -319,7 +319,17 @@ export async function runCasesAgainstPeer(
     onCaseResult?: (result: any) => void;
   } = {},
   // deno-lint-ignore no-explicit-any
-): Promise<{ results: any[]; summary: { total: number; passed: number; failed: number; durationMs: number } }> {
+): Promise<
+  {
+    results: any[];
+    summary: {
+      total: number;
+      passed: number;
+      failed: number;
+      durationMs: number;
+    };
+  }
+> {
   const activeCases = opts.filter
     ? cases.filter((c) => opts.filter!.includes(c.id))
     : cases;

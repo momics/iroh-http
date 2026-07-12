@@ -159,8 +159,10 @@ export async function runCases(opts) {
         } else if (concurrency > 1 || repeatCount > 1) {
           // ── Concurrent / repeated requests ────────────────────────────
           const settled = await Promise.all(
-            Array.from({ length: totalRuns }, () =>
-              runSingleRequest(tc.request)),
+            Array.from(
+              { length: totalRuns },
+              () => runSingleRequest(tc.request),
+            ),
           );
           const bodies = [];
           for (let j = 0; j < settled.length; j++) {

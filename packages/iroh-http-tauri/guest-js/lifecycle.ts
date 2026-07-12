@@ -80,7 +80,9 @@ const RUNNING_VALUE = "running";
 
 export function withLifecycle(
   id: string,
-  run: (ctx: LifecycleContext) => LifecycleResource | Promise<LifecycleResource>,
+  run: (
+    ctx: LifecycleContext,
+  ) => LifecycleResource | Promise<LifecycleResource>,
   options: LifecycleOptions = {},
 ): LifecycleHandle {
   const lifecycleId = id.trim();
@@ -91,8 +93,9 @@ export function withLifecycle(
   const storage = options.storage === undefined
     ? defaultStorage()
     : options.storage;
-  const storageKey =
-    `${options.storagePrefix ?? DEFAULT_STORAGE_PREFIX}:${lifecycleId}`;
+  const storageKey = `${
+    options.storagePrefix ?? DEFAULT_STORAGE_PREFIX
+  }:${lifecycleId}`;
   const restoreOnVisible = options.restoreOnVisible ?? true;
 
   let state: LifecycleState = "stopped";
@@ -239,7 +242,9 @@ export function withLifecycle(
 
   const visibilityHandler = (): void => {
     if (!restoreOnVisible || disposed) return;
-    if (typeof document !== "undefined" && document.visibilityState !== "visible") {
+    if (
+      typeof document !== "undefined" && document.visibilityState !== "visible"
+    ) {
       return;
     }
     if (!shouldRestore()) return;
@@ -322,7 +327,9 @@ export function installForegroundHealthCheck(
 
   let running = false;
   const handler = async (): Promise<void> => {
-    if (typeof document !== "undefined" && document.visibilityState !== "visible") {
+    if (
+      typeof document !== "undefined" && document.visibilityState !== "visible"
+    ) {
       return;
     }
     // Coalesce overlapping foreground events into a single probe sweep.

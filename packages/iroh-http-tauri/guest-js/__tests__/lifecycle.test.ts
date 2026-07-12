@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   installForegroundHealthCheck,
-  withLifecycle,
   type LifecycleStorage,
+  withLifecycle,
 } from "../lifecycle.ts";
 
 /** Flush a few microtask + macrotask turns so async handlers settle. */

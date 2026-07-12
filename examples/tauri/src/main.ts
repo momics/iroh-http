@@ -1136,7 +1136,7 @@ interface TestPeer {
           renderPeers();
           refreshRunEnabled();
         }
-      } catch {/* aborted */}
+      } catch { /* aborted */ }
     })();
 
     refreshRunEnabled();
@@ -1207,12 +1207,16 @@ interface TestPeer {
   // Without the `!c.skip` guard the Test tab ran skip-marked cases
   // (header-empty-value, path-dot-segments) and mis-reported them as failures.
   // deno-lint-ignore no-explicit-any
-  const allCases = (complianceCases as any[]).filter((c) => c && c.id && !c.skip);
+  const allCases = (complianceCases as any[]).filter((c) =>
+    c && c.id && !c.skip
+  );
 
   // Documented known-limitations, surfaced in the summary for transparency so
   // the pass/fail counts stay honest instead of silently shrinking the corpus.
   // deno-lint-ignore no-explicit-any
-  const skippedCases = (complianceCases as any[]).filter((c) => c && c.id && c.skip);
+  const skippedCases = (complianceCases as any[]).filter((c) =>
+    c && c.id && c.skip
+  );
 
   // Case 0: self/loopback baseline (ADR-015) to isolate transport vs platform.
   const selfLoopbackCase = {
@@ -1354,7 +1358,9 @@ interface TestPeer {
 
   // ── Criterion 2: browsePeers() isActive transitions ────────────────────────
   {
-    const btn = document.querySelector<HTMLButtonElement>("#check-isactive-btn");
+    const btn = document.querySelector<HTMLButtonElement>(
+      "#check-isactive-btn",
+    );
     const log = document.querySelector<HTMLElement>("#check-isactive-log");
     const status = document.querySelector<HTMLElement>(
       "#check-isactive-status",
