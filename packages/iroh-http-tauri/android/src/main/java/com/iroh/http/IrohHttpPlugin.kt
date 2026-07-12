@@ -76,8 +76,14 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
         val manager: NsdManager,
         val listener: NsdManager.DiscoveryListener,
         val pendingEvents: MutableList<JSObject> = mutableListOf(),
-        val knownNodes: ConcurrentHashMap<String, String> = ConcurrentHashMap()
+        // fullServiceName → snapshot. Keyed by a signature of (nodeId + sorted
+        // dialable addrs) so a peer that rebinds to a new address under the SAME
+        // nodeId (the iOS foreground-restart-rebind case, #336) re-emits instead
+        // of being suppressed by a nodeId-only dedup (#350 review M2).
+        val knownNodes: ConcurrentHashMap<String, PeerSnapshot> = ConcurrentHashMap()
     )
+
+    private data class PeerSnapshot(val nodeId: String, val signature: String)
 
     private data class AdvertiseSession(
         val id: Long,
@@ -213,9 +219,6 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
                         }
 
                         val key = resolved.serviceName
-                        if (session.knownNodes[key] == nodeId) return
-
-                        session.knownNodes[key] = nodeId
                         val addrs = JSONArray()
                         // #346: a direct `ip:port` address published by the
                         // advertiser lets this peer be dialed over the LAN. It
@@ -237,6 +240,16 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
                             if (relay.isNotEmpty()) addrs.put(relay)
                         }
 
+                        // #350 review M2: dedup on (nodeId + sorted addrs) so a
+                        // rebind under the same nodeId re-emits with the new
+                        // address instead of being suppressed.
+                        val sortedAddrs = (0 until addrs.length())
+                            .map { addrs.getString(it) }
+                            .sorted()
+                        val signature = "$nodeId|${sortedAddrs.joinToString(",")}"
+                        if (session.knownNodes[key]?.signature == signature) return
+                        session.knownNodes[key] = PeerSnapshot(nodeId, signature)
+
                         val event = JSObject()
                         event.put("type", "discovered")
                         event.put("nodeId", nodeId)
@@ -250,10 +263,10 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
 
             override fun onServiceLost(serviceInfo: NsdServiceInfo) {
                 val session = browseMap[browseId] ?: return
-                val pk = session.knownNodes.remove(serviceInfo.serviceName) ?: return
+                val snapshot = session.knownNodes.remove(serviceInfo.serviceName) ?: return
                 val event = JSObject()
                 event.put("type", "expired")
-                event.put("nodeId", pk)
+                event.put("nodeId", snapshot.nodeId)
                 event.put("addrs", JSONArray())
                 synchronized(session.pendingEvents) { session.pendingEvents.add(event) }
             }
