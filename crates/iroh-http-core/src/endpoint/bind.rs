@@ -146,7 +146,7 @@ impl IrohEndpoint {
                         std::net::SocketAddr::new(ip, 53),
                         iroh::dns::DnsProtocol::Udp,
                     );
-                    added += 1;
+                    added = added.saturating_add(1);
                 }
             }
             if added > 0 {
