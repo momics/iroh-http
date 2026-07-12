@@ -724,6 +724,16 @@ export async function createNode(options?: NodeOptions): Promise<IrohNode> {
 }
 
 export type { IrohNode, NodeOptions };
+
+/**
+ * Test-only: construct a bare {@link TauriAdapter} for a fake endpoint handle so
+ * the guest-js body-encoding path (`sendChunk`) can be exercised at the FFI
+ * boundary without a real Rust backend. Not part of the public API.
+ * @internal
+ */
+export function _createAdapterForTesting(epHandle: number): IrohAdapter {
+  return new TauriAdapter(epHandle);
+}
 export {
   asIrohPeer,
   IROH_HTTP_SERVICE,
