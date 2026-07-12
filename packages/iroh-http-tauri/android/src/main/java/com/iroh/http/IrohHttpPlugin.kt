@@ -165,11 +165,28 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
             return
         }
         val (serviceInfo, listener) = next
+        // #334: greppable trace of the serialized resolve queue. `depth` is the
+        // number of resolves still queued behind this one — proof that
+        // concurrent resolves are serialized rather than dropped with
+        // FAILURE_ALREADY_ACTIVE.
+        val depth = synchronized(resolveQueue) { resolveQueue.size }
+        Log.d(
+            "IROH_DNSSD_CHECK",
+            "resolve dequeue instance=${serviceInfo.serviceName} depth=$depth",
+        )
         val wrapped = object : NsdManager.ResolveListener {
             override fun onServiceResolved(resolved: NsdServiceInfo) {
+                Log.d(
+                    "IROH_DNSSD_CHECK",
+                    "resolve ok instance=${resolved.serviceName} port=${resolved.port}",
+                )
                 try { listener.onServiceResolved(resolved) } finally { drainResolveQueue() }
             }
             override fun onResolveFailed(serviceInfo: NsdServiceInfo, errorCode: Int) {
+                Log.d(
+                    "IROH_DNSSD_CHECK",
+                    "resolve fail instance=${serviceInfo.serviceName} errorCode=$errorCode",
+                )
                 try { listener.onResolveFailed(serviceInfo, errorCode) } finally { drainResolveQueue() }
             }
         }

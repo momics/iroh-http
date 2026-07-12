@@ -421,7 +421,15 @@ class IrohHttpPlugin: Plugin {
 
             let snapshot = DnsSdRecordSnapshot(txt: txt, addrs: addrs)
             if session.knownInstances[name] == snapshot { continue }
+            let isReemit = session.knownInstances[name] != nil
             session.knownInstances[name] = snapshot
+            // #334: greppable trace of the re-emit dedup. A known instance whose
+            // TXT/addrs changed re-surfaces here (`event=reemit`) instead of
+            // being suppressed forever by a one-shot Set. `rev` mirrors the
+            // example app's mutate counter when present.
+            NSLog(
+                "IROH_DNSSD_CHECK reemit instance=\(name) event=\(isReemit ? "reemit" : "new") rev=\(txt["rev"] ?? "-")"
+            )
 
             session.pendingRecords.append([
                 "isActive": true,

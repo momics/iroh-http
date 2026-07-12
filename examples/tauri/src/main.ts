@@ -43,6 +43,25 @@ function setStatus(
   el.className = kind ? `status ${kind}` : "status";
 }
 
+// Stable, greppable structured log prefix for the on-device DNS-SD checks
+// (#334). Lines reach `adb logcat` / iOS device logs via the webview→tracing
+// wiring, and are mirrored into a visible <pre> so the operator can read them
+// without a cable. Format: `IROH_DNSSD_CHECK <k>=<v> …`. Keep it single-line and
+// space-separated so it stays trivially greppable.
+const IROH_DNSSD_CHECK = "IROH_DNSSD_CHECK";
+
+function dnssdCheck(
+  logEl: HTMLElement | null,
+  fields: Record<string, string | number | boolean>,
+): void {
+  const line = `${IROH_DNSSD_CHECK} ` +
+    Object.entries(fields)
+      .map(([k, v]) => `${k}=${v}`)
+      .join(" ");
+  console.log(line);
+  if (logEl) appendLog(logEl, line);
+}
+
 function toHex(bytes: Uint8Array): string {
   return Array.from(bytes)
     .map((b) => b.toString(16).padStart(2, "0"))
@@ -747,6 +766,18 @@ genericBrowseBtn.addEventListener("click", async () => {
         .join(", ");
       const peer = asIrohPeer(record);
       const tag = peer ? `  (iroh peer ${peer.nodeId.slice(0, 12)}…)` : "";
+      // Greppable line for criterion 5 — on iOS a generic browse surfaces
+      // metadata only, so expect `port=0 host=undefined`; on Android/desktop
+      // these resolve to real values.
+      dnssdCheck(null, {
+        check: "generic",
+        role: "browse",
+        instance: record.instanceName,
+        port: record.port,
+        host: record.host ?? "undefined",
+        addrs: record.addrs.length,
+        isActive: record.isActive,
+      });
       appendLog(
         genericLog,
         `${icon} ${record.instanceName} :${record.port}${tag}` +
@@ -1262,4 +1293,313 @@ interface TestPeer {
 
   renderPeers();
   refreshRunEnabled();
+}
+
+// ── DNS-SD device checks (#334) ──────────────────────────────────────────────
+//
+// Opt-in, dev-only affordances that drive the DNS-SD behaviours which can only
+// be exercised on real iOS/Android hardware and are therefore not covered by
+// any CI job:
+//
+//   • isActive transitions of `browsePeers()` (criterion 2)
+//   • Android's serialized resolve queue under a multi-service burst
+//     (criterion 3) — validates `enqueueResolve`/`drainResolveQueue`
+//   • iOS re-emit when a known instance's TXT changes (criterion 4) —
+//     validates the `[String: DnsSdRecordSnapshot]` dedup
+//
+// Every control emits stable `IROH_DNSSD_CHECK …` lines (see `dnssdCheck`) that
+// the operator greps in `adb logcat` / iOS device logs. All are inert until the
+// operator presses Start, manage their own AbortControllers, and are
+// force-stopped on page teardown so nothing outlives the webview.
+{
+  const checkPlatform = detectPlatform();
+
+  // Distinct per-app-launch tag so instance names don't collide across the two
+  // devices in a pair (both may run the same card).
+  const advTag = Math.random().toString(36).slice(2, 8);
+
+  const PEERS_SERVICE = "iroh-http";
+  const BURST_SERVICE = "iroh-http-burst";
+  const MUTATE_SERVICE = "iroh-http-mutate";
+
+  const teardowns: Array<() => void> = [];
+  const registerTeardown = (fn: () => void) => teardowns.push(fn);
+  const forceStopAll = () => {
+    for (const fn of teardowns.splice(0)) {
+      try {
+        fn();
+      } catch { /* best-effort */ }
+    }
+  };
+  globalThis.addEventListener("pagehide", forceStopAll);
+  globalThis.addEventListener("beforeunload", forceStopAll);
+
+  // ── Criterion 2: browsePeers() isActive transitions ────────────────────────
+  {
+    const btn = document.querySelector<HTMLButtonElement>("#check-isactive-btn");
+    const log = document.querySelector<HTMLElement>("#check-isactive-log");
+    const status = document.querySelector<HTMLElement>(
+      "#check-isactive-status",
+    );
+    if (btn && log && status) {
+      let abort: AbortController | null = null;
+      registerTeardown(() => abort?.abort());
+
+      btn.addEventListener("click", async () => {
+        if (abort) {
+          abort.abort();
+          abort = null;
+          btn.textContent = "Start isActive watch";
+          setStatus(status, "Stopped");
+          return;
+        }
+        abort = new AbortController();
+        btn.textContent = "Stop isActive watch";
+        setStatus(status, `Watching browsePeers("${PEERS_SERVICE}")…`, "ok");
+        log.textContent = "";
+        dnssdCheck(log, {
+          check: "peers",
+          role: "browse",
+          event: "start",
+          service: PEERS_SERVICE,
+          platform: checkPlatform,
+        });
+        try {
+          for await (
+            const ev of node.browsePeers({
+              serviceName: PEERS_SERVICE,
+              signal: abort.signal,
+            })
+          ) {
+            dnssdCheck(log, {
+              check: "peers",
+              role: "browse",
+              isActive: ev.isActive,
+              nodeId: ev.nodeId.slice(0, 16),
+              addrs: ev.addrs.length,
+            });
+          }
+        } catch { /* aborted */ }
+        abort = null;
+        btn.textContent = "Start isActive watch";
+        setStatus(status, "Done");
+      });
+    }
+  }
+
+  // ── Criterion 3: Android resolve-queue burst ───────────────────────────────
+  {
+    const advBtn = document.querySelector<HTMLButtonElement>(
+      "#check-burst-advertise-btn",
+    );
+    const browseBtn = document.querySelector<HTMLButtonElement>(
+      "#check-burst-browse-btn",
+    );
+    const countInput = document.querySelector<HTMLInputElement>(
+      "#check-burst-count",
+    );
+    const status = document.querySelector<HTMLElement>("#check-burst-status");
+    const log = document.querySelector<HTMLElement>("#check-burst-log");
+
+    if (advBtn && browseBtn && countInput && status && log) {
+      let advAbort: AbortController | null = null;
+      let browseAbort: AbortController | null = null;
+      registerTeardown(() => advAbort?.abort());
+      registerTeardown(() => browseAbort?.abort());
+
+      advBtn.addEventListener("click", () => {
+        if (advAbort) {
+          advAbort.abort();
+          advAbort = null;
+          advBtn.textContent = "Burst advertise";
+          setStatus(status, "Advertise stopped");
+          return;
+        }
+        const n = Math.max(1, Math.min(50, Number(countInput.value) || 5));
+        advAbort = new AbortController();
+        advBtn.textContent = "Stop advertise";
+        setStatus(status, `Advertising ${n} services simultaneously…`, "ok");
+        dnssdCheck(log, {
+          check: "burst",
+          role: "advertise",
+          count: n,
+          tag: advTag,
+          service: BURST_SERVICE,
+        });
+        // Fire all N advertisements at once so a browsing device must resolve
+        // several records that appear together — the exact contention the
+        // Android resolve queue must serialize.
+        for (let i = 0; i < n; i++) {
+          void node.advertise({
+            serviceName: BURST_SERVICE,
+            instanceName: `burst-${advTag}-${i}`,
+            port: 1,
+            protocol: "udp",
+            txt: { burst: "1", i: String(i), tag: advTag },
+            signal: advAbort.signal,
+          }).catch(() => {/* aborted or error */});
+        }
+      });
+
+      browseBtn.addEventListener("click", async () => {
+        if (browseAbort) {
+          browseAbort.abort();
+          browseAbort = null;
+          browseBtn.textContent = "Browse burst";
+          return;
+        }
+        browseAbort = new AbortController();
+        browseBtn.textContent = "Stop browse";
+        log.textContent = "";
+        const seen = new Set<string>();
+        dnssdCheck(log, {
+          check: "burst",
+          role: "browse",
+          event: "start",
+          service: BURST_SERVICE,
+          platform: checkPlatform,
+        });
+        try {
+          for await (
+            const rec of node.browse({
+              serviceName: BURST_SERVICE,
+              protocol: "udp",
+              signal: browseAbort.signal,
+            })
+          ) {
+            if (rec.txt.burst !== "1") continue;
+            if (rec.isActive) seen.add(rec.instanceName);
+            else seen.delete(rec.instanceName);
+            // `resolved` is the running distinct-instance count. On a healthy
+            // Android resolve queue it reaches the advertiser's N with ZERO
+            // dropped records (criterion 3).
+            dnssdCheck(log, {
+              check: "burst",
+              role: "browse",
+              instance: rec.instanceName,
+              isActive: rec.isActive,
+              resolved: seen.size,
+            });
+          }
+        } catch { /* aborted */ }
+        browseAbort = null;
+        browseBtn.textContent = "Browse burst";
+      });
+    }
+  }
+
+  // ── Criterion 4: iOS re-emit on TXT change of a known instance ─────────────
+  {
+    const advBtn = document.querySelector<HTMLButtonElement>(
+      "#check-mutate-advertise-btn",
+    );
+    const mutateBtn = document.querySelector<HTMLButtonElement>(
+      "#check-mutate-btn",
+    );
+    const browseBtn = document.querySelector<HTMLButtonElement>(
+      "#check-mutate-browse-btn",
+    );
+    const status = document.querySelector<HTMLElement>("#check-mutate-status");
+    const log = document.querySelector<HTMLElement>("#check-mutate-log");
+
+    if (advBtn && mutateBtn && browseBtn && status && log) {
+      const instanceName = `mutate-${advTag}`;
+      let advAbort: AbortController | null = null;
+      let browseAbort: AbortController | null = null;
+      let rev = 0;
+      registerTeardown(() => advAbort?.abort());
+      registerTeardown(() => browseAbort?.abort());
+
+      // (Re)advertise the single mutable instance with the current `rev`. iOS
+      // dedups on a TXT+addrs snapshot (port is always 0 there), so the TXT
+      // `rev` bump is what must force a re-emit — a port-only change would be
+      // invisible on iOS. We toggle the port too, which additionally exercises
+      // Android's SRV re-resolve.
+      const advertiseCurrent = () => {
+        advAbort?.abort();
+        advAbort = new AbortController();
+        void node.advertise({
+          serviceName: MUTATE_SERVICE,
+          instanceName,
+          port: 1 + (rev % 2),
+          protocol: "udp",
+          txt: { mutate: "1", rev: String(rev), tag: advTag },
+          signal: advAbort.signal,
+        }).catch(() => {/* aborted or error */});
+        dnssdCheck(log, {
+          check: "mutate",
+          role: "advertise",
+          instance: instanceName,
+          rev,
+          port: 1 + (rev % 2),
+        });
+      };
+
+      advBtn.addEventListener("click", () => {
+        if (advAbort) {
+          advAbort.abort();
+          advAbort = null;
+          advBtn.textContent = "Advertise mutable";
+          mutateBtn.disabled = true;
+          setStatus(status, "Advertise stopped");
+          return;
+        }
+        rev = 0;
+        advertiseCurrent();
+        advBtn.textContent = "Stop advertise";
+        mutateBtn.disabled = false;
+        setStatus(status, `Advertising "${instanceName}" (rev 0)`, "ok");
+      });
+
+      mutateBtn.addEventListener("click", () => {
+        if (!advAbort) return;
+        rev += 1;
+        advertiseCurrent();
+        setStatus(status, `Mutated → rev ${rev}`, "ok");
+      });
+
+      browseBtn.addEventListener("click", async () => {
+        if (browseAbort) {
+          browseAbort.abort();
+          browseAbort = null;
+          browseBtn.textContent = "Browse mutations";
+          return;
+        }
+        browseAbort = new AbortController();
+        browseBtn.textContent = "Stop browse";
+        log.textContent = "";
+        dnssdCheck(log, {
+          check: "mutate",
+          role: "browse",
+          event: "start",
+          service: MUTATE_SERVICE,
+          platform: checkPlatform,
+        });
+        try {
+          for await (
+            const rec of node.browse({
+              serviceName: MUTATE_SERVICE,
+              protocol: "udp",
+              signal: browseAbort.signal,
+            })
+          ) {
+            if (rec.txt.mutate !== "1") continue;
+            // Each mutate on the advertiser must produce a fresh browse line
+            // here with the new `rev` (criterion 4). If iOS suppressed the
+            // re-emit, `rev` would stay pinned at its first-seen value.
+            dnssdCheck(log, {
+              check: "mutate",
+              role: "browse",
+              instance: rec.instanceName,
+              rev: rec.txt.rev ?? "?",
+              port: rec.port,
+              isActive: rec.isActive,
+            });
+          }
+        } catch { /* aborted */ }
+        browseAbort = null;
+        browseBtn.textContent = "Browse mutations";
+      });
+    }
+  }
 }

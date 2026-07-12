@@ -395,6 +395,70 @@
           </div>
           <pre id="test-json-log" class="log"></pre>
         </section>
+
+        <section class="card">
+          <h2>DNS-SD device checks (#334)</h2>
+          <p class="hint">
+            Dev-only affordances for the mobile-native discovery behaviours no CI
+            job can exercise. Each control emits greppable
+            <code>IROH_DNSSD_CHECK …</code> lines to the console (→
+            <code>adb logcat</code> / iOS device logs) and mirrors them below.
+            Inert until you press Start; force-stopped on page teardown. See the
+            <code>docs/internals/dns-sd-device-verification.md</code> runbook.
+          </p>
+        </section>
+
+        <section class="card">
+          <h3>browsePeers() isActive transitions <span class="hint">— criterion 2</span></h3>
+          <p class="hint">
+            Watches <code>node.browsePeers("iroh-http")</code>. Expect
+            <code>isActive=true</code> when a peer starts advertising and
+            <code>isActive=false</code> when it stops / expires.
+          </p>
+          <div class="input-row">
+            <button id="check-isactive-btn">Start isActive watch</button>
+            <span id="check-isactive-status" class="status"></span>
+          </div>
+          <pre id="check-isactive-log" class="log"></pre>
+        </section>
+
+        <section class="card">
+          <h3>Android resolve-queue burst <span class="hint">— criterion 3</span></h3>
+          <p class="hint">
+            <strong>Advertise</strong> fires N services at once from this device;
+            <strong>Browse</strong> on the Android device under test should reach
+            <code>resolved=N</code> with ZERO dropped records, validating the
+            serialized resolve queue.
+          </p>
+          <div class="input-row">
+            <label>Count
+              <input id="check-burst-count" type="number" min="1" max="50" value="5" />
+            </label>
+            <button id="check-burst-advertise-btn">Burst advertise</button>
+            <button id="check-burst-browse-btn" class="btn-secondary">Browse burst</button>
+            <span id="check-burst-status" class="status"></span>
+          </div>
+          <pre id="check-burst-log" class="log"></pre>
+        </section>
+
+        <section class="card">
+          <h3>iOS re-emit on TXT change <span class="hint">— criterion 4</span></h3>
+          <p class="hint">
+            <strong>Advertise mutable</strong> publishes one instance;
+            <strong>Mutate</strong> bumps its TXT <code>rev</code> (and port).
+            <strong>Browse</strong> on the iOS device under test must log a fresh
+            line with each new <code>rev</code> — if it stays pinned, iOS
+            suppressed the re-emit. (Port-only changes are invisible on iOS, so
+            the TXT bump is the real trigger.)
+          </p>
+          <div class="input-row">
+            <button id="check-mutate-advertise-btn">Advertise mutable</button>
+            <button id="check-mutate-btn" disabled>Mutate</button>
+            <button id="check-mutate-browse-btn" class="btn-secondary">Browse mutations</button>
+            <span id="check-mutate-status" class="status"></span>
+          </div>
+          <pre id="check-mutate-log" class="log"></pre>
+        </section>
       </div>
     </main>
   </body>
