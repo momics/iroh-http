@@ -1460,7 +1460,12 @@ pub fn advertise_peer<R: tauri::Runtime>(
     // nodes undialable ("invalid socket address syntax" at the dialer).
     let address = primary_direct_addr(&ep);
     state
-        .advertise_peer_start(&service_name, &node_id, relay.as_deref(), address.as_deref())
+        .advertise_peer_start(
+            &service_name,
+            &node_id,
+            relay.as_deref(),
+            address.as_deref(),
+        )
         .map_err(|e| format_error_json("REFUSED", e))
 }
 
@@ -1520,9 +1525,9 @@ fn select_primary_direct_addr(
         a.port() != 0 && !a.ip().is_loopback() && !a.ip().is_unspecified()
     };
     let routable = reconciled.iter().copied().find(is_routable);
-    let ip = routable.map(|a| a.ip()).or_else(|| {
-        fallback_ip.filter(|ip| !ip.is_loopback() && !ip.is_unspecified())
-    })?;
+    let ip = routable
+        .map(|a| a.ip())
+        .or_else(|| fallback_ip.filter(|ip| !ip.is_loopback() && !ip.is_unspecified()))?;
     // Prefer the real bound QUIC port; the reconciled port (e.g. iOS `:1`) is
     // only a last resort so a working advertisement is never dropped.
     let port = bound_port
@@ -2107,7 +2112,10 @@ mod primary_direct_addr_tests {
     fn returns_none_without_a_bound_port() {
         let reconciled: Vec<SocketAddr> = vec![];
         let fallback = Some(IpAddr::V4(Ipv4Addr::new(192, 168, 50, 227)));
-        assert_eq!(select_primary_direct_addr(&reconciled, None, fallback), None);
+        assert_eq!(
+            select_primary_direct_addr(&reconciled, None, fallback),
+            None
+        );
     }
 
     #[test]

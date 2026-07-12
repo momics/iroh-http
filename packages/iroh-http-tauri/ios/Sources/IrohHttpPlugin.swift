@@ -107,14 +107,23 @@ class IrohHttpPlugin: Plugin {
 
     // MARK: - Helpers
 
+    /// Allocate a unique browse id.
+    ///
+    /// The increment runs on `queue` so concurrent browse/advertise commands
+    /// (which arrive on arbitrary threads) can't tear it and hand out a
+    /// duplicate id that would overwrite a live session (#350 review W4).
     private func allocBrowseId() -> UInt64 {
-        defer { nextBrowseId += 1 }
-        return nextBrowseId
+        queue.sync {
+            defer { nextBrowseId += 1 }
+            return nextBrowseId
+        }
     }
 
     private func allocAdvertiseId() -> UInt64 {
-        defer { nextAdvertiseId += 1 }
-        return nextAdvertiseId
+        queue.sync {
+            defer { nextAdvertiseId += 1 }
+            return nextAdvertiseId
+        }
     }
 
     /// Decode a flat DNS-SD TXT record byte blob into key-value pairs.

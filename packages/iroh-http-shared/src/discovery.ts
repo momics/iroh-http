@@ -153,6 +153,18 @@ export function isDialableSocketAddr(s: string): boolean {
 }
 
 /**
+ * Whether `s` looks like a relay URL rather than a direct socket address.
+ *
+ * Relay URLs (`https://relay.example`) are valid dialing input — a peer behind
+ * NAT or off the LAN is only reachable via its home relay — but they are not
+ * `ip:port` and must bypass {@link isDialableSocketAddr}. Kept deliberately
+ * permissive: anything with an `http(s)` (or `relay`) scheme is a relay.
+ */
+export function isRelayUrl(s: string): boolean {
+  return /^(https?|relay):\/\//i.test(s);
+}
+
+/**
  * Interpret a generic {@link ServiceRecord} as an iroh-http {@link DiscoveredPeer}.
  *
  * Reads the peer's public key from the `pk` TXT property, falling back to the
@@ -164,6 +176,10 @@ export function isDialableSocketAddr(s: string): boolean {
  * port-less hosts (an iOS A-record resolves to a portless IP) and `:0`
  * addresses are dropped so they can never fail `parse_direct_addrs` and poison
  * the whole list.
+ *
+ * Relay URLs are preserved (the `relay` TXT entry and any relay-scheme entry in
+ * `addrs`) so an off-LAN / NAT'd peer stays reachable via its home relay —
+ * the `ip:port` hardening applies only to direct addresses (#350 review W3).
  */
 export function asIrohPeer(record: ServiceRecord): DiscoveredPeer | null {
   const nodeId = record.txt[TXT_KEY_PUBLIC_KEY] ?? record.instanceName;
@@ -171,10 +187,13 @@ export function asIrohPeer(record: ServiceRecord): DiscoveredPeer | null {
 
   const addrs: string[] = [];
   const push = (a: string | undefined) => {
-    if (a && isDialableSocketAddr(a) && !addrs.includes(a)) addrs.push(a);
+    if (!a || addrs.includes(a)) return;
+    // Relay URLs are dialable but are not `ip:port`; keep them verbatim.
+    if (isRelayUrl(a) || isDialableSocketAddr(a)) addrs.push(a);
   };
 
   push(record.txt[TXT_KEY_ADDRESS]);
+  push(record.txt[TXT_KEY_RELAY]);
   for (const a of record.addrs) push(a);
 
   return { nodeId, addrs, isActive: record.isActive };
