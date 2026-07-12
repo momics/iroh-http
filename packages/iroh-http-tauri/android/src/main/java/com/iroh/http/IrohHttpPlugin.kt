@@ -92,7 +92,12 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
         val listener: NsdManager.DiscoveryListener,
         val serviceType: String,
         val pendingRecords: MutableList<JSObject> = mutableListOf(),
-        val knownInstances: MutableSet<String> = java.util.Collections.synchronizedSet(mutableSetOf())
+        // name → snapshot signature (txt + addrs). A Map, not a Set, so a later
+        // TXT/addr change (peer rebinds to a new port, re-advertises a new
+        // `address`) re-emits instead of being suppressed forever — parity with
+        // the iOS DnsSdBrowseSession snapshot (#350 review W2).
+        val knownInstances: MutableMap<String, String> =
+            java.util.Collections.synchronizedMap(mutableMapOf())
     )
 
     private val browseMap = ConcurrentHashMap<Long, BrowseSession>()
@@ -218,6 +223,14 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
                         resolved.attributes["address"]?.let { b ->
                             val address = String(b)
                             if (address.isNotEmpty()) addrs.put(address)
+                        }
+                        // #350 review W1: fall back to the resolved SRV host:port
+                        // (as browse_start does) so a desktop advertiser — whose
+                        // real QUIC port rides in the SRV record, not an `address`
+                        // TXT — is still direct-dialable over the LAN.
+                        val hostAddr = resolved.host?.hostAddress
+                        if (!hostAddr.isNullOrEmpty() && resolved.port > 0) {
+                            addrs.put(formatSocketAddr(hostAddr, resolved.port))
                         }
                         resolved.attributes["relay"]?.let { b ->
                             val relay = String(b)
@@ -382,7 +395,6 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
                 enqueueResolve(serviceInfo, object : NsdManager.ResolveListener {
                     override fun onServiceResolved(resolved: NsdServiceInfo) {
                         val name = resolved.serviceName
-                        if (!session.knownInstances.add(name)) return
 
                         val txt = JSObject()
                         resolved.attributes?.forEach { (k, v) ->
@@ -400,6 +412,20 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
                         if (!hostAddr.isNullOrEmpty() && resolved.port > 0) {
                             addrs.put(formatSocketAddr(hostAddr, resolved.port))
                         }
+
+                        // #350 review W2: re-emit only when the record actually
+                        // changed. A stable signature over the sorted TXT and the
+                        // resolved addrs lets a rebind/re-advertise surface again.
+                        val signature = buildString {
+                            resolved.attributes?.toSortedMap()?.forEach { (k, v) ->
+                                append(k).append('=')
+                                append(if (v != null) String(v) else "")
+                                append(';')
+                            }
+                            append('|')
+                            for (i in 0 until addrs.length()) append(addrs.getString(i)).append(',')
+                        }
+                        if (session.knownInstances.put(name, signature) == signature) return
 
                         val record = JSObject()
                         record.put("isActive", true)
@@ -419,7 +445,7 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
             override fun onServiceLost(serviceInfo: NsdServiceInfo) {
                 val session = dnsSdBrowseMap[browseId] ?: return
                 val name = serviceInfo.serviceName
-                if (!session.knownInstances.remove(name)) return
+                if (session.knownInstances.remove(name) == null) return
                 val record = JSObject()
                 record.put("isActive", false)
                 record.put("serviceType", session.serviceType)
