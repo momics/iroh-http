@@ -530,6 +530,20 @@ class IrohHttpPlugin: Plugin {
         }
         invoke.resolve()
     }
+
+    /// Query the platform's active-network DNS nameservers.
+    ///
+    /// This exists to feed iroh's resolver on Android, where iroh cannot read
+    /// the system DNS config (no `/etc/resolv.conf`; servers live in
+    /// `LinkProperties`). iOS has no such gap — iroh's default resolver reads
+    /// the system configuration fine — and the public SDK deliberately does not
+    /// expose the active resolvers. So this returns an empty list, which the
+    /// Rust side (`commands.rs`) treats as "fall back to iroh's default
+    /// resolver". Present so the Swift↔Kotlin FFI command surface stays in
+    /// parity (see the `ffi_contract` test).
+    @objc public func get_dns_servers(_ invoke: Invoke) throws {
+        invoke.resolve(["servers": [] as [String]])
+    }
 }
 
 // MARK: - Entry point
