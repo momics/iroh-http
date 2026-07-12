@@ -275,6 +275,153 @@ describe("error propagation", () => {
   });
 });
 
+// ── serve / stop / serve cycles on one node (issue #336 follow-up) ───────────
+
+describe("serve restart cycles", () => {
+  beforeEach(() => {
+    mockWindows("main");
+  });
+
+  /**
+   * Build a `mockIPC` handler that faithfully models the Rust serve lifecycle
+   * for `serve` / `stop_serve` / `wait_serve_stop`:
+   *
+   * - `serve` registers a NEW loop whose done-signal starts `false`. Like the
+   *   real Tokio command, `set_serve_handle` runs a macrotask *after* the JS
+   *   `invoke("serve")` call returns — so the registration is deferred.
+   * - `stop_serve` flips the current loop's done-signal to `true`.
+   * - `wait_serve_stop` captures whatever loop is registered *at call time* and
+   *   resolves when that loop's done-signal is `true` (immediately if already
+   *   `true`). This is the crux: the previous cycle's loop stays latched `true`,
+   *   so a `wait_serve_stop` that runs before the current cycle's `serve`
+   *   registered its loop reads the STALE `true` and resolves early.
+   */
+  function makeServeLifecycleIPC() {
+    type Loop = { done: boolean; notify: (() => void) | null };
+    let current: Loop | null = null;
+
+    return (cmd: string): unknown => {
+      switch (cmd) {
+        case "plugin:iroh-http|create_endpoint":
+          return {
+            endpointHandle: 1,
+            nodeId: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          };
+        case "plugin:iroh-http|wait_endpoint_closed":
+          return new Promise(() => {});
+        case "plugin:iroh-http|serve":
+          // Defer registration by a macrotask, mirroring the Rust command's
+          // async dispatch: `set_serve_handle` has NOT run when this invoke
+          // resolves-to-callers-synchronously in the buggy ordering.
+          return new Promise<null>((resolve) => {
+            setTimeout(() => {
+              current = { done: false, notify: null };
+              resolve(null);
+            }, 0);
+          });
+        case "plugin:iroh-http|stop_serve": {
+          const loop = current;
+          if (loop) {
+            loop.done = true;
+            loop.notify?.();
+          }
+          return null;
+        }
+        case "plugin:iroh-http|wait_serve_stop": {
+          const loop = current;
+          if (!loop || loop.done) return Promise.resolve(null);
+          return new Promise<null>((resolve) => {
+            loop.notify = () => resolve(null);
+          });
+        }
+        default:
+          return null;
+      }
+    };
+  }
+
+  it("does not issue wait_serve_stop until serve has resolved (correlates the loop-done wait to this cycle — #336 follow-up)", async () => {
+    const order: string[] = [];
+    let resolveServe: (() => void) | null = null;
+
+    mockIPC((cmd) => {
+      order.push(cmd);
+      switch (cmd) {
+        case "plugin:iroh-http|create_endpoint":
+          return {
+            endpointHandle: 1,
+            nodeId: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          };
+        case "plugin:iroh-http|wait_endpoint_closed":
+          return new Promise(() => {});
+        case "plugin:iroh-http|serve":
+          // Hold `serve` pending: on the Rust side this command runs
+          // `set_serve_handle`, which installs THIS cycle's loop-done signal.
+          return new Promise<null>((resolve) => {
+            resolveServe = () => resolve(null);
+          });
+        case "plugin:iroh-http|wait_serve_stop":
+          return Promise.resolve(null);
+        default:
+          return null;
+      }
+    });
+
+    const { createNode } = await import("../index.ts");
+    const node = await createNode({ disableNetworking: true });
+
+    const controller = new AbortController();
+    const handle = node.serve({ signal: controller.signal }, () => new Response("ok"));
+
+    // Flush microtasks: `serve` has been invoked but is still pending.
+    await new Promise((r) => setTimeout(r, 0));
+    expect(order).toContain("plugin:iroh-http|serve");
+    // The bug: issuing wait_serve_stop now (before serve resolved) makes it
+    // latch the PREVIOUS cycle's already-`true` done signal on the Rust side,
+    // so the loop-done promise resolves against the wrong serve loop. It must
+    // wait until `serve` (set_serve_handle) has resolved.
+    expect(order).not.toContain("plugin:iroh-http|wait_serve_stop");
+
+    // Resolve `serve` (set_serve_handle done) → wait_serve_stop may now fire.
+    resolveServe?.();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(order).toContain("plugin:iroh-http|wait_serve_stop");
+
+    controller.abort();
+    await handle.finished;
+  });
+
+  it("allows serve() → stop → serve() → stop → serve() on the same node", async () => {
+    mockIPC(makeServeLifecycleIPC());
+
+    const { createNode } = await import("../index.ts");
+    const node = await createNode({ disableNetworking: true });
+
+    // Three full serve/stop cycles on the same node — mirrors the device repro
+    // (Test server → stop → HTTP server → stop → Test server). Before the fix,
+    // the third serve() threw "serve() is already running on this node."
+    for (let cycle = 0; cycle < 3; cycle++) {
+      const controller = new AbortController();
+      const handle = node.serve(
+        { signal: controller.signal },
+        () => new Response("ok"),
+      );
+      // Let the deferred `serve` registration + wait_serve_stop wiring settle.
+      await new Promise((r) => setTimeout(r, 0));
+      controller.abort();
+      await handle.finished;
+      // Give the guard-reset microtask a turn.
+      await new Promise((r) => setTimeout(r, 0));
+    }
+
+    // A fourth serve() must still be allowed (guard fully reset every cycle).
+    const controller = new AbortController();
+    expect(() => node.serve({ signal: controller.signal }, () => new Response("ok")))
+      .not.toThrow();
+    controller.abort();
+  });
+});
+
 // ── path-change subscription parity (#314) ──────────────────────────────────
 
 describe("path-change subscription", () => {

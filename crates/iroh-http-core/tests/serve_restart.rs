@@ -167,3 +167,71 @@ async fn restarting_serve_replaces_stale_loop() {
         );
     }
 }
+
+/// Every graceful `stop_serve()` must let `wait_serve_stop()` resolve, for
+/// arbitrarily many serve/stop cycles on the SAME endpoint. Regression for the
+/// iOS "serve() is already running" bug: the JS `serveRunning` guard only
+/// clears once `wait_serve_stop()` (the loop-done signal) resolves, so if a
+/// later cycle's done signal never fires the next `serve()` throws.
+#[tokio::test]
+async fn wait_serve_stop_resolves_every_cycle() {
+    let (server_ep, client_ep) = common::make_pair().await;
+    let server_id = common::node_id(&server_ep);
+    let addrs = common::server_addrs(&server_ep);
+
+    for cycle in 0..4 {
+        serve_router(&server_ep);
+        assert_eq!(
+            fetch_status(&client_ep, &server_id, &addrs, "/status/503").await,
+            503,
+            "cycle {cycle}: routed 503 must work while serving",
+        );
+
+        server_ep.stop_serve();
+        tokio::time::timeout(Duration::from_secs(5), server_ep.wait_serve_stop())
+            .await
+            .unwrap_or_else(|_| {
+                panic!(
+                    "cycle {cycle}: wait_serve_stop() must resolve after stop_serve() \
+                     — a stuck done signal is what leaves the JS guard set and makes \
+                     the next serve() throw \"already running\""
+                )
+            });
+    }
+}
+
+/// `wait_serve_stop()` must not resolve against a *previous* cycle's done
+/// signal. The Tauri adapter issues `serve` and `wait_serve_stop` as two
+/// separate, unordered IPC calls: `wait_serve_stop` for cycle N can land before
+/// cycle N's `serve` registers its handle, so it would read the still-`true`
+/// done signal from cycle N-1 and resolve immediately — resolving the JS
+/// `finished`/`loopDone` promise while the new loop is actually still running.
+/// A correct implementation waits for the *current* serve loop to stop.
+#[tokio::test]
+async fn wait_serve_stop_ignores_stale_done_signal() {
+    let (server_ep, _client_ep) = common::make_pair().await;
+
+    // ── Cycle A: serve then fully stop so the done signal latches `true`. ────
+    serve_router(&server_ep);
+    server_ep.stop_serve();
+    tokio::time::timeout(Duration::from_secs(5), server_ep.wait_serve_stop())
+        .await
+        .expect("cycle A: wait_serve_stop should resolve");
+
+    // ── Cycle B: start a new loop, then wait. wait_serve_stop must block on
+    //    the NEW loop, not return instantly off cycle A's stale `true`. ──────
+    serve_router(&server_ep);
+    let waited = tokio::time::timeout(Duration::from_millis(400), server_ep.wait_serve_stop()).await;
+    assert!(
+        waited.is_err(),
+        "wait_serve_stop resolved while the current serve loop is still running \
+         — it latched a stale previous-cycle done signal (this prematurely \
+         resolves the JS finished/loopDone promise and corrupts the serve guard)",
+    );
+
+    // Cleanup: stop the live loop and confirm it now resolves.
+    server_ep.stop_serve();
+    tokio::time::timeout(Duration::from_secs(5), server_ep.wait_serve_stop())
+        .await
+        .expect("cycle B: wait_serve_stop should resolve after stop_serve");
+}
