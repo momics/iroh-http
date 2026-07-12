@@ -54,6 +54,26 @@ impl IrohEndpoint {
     /// the napi async setup), the handle is immediately shut down so the
     /// serve loop drains without a second `stop_serve()` call.
     pub fn set_serve_handle(&self, handle: crate::http::server::ServeHandle) {
+        // #336: an endpoint has at most one active serve loop. If serve() is
+        // restarted without an explicit stop_serve() first — e.g. the iOS
+        // foreground recovery path re-serves after the app returns to the
+        // foreground — the previously stored ServeHandle would just be dropped.
+        // ServeHandle has no Drop, so the old accept loop keeps running and
+        // competes with the new one for `ep.accept()`. Incoming requests then
+        // land on the stale loop's handler and get its old response (the
+        // "half-live serve answers a blanket 200 instead of the routed status"
+        // symptom). Shut the previous loop down so only the new one accepts.
+        let previous = self
+            .inner
+            .session
+            .serve_handle
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        if let Some(prev) = previous {
+            prev.shutdown_and_close();
+        }
+
         // Clear the early-stop flag and check if it was set.
         let was_stopped = self
             .inner

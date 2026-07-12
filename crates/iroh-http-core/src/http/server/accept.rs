@@ -48,6 +48,8 @@ pub(super) async fn accept_loop<S>(
     svc: S,
     on_connection_event: Option<ConnectionEventFn>,
     shutdown_listen: Arc<tokio::sync::Notify>,
+    close_flag: Arc<std::sync::atomic::AtomicBool>,
+    close_connections: Arc<tokio::sync::Notify>,
     done_tx: tokio::sync::watch::Sender<bool>,
 ) where
     S: Service<
@@ -205,6 +207,9 @@ pub(super) async fn accept_loop<S>(
         // means "no request timeout configured" → unbounded head read.
         let header_read_timeout = stack_cfg.timeout;
 
+        let close_flag_conn = close_flag.clone();
+        let close_conns_conn = close_connections.clone();
+
         tokio::spawn(async move {
             // Owns the per-peer count, total-connection counter, and
             // connect/disconnect event firing for this connection's
@@ -220,9 +225,25 @@ pub(super) async fn accept_loop<S>(
             };
 
             loop {
-                let (send, recv) = match conn.accept_bi().await {
-                    Ok(pair) => pair,
-                    Err(_) => break,
+                // #336: when the serve loop is replaced on the same endpoint,
+                // force this connection closed so the peer redials and lands on
+                // the new loop instead of being served stale responses over a
+                // pooled connection.
+                if close_flag_conn.load(Ordering::Acquire) {
+                    conn.close(0u32.into(), b"serve loop replaced");
+                    break;
+                }
+
+                let accepted = tokio::select! {
+                    biased;
+                    _ = close_conns_conn.notified() => None,
+                    bi = conn.accept_bi() => Some(bi),
+                };
+                let (send, recv) = match accepted {
+                    // Close signal woke us; re-check the flag at the loop top.
+                    None => continue,
+                    Some(Ok(pair)) => pair,
+                    Some(Err(_)) => break,
                 };
 
                 let io = TokioIo::new(IrohStream::new(send, recv));
