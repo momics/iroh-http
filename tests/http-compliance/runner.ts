@@ -17,6 +17,9 @@
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
+// @ts-ignore — .mjs sibling from the shared test suite (pure WHATWG).
+import { runCases } from "./harness.mjs";
+
 /** A single compliance test case as stored in cases.json. */
 export interface ComplianceCase {
   id: string;
@@ -285,4 +288,49 @@ export async function runCompliance(
   }
 
   return result;
+}
+
+// ── Remote-peer mode (cross-device harness) ────────────────────────────────────
+
+/**
+ * Run the compliance suite against an **already-serving remote peer** — the
+ * cross-device path used by the on-device Test tab. Unlike {@link runCompliance},
+ * this does not create nodes or start a server: the caller supplies a connected
+ * client and the target peer's node id (the peer must already be serving the
+ * compliance handler). Execution and assertions are delegated to the shared
+ * {@link runCases} harness so every runtime exercises the identical logic.
+ *
+ * @param client     A node exposing `fetch(url, init)` (e.g. `IrohNode`).
+ * @param serverId   The remote peer's node id (base32 public key).
+ * @param cases      Cases to run.
+ * @param opts       Optional filter, direct-address hint, and per-request timeout.
+ */
+export async function runCasesAgainstPeer(
+  // deno-lint-ignore no-explicit-any
+  client: { fetch: (url: string, init: any) => Promise<Response> },
+  serverId: string,
+  cases: ComplianceCase[],
+  opts: {
+    filter?: string[];
+    directAddrs?: string[];
+    timeout?: number;
+    bail?: boolean;
+    // deno-lint-ignore no-explicit-any
+    onCaseResult?: (result: any) => void;
+  } = {},
+  // deno-lint-ignore no-explicit-any
+): Promise<{ results: any[]; summary: { total: number; passed: number; failed: number; durationMs: number } }> {
+  const activeCases = opts.filter
+    ? cases.filter((c) => opts.filter!.includes(c.id))
+    : cases;
+
+  return runCases({
+    fetch: (url: string, init: unknown) => client.fetch(url, init),
+    serverId,
+    directAddrs: opts.directAddrs,
+    cases: activeCases,
+    timeout: opts.timeout,
+    bail: opts.bail,
+    onCaseResult: opts.onCaseResult,
+  });
 }

@@ -18,6 +18,11 @@ import {
   SecretKey,
 } from "@momics/iroh-http-tauri";
 import type { IrohSession } from "@momics/iroh-http-shared";
+// @ts-ignore — .mjs from the shared cross-runtime compliance suite (pure WHATWG).
+import { handleRequest as handleComplianceRequest } from "../../../tests/http-compliance/handler.mjs";
+// @ts-ignore — .mjs from the shared compliance suite (pure WHATWG).
+import { runCases as runComplianceCases } from "../../../tests/http-compliance/harness.mjs";
+import complianceCases from "../../../tests/http-compliance/cases.json";
 
 // ── Utilities ──────────────────────────────────────────────────────────────────
 
@@ -942,3 +947,319 @@ document.querySelector<HTMLButtonElement>("#gen-key-btn")!.addEventListener(
     ].join("\n");
   },
 );
+
+// ── Test (cross-device interop harness, #340) ────────────────────────────────
+//
+// An opt-in, LAN-scoped "testing mode". While enabled this node BOTH serves the
+// shared HTTP compliance handler AND advertises a `test=1` intent over generic
+// DNS-SD so peer test-mode devices can discover it and run the suite against it.
+// Pressing "Run" executes the suite one-way (this device = client) against a
+// selected discovered peer and renders a per-case grid + structured JSON log.
+//
+// Safety: OFF by default, clearly indicated while on, and force-disabled on page
+// teardown so it can never be left silently serving to the LAN.
+
+const TEST_SERVICE = "iroh-http-test";
+const TEST_TXT_KEY = "test";
+
+type TestPlatform = "android" | "ios" | "desktop";
+
+function detectPlatform(): TestPlatform {
+  const ua = navigator.userAgent;
+  if (/android/i.test(ua)) return "android";
+  // iPadOS 13+ presents a Mac UA but reports touch points.
+  if (/iphone|ipad|ipod/i.test(ua)) return "ios";
+  if (/mac/i.test(ua) && navigator.maxTouchPoints > 1) return "ios";
+  return "desktop";
+}
+
+interface TestPeer {
+  nodeId: string;
+  platform: string;
+  addrs: string[];
+}
+
+{
+  const selfPlatform = detectPlatform();
+  const selfId = node.publicKey.toString();
+
+  const banner = document.querySelector<HTMLElement>("#test-mode-banner")!;
+  const toggle = document.querySelector<HTMLInputElement>("#test-mode-toggle")!;
+  const modeStatus = document.querySelector<HTMLElement>("#test-mode-status")!;
+  const selfPlatformEl = document.querySelector<HTMLElement>(
+    "#test-self-platform",
+  )!;
+  const selfIdEl = document.querySelector<HTMLElement>("#test-self-id")!;
+  const peersList = document.querySelector<HTMLUListElement>(
+    "#test-peers-list",
+  )!;
+  const peersEmpty = document.querySelector<HTMLElement>("#test-peers-empty")!;
+  const runBtn = document.querySelector<HTMLButtonElement>("#test-run-btn")!;
+  const runSummary = document.querySelector<HTMLElement>("#test-run-summary")!;
+  const gridBody = document.querySelector<HTMLElement>("#test-grid-body")!;
+  const jsonLog = document.querySelector<HTMLElement>("#test-json-log")!;
+  const copyJsonBtn = document.querySelector<HTMLButtonElement>(
+    "#test-copy-json-btn",
+  )!;
+  const testTabBtn = document.querySelector<HTMLButtonElement>(
+    '[data-tab="test"]',
+  )!;
+
+  selfPlatformEl.textContent = selfPlatform;
+  selfIdEl.textContent = `${selfId.slice(0, 16)}…`;
+  selfIdEl.title = selfId;
+
+  // Discovered test peers, keyed by node id.
+  const testPeers = new Map<string, TestPeer>();
+  let selectedPeerId: string | null = null;
+  let testAbort: AbortController | null = null;
+  let running = false;
+
+  function refreshRunEnabled(): void {
+    runBtn.disabled = !testAbort || running || selectedPeerId === null ||
+      !testPeers.has(selectedPeerId);
+  }
+
+  function renderPeers(): void {
+    peersList.replaceChildren();
+    for (const peer of testPeers.values()) {
+      const li = document.createElement("li");
+      li.className = "peer-item selectable";
+      if (peer.nodeId === selectedPeerId) li.classList.add("selected");
+
+      const code = document.createElement("code");
+      code.className = "peer-id";
+      code.textContent = `${peer.nodeId.slice(0, 16)}…`;
+      code.title = peer.nodeId;
+
+      const plat = document.createElement("span");
+      plat.className = "peer-platform";
+      plat.textContent = peer.platform || "?";
+
+      li.append(code, plat);
+      li.addEventListener("click", () => {
+        selectedPeerId = peer.nodeId;
+        renderPeers();
+        refreshRunEnabled();
+      });
+      peersList.append(li);
+    }
+    peersEmpty.classList.toggle("hidden", testPeers.size > 0);
+  }
+
+  async function startTestingMode(): Promise<void> {
+    if (testAbort) return;
+    const ac = new AbortController();
+    testAbort = ac;
+
+    banner.classList.remove("hidden");
+    testTabBtn.classList.add("testing-live");
+    setStatus(modeStatus, "Serving compliance handler + advertising…", "ok");
+
+    // (a) Serve the shared compliance handler so remote peers can run cases here.
+    try {
+      node.serve({ signal: ac.signal }, handleComplianceRequest);
+    } catch (e) {
+      setStatus(modeStatus, `serve failed: ${e}`, "error");
+    }
+
+    // (b) Advertise our testing intent over generic DNS-SD alongside our pk.
+    void node.advertise({
+      serviceName: TEST_SERVICE,
+      instanceName: selfId,
+      port: 1,
+      protocol: "udp",
+      txt: {
+        pk: selfId,
+        [TEST_TXT_KEY]: "1",
+        platform: selfPlatform,
+        caps: "http-compliance",
+      },
+      signal: ac.signal,
+    }).catch(() => {/* aborted or error */});
+
+    // (c) Browse for other test-mode peers.
+    void (async () => {
+      try {
+        for await (
+          const rec of node.browse({
+            serviceName: TEST_SERVICE,
+            protocol: "udp",
+            signal: ac.signal,
+          })
+        ) {
+          if (rec.txt[TEST_TXT_KEY] !== "1") continue;
+          const peer = asIrohPeer(rec);
+          if (!peer || peer.nodeId === selfId) continue;
+
+          if (rec.isActive) {
+            testPeers.set(peer.nodeId, {
+              nodeId: peer.nodeId,
+              platform: rec.txt.platform ?? "?",
+              addrs: peer.addrs,
+            });
+          } else {
+            testPeers.delete(peer.nodeId);
+            if (selectedPeerId === peer.nodeId) selectedPeerId = null;
+          }
+          renderPeers();
+          refreshRunEnabled();
+        }
+      } catch {/* aborted */}
+    })();
+
+    refreshRunEnabled();
+  }
+
+  function stopTestingMode(): void {
+    if (!testAbort) return;
+    testAbort.abort();
+    testAbort = null;
+    testPeers.clear();
+    selectedPeerId = null;
+    renderPeers();
+    banner.classList.add("hidden");
+    testTabBtn.classList.remove("testing-live");
+    setStatus(modeStatus, "Testing mode off.");
+    refreshRunEnabled();
+  }
+
+  toggle.addEventListener("change", () => {
+    if (toggle.checked) void startTestingMode();
+    else stopTestingMode();
+  });
+
+  // Force testing mode off on teardown — it must never outlive the page.
+  const forceOff = () => {
+    if (testAbort) {
+      testAbort.abort();
+      testAbort = null;
+    }
+  };
+  globalThis.addEventListener("pagehide", forceOff);
+  globalThis.addEventListener("beforeunload", forceOff);
+
+  // ── Run + rendering ────────────────────────────────────────────────────────
+
+  interface CaseRow {
+    id: string;
+    ok: boolean;
+    status: number | null;
+    latencyMs: number;
+    error: string | null;
+  }
+
+  function appendGridRow(index: number, r: CaseRow): void {
+    const tr = document.createElement("tr");
+    tr.className = r.ok ? "row-pass" : "row-fail";
+    const cells = [
+      String(index),
+      r.id,
+      r.ok ? "✓ pass" : "✗ fail",
+      `${r.latencyMs}ms`,
+      r.status === null ? "—" : String(r.status),
+      r.error ?? "",
+    ];
+    cells.forEach((text, col) => {
+      const td = document.createElement("td");
+      td.textContent = text;
+      if (col === 2) td.className = "result";
+      if (col === 5) td.className = "err";
+      tr.append(td);
+    });
+    gridBody.append(tr);
+  }
+
+  // The compliance corpus, minus JSON comment entries.
+  // deno-lint-ignore no-explicit-any
+  const allCases = (complianceCases as any[]).filter((c) => c && c.id);
+
+  // Case 0: self/loopback baseline (ADR-015) to isolate transport vs platform.
+  const selfLoopbackCase = {
+    id: "self-loopback",
+    description: "self-request baseline (ADR-015)",
+    request: { method: "GET", path: "/hello", headers: {}, body: null },
+    response: { status: 200, bodyExact: "hello" },
+  };
+
+  runBtn.addEventListener("click", async () => {
+    if (!testAbort || running || selectedPeerId === null) return;
+    const target = testPeers.get(selectedPeerId);
+    if (!target) return;
+
+    running = true;
+    refreshRunEnabled();
+    gridBody.replaceChildren();
+    jsonLog.textContent = "";
+    setStatus(runSummary, "Running…");
+
+    const startedAt = new Date().toISOString();
+    const rows: CaseRow[] = [];
+    let index = 0;
+
+    const record = (r: CaseRow) => {
+      appendGridRow(index++, r);
+      rows.push(r);
+    };
+
+    try {
+      // Case 0 — loopback against ourselves (we are already serving).
+      await runComplianceCases({
+        // deno-lint-ignore no-explicit-any
+        fetch: (url: string, init: any) => node.fetch(url, init),
+        serverId: selfId,
+        cases: [selfLoopbackCase],
+        onCaseResult: record,
+      });
+
+      // Cases 1..N — the full suite against the selected peer (one-way).
+      await runComplianceCases({
+        // deno-lint-ignore no-explicit-any
+        fetch: (url: string, init: any) => node.fetch(url, init),
+        serverId: target.nodeId,
+        directAddrs: target.addrs.length ? target.addrs : undefined,
+        cases: allCases,
+        onCaseResult: record,
+      });
+    } catch (e) {
+      setStatus(runSummary, `Run error: ${e}`, "error");
+    }
+
+    const passed = rows.filter((r) => r.ok).length;
+    const failed = rows.length - passed;
+    setStatus(
+      runSummary,
+      failed > 0
+        ? `✗ ${failed} failed, ${passed} passed`
+        : `✓ all ${passed} passed`,
+      failed > 0 ? "error" : "ok",
+    );
+
+    const report = {
+      schema: "iroh-http-interop/1",
+      startedAt,
+      finishedAt: new Date().toISOString(),
+      direction: "outbound",
+      self: { publicKey: selfId, platform: selfPlatform },
+      target: { publicKey: target.nodeId, platform: target.platform },
+      summary: { total: rows.length, passed, failed },
+      cases: rows,
+    };
+    const json = JSON.stringify(report, null, 2);
+    jsonLog.textContent = json;
+    // Emit compact JSON to the console → reaches logcat/stdout via the tracing
+    // wiring on device.
+    console.log("[iroh-http-interop]", JSON.stringify(report));
+
+    running = false;
+    refreshRunEnabled();
+  });
+
+  copyJsonBtn.addEventListener("click", () => {
+    const text = jsonLog.textContent ?? "";
+    if (text) copyText(copyJsonBtn, () => text);
+  });
+
+  renderPeers();
+  refreshRunEnabled();
+}

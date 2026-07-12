@@ -405,3 +405,105 @@ select:focus {
   }
 }
 
+
+/* ── Test tab (cross-device interop harness) ──────────────────────────────── */
+
+.test-banner {
+  margin-bottom: 1rem;
+  padding: 0.7rem 0.9rem;
+  background: #fef2f2;
+  border: 1px solid #fca5a5;
+  border-left: 4px solid #dc2626;
+  border-radius: 6px;
+  color: #991b1b;
+  font-size: 0.85rem;
+  line-height: 1.4;
+}
+
+.test-banner code {
+  background: #fee2e2;
+  padding: 0 0.25em;
+  border-radius: 3px;
+}
+
+/* Highlight the Test tab button while testing mode is live. */
+.tab-btn[data-tab="test"].testing-live {
+  color: #b91c1c;
+  font-weight: 600;
+}
+
+.tab-btn[data-tab="test"].testing-live::after {
+  content: "●";
+  margin-left: 0.35em;
+  color: #dc2626;
+}
+
+.toggle-row {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  font-size: 0.9rem;
+  cursor: pointer;
+}
+
+.toggle-row input {
+  width: auto;
+  margin: 0;
+}
+
+/* Selectable discovered test-peer rows. */
+.peer-item.selectable {
+  cursor: pointer;
+}
+
+.peer-item.selected {
+  background: #eff6ff;
+  border-color: #93c5fd;
+}
+
+.peer-item .peer-platform {
+  font-size: 0.72rem;
+  color: #52525b;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.test-grid-wrap {
+  margin-top: 0.75rem;
+  max-height: 22rem;
+  overflow: auto;
+  border: 1px solid #e4e4e7;
+  border-radius: 6px;
+}
+
+.test-grid {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.78rem;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+}
+
+.test-grid th,
+.test-grid td {
+  padding: 0.3rem 0.5rem;
+  text-align: left;
+  border-bottom: 1px solid #f0f0f1;
+  white-space: nowrap;
+}
+
+.test-grid th {
+  position: sticky;
+  top: 0;
+  background: #fafafa;
+  z-index: 1;
+}
+
+.test-grid td.err {
+  white-space: normal;
+  color: #dc2626;
+  font-family: inherit;
+}
+
+.test-grid tr.row-pass td.result { color: #16a34a; }
+.test-grid tr.row-fail td.result { color: #dc2626; font-weight: 600; }
+.test-grid tr.row-fail { background: #fef2f2; }

@@ -24,6 +24,7 @@
         <button class="tab-btn" data-tab="discovery">Discovery</button>
         <button class="tab-btn" data-tab="sessions">Sessions</button>
         <button class="tab-btn" data-tab="crypto">Crypto</button>
+        <button class="tab-btn" data-tab="test">Test</button>
       </nav>
 
       <!-- ── Identity ──────────────────────────────────────────────────────── -->
@@ -316,6 +317,83 @@
           <p class="hint">Generate a fresh random Ed25519 keypair for use with <code>createNode({ key })</code>.</p>
           <button id="gen-key-btn">Generate new random key</button>
           <pre id="gen-key-output" class="log"></pre>
+        </section>
+      </div>
+
+      <!-- ── Test (cross-device interop harness) ─────────────────────────────── -->
+      <div class="panel" data-panel="test">
+        <div id="test-mode-banner" class="test-banner hidden">
+          ⚠ TESTING MODE ON — this node serves the compliance handler to
+          <strong>any</strong> LAN peer advertising <code>test=1</code>. Turn it
+          off when you're done.
+        </div>
+
+        <section class="card">
+          <h2>Testing mode</h2>
+          <p class="hint">
+            Opt-in, LAN-scoped interop harness (#340). While on, this device
+            serves the shared HTTP compliance suite <em>and</em> advertises a
+            <code>test=1</code> intent over DNS-SD so other test-mode devices can
+            discover it. Off by default; never ship enabled.
+          </p>
+          <label class="toggle-row">
+            <input id="test-mode-toggle" type="checkbox" />
+            <span>Enable testing mode</span>
+          </label>
+          <p id="test-mode-status" class="status"></p>
+          <p class="hint">
+            This device: <code id="test-self-platform">?</code> ·
+            <code id="test-self-id">?</code>
+          </p>
+        </section>
+
+        <section class="card">
+          <h2>Discovered test peers</h2>
+          <p id="test-peers-empty" class="hint">
+            No test peers discovered yet. Enable testing mode on another device on
+            the same LAN.
+          </p>
+          <ul id="test-peers-list" class="peer-list"></ul>
+        </section>
+
+        <section class="card">
+          <h2>Run compliance suite (one-way)</h2>
+          <p class="hint">
+            Runs the full <code>cases.json</code> corpus against the selected peer
+            with this device as the client. Case&nbsp;0 is a self/loopback
+            baseline (ADR-015) to isolate transport from platform.
+          </p>
+          <div class="input-row">
+            <button id="test-run-btn" disabled>Run against selected peer</button>
+            <span id="test-run-summary" class="status"></span>
+          </div>
+          <div class="test-grid-wrap">
+            <table id="test-grid" class="test-grid">
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>Case</th>
+                  <th>Result</th>
+                  <th>Latency</th>
+                  <th>Status</th>
+                  <th>Error</th>
+                </tr>
+              </thead>
+              <tbody id="test-grid-body"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="card">
+          <h2>Structured JSON log</h2>
+          <p class="hint">
+            Emitted to the console (→ logcat/stdout) on every run. Copy it to
+            attach to a report.
+          </p>
+          <div class="input-row">
+            <button id="test-copy-json-btn" class="btn-secondary">Copy JSON</button>
+          </div>
+          <pre id="test-json-log" class="log"></pre>
         </section>
       </div>
     </main>
