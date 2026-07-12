@@ -2030,6 +2030,25 @@ mod primary_direct_addr_tests {
     }
 
     #[test]
+    fn overrides_bogus_ip_addrs_port_with_real_bound_quic_port() {
+        // #346: iOS `ip_addrs()` reports a placeholder port (`:1`), while the
+        // real QUIC port lives in `bound_sockets()`. The advertised address must
+        // carry the real bound port, not the placeholder.
+        let reconciled = vec![v4([192, 168, 50, 227], 1)];
+        let out = select_primary_direct_addr(&reconciled, Some(62546), None);
+        assert_eq!(out, Some(v4([192, 168, 50, 227], 62546)));
+    }
+
+    #[test]
+    fn keeps_reconciled_port_when_no_bound_port_available() {
+        // Non-regression: without a bound port to prefer, fall back to the
+        // routable reconciled addr's own port rather than dropping the address.
+        let reconciled = vec![v4([192, 168, 50, 227], 1)];
+        let out = select_primary_direct_addr(&reconciled, None, None);
+        assert_eq!(out, Some(v4([192, 168, 50, 227], 1)));
+    }
+
+    #[test]
     fn skips_loopback_and_unspecified_reconciled() {
         let reconciled = vec![
             v4([127, 0, 0, 1], 62546),
