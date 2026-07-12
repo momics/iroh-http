@@ -375,3 +375,102 @@ async fn fetch_retries_pooled_connection_closed_by_serve_replace() {
         );
     }
 }
+
+/// F1 (lost close-wakeup): after a serve-replace force-closes active
+/// connections, an **idle** pooled connection must actually be torn down, so a
+/// later request over it can never be served by the stale/replaced loop.
+///
+/// The per-connection task parks in `accept_bi()`. Teardown sets `close_flag`
+/// then `close_connections.notify_waiters()`, which stores no permit and only
+/// wakes already-registered waiters. If the task loaded the flag *before*
+/// registering its waiter, the store+notify could land in that gap and be lost
+/// — the idle task would then sleep forever in `accept_bi()`, never re-check the
+/// flag, and keep serving the stale handler over the pooled connection. The fix
+/// registers the waiter (`Notified::enable()`) before the flag load. This test
+/// establishes an idle pooled connection, replaces the loop, and asserts the
+/// next fetch routes to the NEW handler (not the stale one).
+#[tokio::test]
+async fn idle_pooled_connection_closed_on_serve_replace() {
+    let (server_ep, client_ep) = common::make_pair().await;
+    let server_id = common::node_id(&server_ep);
+    let addrs = common::server_addrs(&server_ep);
+
+    // Stale loop answers everything 200; warm a pooled connection so its
+    // per-connection task is left parked idle in `accept_bi()`.
+    serve_constant(&server_ep, 200);
+    assert_eq!(
+        single_fetch(&client_ep, &server_id, &addrs, "/hello")
+            .await
+            .expect("warm-up fetch should succeed"),
+        200,
+    );
+
+    // Let the per-connection task settle back into its idle wait so the replace
+    // below hits the exact "parked in accept_bi" state the F1 race needs.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Replace the loop with one that answers 503. This force-closes the idle
+    // pooled connection; the parked task MUST wake and close it.
+    serve_constant(&server_ep, 503);
+
+    // Give the wake+close a moment to propagate before re-fetching.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // The next request must route to the NEW loop. A 200 here means the idle
+    // connection was never closed (lost wakeup) and the stale loop still serves.
+    let status = single_fetch(&client_ep, &server_id, &addrs, "/hello")
+        .await
+        .expect("fetch after replace should succeed (fresh connection)");
+    assert_eq!(
+        status, 503,
+        "idle pooled connection was still served by the stale loop after \
+         serve-replace (got {status}) — the close wakeup was lost (F1)",
+    );
+}
+
+/// F2 (lost-stop race): `stop_serve()` fired concurrently with a serve restart
+/// must never be dropped, and must never leave `serve_stopped_early` stuck true
+/// (which would spuriously shut down the NEXT healthy serve loop).
+///
+/// Best-effort stress test: repeatedly race `stop_serve()` against a serve
+/// restart to exercise the window where `set_serve_handle` momentarily holds no
+/// registered handle. Afterwards a fresh serve must be fully healthy (routes
+/// correctly, not immediately shut down) and still stoppable — proving no stop
+/// was lost into a stuck flag.
+#[tokio::test]
+async fn stop_serve_racing_restart_never_loses_stop() {
+    let (server_ep, client_ep) = common::make_pair().await;
+    let server_id = common::node_id(&server_ep);
+    let addrs = common::server_addrs(&server_ep);
+
+    serve_router(&server_ep);
+
+    for _ in 0..25 {
+        // Race a stop against a restart on the same endpoint.
+        let racer = server_ep.clone();
+        let stopper = tokio::spawn(async move { racer.stop_serve() });
+        serve_router(&server_ep);
+        stopper.await.unwrap();
+
+        // Whoever won, quiesce to a known-stopped state before the next round.
+        server_ep.stop_serve();
+        let _ = tokio::time::timeout(Duration::from_secs(5), server_ep.wait_serve_stop()).await;
+    }
+
+    // After all the racing, a clean serve must be fully alive — if a lost stop
+    // had left `serve_stopped_early` stuck true, this loop would be shut down
+    // the instant it registers and the fetch would never succeed.
+    serve_router(&server_ep);
+    assert_eq!(
+        fetch_status(&client_ep, &server_id, &addrs, "/status/503").await,
+        503,
+        "a fresh serve loop was not healthy after concurrent stop/restart — \
+         a lost stop left serve_stopped_early stuck, spuriously stopping it (F2)",
+    );
+
+    // And it must still stop cleanly.
+    server_ep.stop_serve();
+    tokio::time::timeout(Duration::from_secs(5), server_ep.wait_serve_stop())
+        .await
+        .expect("serve loop should stop after the racing rounds");
+}
