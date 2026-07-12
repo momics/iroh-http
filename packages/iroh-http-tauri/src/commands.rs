@@ -530,14 +530,6 @@ pub async fn fetch(args: RawFetchArgs) -> Result<FfiResponsePayload, String> {
         .req_body_handle
         .and_then(|h| ep.handles().claim_pending_reader(h));
 
-    // IROH346_DIAG: temporary greppable diagnostic of the raw direct addresses
-    // handed to the dialer, before parse. Revert once the on-device dial path
-    // is confirmed. This is where a bare, port-less address (#346) is rejected.
-    tracing::info!(
-        "IROH346_DIAG dial: node_id={} direct_addrs={:?}",
-        opts.node_id,
-        opts.direct_addrs,
-    );
     let addrs = parse_direct_addrs(&opts.direct_addrs)?;
     let timeout = opts.timeout_ms.map(std::time::Duration::from_millis);
     let max_response_body_bytes = opts.max_response_body_bytes;
@@ -1420,15 +1412,6 @@ pub fn advertise_peer<R: tauri::Runtime>(
     // (reconciled from `bound_sockets`), never port 0 — which is what made iOS
     // nodes undialable ("invalid socket address syntax" at the dialer).
     let address = primary_direct_addr(&ep);
-    // IROH346_DIAG: temporary greppable diagnostic — surfaces via iOS [stdout].
-    // Revert once the on-device advertise path is confirmed.
-    tracing::info!(
-        "IROH346_DIAG advertise: ip_addrs={:?} bound_sockets={:?} reconciled={:?} address={:?}",
-        ep.direct_addr_candidates(),
-        ep.bound_sockets(),
-        ep.direct_socket_addrs(),
-        address,
-    );
     state
         .advertise_peer_start(&service_name, &node_id, relay.as_deref(), address.as_deref())
         .map_err(|e| format_error_json("REFUSED", e))

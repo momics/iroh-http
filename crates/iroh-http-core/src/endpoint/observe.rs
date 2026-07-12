@@ -60,13 +60,6 @@ impl IrohEndpoint {
         super::bind::reconcile_direct_addr_ports(&candidates, &bound)
     }
 
-    /// Raw, un-reconciled direct-address candidates as enumerated by the
-    /// endpoint (`ip_addrs`), before any port reconciliation. Diagnostic only:
-    /// on iOS these may carry port 0 or omit the LAN address entirely (#346).
-    pub fn direct_addr_candidates(&self) -> Vec<std::net::SocketAddr> {
-        self.inner.transport.ep.addr().ip_addrs().copied().collect()
-    }
-
     /// Full node address: node ID + relay URL(s) + direct socket addresses.
     ///
     /// Direct-address ports are reconciled against the endpoint's bound sockets
