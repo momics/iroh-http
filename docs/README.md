@@ -31,7 +31,8 @@ Sign/verify · Streaming · Tickets · WebTransport
 Contributor-level deep dives. Start with [architecture.md](architecture.md) first.
 See [internals/README.md](internals/README.md) for the full list.
 
-HTTP engine · Resource handles · Connection pool · Wire format
+HTTP engine · Resource handles · Connection pool · Wire format ·
+[DNS-SD device verification](internals/dns-sd-device-verification.md)
 
 ## Recipes
 
