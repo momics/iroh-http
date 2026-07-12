@@ -46,6 +46,25 @@ impl IrohEndpoint {
         self.inner.transport.ep.bound_sockets()
     }
 
+    /// Whether the underlying QUIC transport is still usable.
+    ///
+    /// This is deliberately distinct from "the endpoint handle exists". A
+    /// handle can keep resolving from the registry long after the transport
+    /// behind it has been torn down (`close`/`close_force`) or — on mobile —
+    /// after the OS has invalidated the socket during suspension. Mobile
+    /// foreground recovery must key off this, not handle existence: see #336,
+    /// where a half-live iOS node reported healthy because its handle survived,
+    /// leaving desktop peers hanging until a long timeout.
+    ///
+    /// Returns `false` once the endpoint is closed or has no bound sockets.
+    /// A `true` result means the transport has not been observed as dead; it
+    /// is a necessary, not a sufficient, signal, so callers on mobile should
+    /// still bound their requests with a timeout and treat repeated failures
+    /// as a trigger to recreate the endpoint.
+    pub fn transport_alive(&self) -> bool {
+        !self.inner.transport.ep.is_closed() && !self.bound_sockets().is_empty()
+    }
+
     /// Full node address: node ID + relay URL(s) + direct socket addresses.
     pub fn node_addr(&self) -> NodeAddrInfo {
         let addr = self.inner.transport.ep.addr();

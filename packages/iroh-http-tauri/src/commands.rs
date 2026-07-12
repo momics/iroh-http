@@ -170,7 +170,27 @@ pub async fn create_endpoint<R: tauri::Runtime>(
     }
 
     let node_id = ep.node_id().to_string();
-    let handle = state::insert_endpoint(ep);
+    let (handle, replaced) = state::replace_endpoint_for_node_id(node_id.clone(), ep);
+    if let Some((old_handle, old_ep)) = replaced {
+        tracing::warn!(
+            node_id = %node_id,
+            old_handle,
+            new_handle = handle,
+            "iroh-http-tauri: replacing existing endpoint for node id"
+        );
+        old_ep.close_force().await;
+
+        // #336: the endpoint was rebuilt (foreground recovery / webview
+        // reload). Addresses discovered before the previous endpoint died may
+        // now be stale, so drop them and let a fresh browse repopulate the
+        // lookup instead of dialing dead paths.
+        #[cfg(mobile)]
+        if let Some(lookup) =
+            app.try_state::<crate::mobile_address_lookup::MobileAddressLookup>()
+        {
+            lookup.clear();
+        }
+    }
 
     // Auto-bind the httpi:// scheme handler to the first endpoint created.
     // `try_state` returns None when `with_scheme()` was not set, so this
@@ -207,9 +227,17 @@ pub async fn close_endpoint(endpoint_handle: u64, force: Option<bool>) -> Result
     Ok(())
 }
 
-// ── Ping (mobile lifecycle) ───────────────────────────────────────────────────
+// ── Health probe (mobile lifecycle) ──────────────────────────────────────────
 
-/// Trivial liveness probe — returns `true` when the endpoint exists.
+/// Transport health probe used by mobile foreground recovery.
+///
+/// Returns `Ok(true)` only when the underlying QUIC transport is still usable,
+/// `Ok(false)` when the handle exists but the transport is dead (e.g. iOS
+/// invalidated the socket during suspension), and `Err(INVALID_HANDLE)` when
+/// the endpoint is gone entirely.
+///
+/// This replaces the previous handle-existence check: a live registry handle
+/// is not evidence that remote peers can still reach this node (#336).
 #[command]
 pub async fn ping(endpoint_handle: u64) -> Result<bool, String> {
     let ep = state::get_endpoint(endpoint_handle).ok_or_else(|| {
@@ -218,9 +246,7 @@ pub async fn ping(endpoint_handle: u64) -> Result<bool, String> {
             format!("endpoint not found: {endpoint_handle}"),
         )
     })?;
-    // If the endpoint exists, it's alive.
-    let _ = ep.raw().id();
-    Ok(true)
+    Ok(ep.transport_alive())
 }
 
 // ── Address introspection ─────────────────────────────────────────────────────

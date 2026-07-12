@@ -88,6 +88,19 @@ impl MobileAddressLookup {
         }
     }
 
+    /// Drop every discovered address.
+    ///
+    /// Called when the endpoint is rebuilt during mobile foreground recovery
+    /// (#336): addresses discovered before the app was suspended may now be
+    /// stale, so the map is cleared and repopulated from a fresh browse rather
+    /// than letting the dialer try dead paths.
+    pub fn clear(&self) {
+        self.map
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+    }
+
     /// Apply a mobile discovery event: `"discovered"` upserts, `"expired"`
     /// evicts. Unknown kinds are ignored.
     pub fn apply_event(&self, kind: &str, node_id: &str, addrs: &[String]) {
@@ -242,6 +255,33 @@ mod tests {
             "upsert replaces addrs"
         );
         assert_eq!(lookup.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn clear_drops_all_entries_on_recovery() {
+        // #336: when the endpoint is rebuilt during foreground recovery, stale
+        // address-lookup entries must not survive. Otherwise the dialer would
+        // keep trying dead addresses discovered before the app was suspended.
+        let lookup = MobileAddressLookup::new();
+        lookup.apply_event(
+            "discovered",
+            &endpoint_id(4).to_string(),
+            &["10.0.0.9:9000".to_string()],
+        );
+        lookup.apply_event(
+            "discovered",
+            &endpoint_id(5).to_string(),
+            &["10.0.0.10:9001".to_string()],
+        );
+        assert_eq!(lookup.len(), 2);
+
+        lookup.clear();
+
+        assert_eq!(lookup.len(), 0, "recovery must clear stale discovery entries");
+        assert!(
+            lookup.resolve(endpoint_id(4)).is_none(),
+            "cleared peer must no longer resolve"
+        );
     }
 
     #[test]

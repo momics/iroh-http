@@ -3,6 +3,7 @@
  */
 
 import { Channel, invoke } from "@tauri-apps/api/core";
+import { installForegroundHealthCheck } from "./lifecycle.js";
 import {
   bigintToSafeNumber,
   classifyBindError,
@@ -566,28 +567,19 @@ function installLifecycleListener(
 ): (() => void) | undefined {
   if (typeof document === "undefined") return;
   const isMobile = /android|iphone|ipad/i.test(navigator.userAgent);
-  if (!isMobile && !options.auto) return;
+  const enabled = isMobile || options.auto === true;
+  if (!enabled) return;
 
-  let retries = 0;
-  const maxRetries = options.maxRetries ?? 3;
-  const handler = async () => {
-    if (document.visibilityState !== "visible") return;
-    retries = 0;
-    while (retries < maxRetries) {
-      try {
-        await invoke(`${PLUGIN}|ping`, { endpointHandle });
-        return;
-      } catch {
-        retries++;
-        if (retries < maxRetries) {
-          await new Promise<void>((r) => setTimeout(r, 100 * 2 ** retries));
-        }
-      }
-    }
-    onDead();
-  };
-  document.addEventListener("visibilitychange", handler);
-  return () => document.removeEventListener("visibilitychange", handler);
+  // The probe checks real transport liveness (the native `ping` command now
+  // returns whether the QUIC transport is usable, not merely that the handle
+  // exists). A `false` result or a throw both mean the transport is gone and
+  // recovery must run (#336).
+  return installForegroundHealthCheck({
+    probe: () => invoke<boolean>(`${PLUGIN}|ping`, { endpointHandle }),
+    onUnhealthy: onDead,
+    enabled: true,
+    maxRetries: options.maxRetries ?? 3,
+  });
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────
@@ -724,6 +716,18 @@ export async function createNode(options?: NodeOptions): Promise<IrohNode> {
 }
 
 export type { IrohNode, NodeOptions };
+export {
+  installForegroundHealthCheck,
+  type ForegroundHealthCheckOptions,
+  withLifecycle,
+  type LifecycleContext,
+  type LifecycleHandle,
+  type LifecycleOptions,
+  type LifecycleResource,
+  type LifecycleStartReason,
+  type LifecycleState,
+  type LifecycleStorage,
+} from "./lifecycle.js";
 export {
   asIrohPeer,
   IROH_HTTP_SERVICE,

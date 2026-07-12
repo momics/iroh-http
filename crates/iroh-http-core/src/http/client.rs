@@ -110,8 +110,8 @@ pub async fn fetch_request(
     req: hyper::Request<Body>,
     cfg: &StackConfig,
 ) -> Result<hyper::Response<Body>, FetchError> {
+    let node_id = addr.id;
     let work = async {
-        let node_id = addr.id;
         let ep_raw = endpoint.raw().clone();
         let addr_clone = addr.clone();
         let max_header_size = endpoint.max_header_size();
@@ -169,13 +169,25 @@ pub async fn fetch_request(
             })
     };
 
-    match cfg.timeout {
+    let result = match cfg.timeout {
         Some(t) => match tokio::time::timeout(t, work).await {
             Ok(r) => r,
             Err(_) => Err(FetchError::Timeout),
         },
         None => work.await,
+    };
+
+    if matches!(
+        result,
+        Err(FetchError::Timeout | FetchError::ConnectionFailed { .. })
+    ) {
+        endpoint
+            .pool()
+            .evict_and_close(node_id, ALPN, b"iroh-http fetch failed")
+            .await;
     }
+
+    result
 }
 
 // `extract_path` and the hyper-body→channel pumps moved to `ffi/fetch.rs`
