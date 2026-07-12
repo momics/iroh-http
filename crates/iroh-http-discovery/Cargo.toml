@@ -30,6 +30,10 @@ n0-future = { version = "0.3", optional = true }
 # `Display`. Same encoding used by `iroh-http-core`.
 base32 = { version = "0.5", optional = true }
 
+# Structured warnings when a discovered address is unusable (e.g. port 0, #346).
+# Already present in the build via iroh; pinned to the workspace 0.1 line.
+tracing = "0.1"
+
 [dev-dependencies]
 # The `advertise` example and interop test drive a real endpoint and wait on
 # Ctrl-C / timeouts.

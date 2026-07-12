@@ -36,6 +36,10 @@ class AdvertiseStartArgs {
     lateinit var serviceName: String
     lateinit var pk: String
     var relay: String? = null
+
+    // #346: primary direct `ip:port` address to publish so browsing peers can
+    // dial this node over the LAN. Carries the real bound QUIC port (never 0).
+    var address: String? = null
 }
 
 @InvokeArg
@@ -208,6 +212,13 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
 
                         session.knownNodes[key] = nodeId
                         val addrs = JSONArray()
+                        // #346: a direct `ip:port` address published by the
+                        // advertiser lets this peer be dialed over the LAN. It
+                        // already carries the real bound QUIC port.
+                        resolved.attributes["address"]?.let { b ->
+                            val address = String(b)
+                            if (address.isNotEmpty()) addrs.put(address)
+                        }
                         resolved.attributes["relay"]?.let { b ->
                             val relay = String(b)
                             if (relay.isNotEmpty()) addrs.put(relay)
@@ -295,6 +306,11 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
             setPort(1)  // placeholder; iroh-http connections use node-ID, not port
             setAttribute("pk", args.pk)
             args.relay?.let { setAttribute("relay", it) }
+            // #346: publish the node's direct `ip:port` so peers can dial it
+            // over the LAN. The SRV port above is a placeholder (connections use
+            // node-id, not the SRV port), so the reconciled address — carrying
+            // the real bound QUIC port — travels in this `address` TXT instead.
+            args.address?.let { setAttribute("address", it) }
         }
 
         val listener = object : NsdManager.RegistrationListener {

@@ -286,8 +286,10 @@ pub(super) fn classify_bind_error(e: impl std::fmt::Display) -> crate::CoreError
 
 /// Parse an optional list of socket address strings into `SocketAddr` values.
 ///
-/// Returns `Err` if any string cannot be parsed as a `host:port` address so
-/// that callers can surface misconfiguration rather than silently ignoring it.
+/// Returns `Err` if any string cannot be parsed as a `host:port` address, or if
+/// a parsed address has port 0. A port-0 direct address is silently undialable
+/// (it fails at connect time as an opaque error); rejecting it here — before it
+/// reaches iroh's dialer — surfaces the misconfiguration loudly. See #346.
 pub fn parse_direct_addrs(
     addrs: &Option<Vec<String>>,
 ) -> Result<Option<Vec<std::net::SocketAddr>>, String> {
@@ -299,11 +301,67 @@ pub fn parse_direct_addrs(
                 let addr = s
                     .parse::<std::net::SocketAddr>()
                     .map_err(|e| format!("invalid direct address {s:?}: {e}"))?;
+                if addr.port() == 0 {
+                    return Err(format!(
+                        "invalid direct address {s:?}: refusing to dial address with no port (port 0)"
+                    ));
+                }
                 out.push(addr);
             }
             Ok(Some(out))
         }
     }
+}
+
+/// Reconcile a node's derived direct-address ports against its real bound
+/// sockets.
+///
+/// Some platforms (notably iOS) enumerate a local interface address with the
+/// port stripped to 0, even though the QUIC socket is bound to a real port.
+/// Advertising such an address makes the node undialable: peers reject the
+/// port-less address at parse time (`invalid socket address syntax`, #346).
+///
+/// For each candidate whose port is 0, substitute a port taken from
+/// `bound_sockets` — preferring a bound socket of the same IP family (v4↔v4,
+/// v6↔v6), falling back to the first bound socket. A candidate that still has
+/// no usable port (no bound socket to borrow from) is dropped with a warning
+/// rather than advertised as a useless `:0`. Candidates with a non-zero port
+/// are returned unchanged.
+pub(crate) fn reconcile_direct_addr_ports(
+    candidates: &[std::net::SocketAddr],
+    bound_sockets: &[std::net::SocketAddr],
+) -> Vec<std::net::SocketAddr> {
+    let borrow_port = |ipv6: bool| -> Option<u16> {
+        bound_sockets
+            .iter()
+            .find(|s| s.is_ipv6() == ipv6 && s.port() != 0)
+            .or_else(|| bound_sockets.iter().find(|s| s.port() != 0))
+            .map(|s| s.port())
+    };
+
+    let mut out = Vec::with_capacity(candidates.len());
+    for &addr in candidates {
+        if addr.port() != 0 {
+            out.push(addr);
+            continue;
+        }
+        match borrow_port(addr.is_ipv6()) {
+            Some(port) => {
+                let mut fixed = addr;
+                fixed.set_port(port);
+                tracing::warn!(
+                    "iroh-http: reconciled port-0 direct address {addr} to bound port {port} (#346)"
+                );
+                out.push(fixed);
+            }
+            None => {
+                tracing::warn!(
+                    "iroh-http: dropping direct address {addr} with port 0 (no bound port to borrow) (#346)"
+                );
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]

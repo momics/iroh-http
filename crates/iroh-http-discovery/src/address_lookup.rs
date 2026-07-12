@@ -74,6 +74,14 @@ fn build_endpoint_data(addrs: &[String]) -> EndpointData {
 
     for addr in addrs {
         if let Ok(sock) = addr.parse::<SocketAddr>() {
+            // A port-0 direct address is undialable (#346); never feed it to
+            // the dialer as a `TransportAddr::Ip`.
+            if sock.port() == 0 {
+                tracing::warn!(
+                    "iroh-http-discovery: skipping discovered direct address {sock} with port 0 (#346)"
+                );
+                continue;
+            }
             ip_addrs.push(TransportAddr::Ip(sock));
         } else if let Ok(url) = addr.parse::<RelayUrl>() {
             relay_urls.push(url);

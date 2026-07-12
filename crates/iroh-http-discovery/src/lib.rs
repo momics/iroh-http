@@ -89,6 +89,13 @@ pub struct PeerDiscoveryEvent {
 pub const TXT_PK: &str = "pk";
 /// TXT property carrying the peer's home relay URL, if any.
 pub const TXT_RELAY: &str = "relay";
+/// TXT property carrying a direct `ip:port` address, if any.
+///
+/// Advertisers whose SRV port is not the real QUIC port — notably the iOS
+/// native `NWListener`, whose UDP port is unrelated to the QUIC socket —
+/// publish the dialable `ip:<bound QUIC port>` here instead. Browsers surface
+/// it as a direct address so the peer can be dialed over the LAN. See #346.
+pub const TXT_ADDRESS: &str = "address";
 
 /// Encode an endpoint id as lowercase RFC 4648 base32 (no padding) — a 52-char
 /// label that fits a DNS-SD instance name and matches the node-id form used by
@@ -133,6 +140,14 @@ fn peer_event_from_record(rec: &ServiceRecord) -> Option<PeerDiscoveryEvent> {
     }
 
     let mut addrs: Vec<String> = rec.addrs.iter().map(SocketAddr::to_string).collect();
+    // A direct `ip:port` in the `address` TXT is dialable even when the record's
+    // SRV port is not the real QUIC port (iOS native advertiser, #346). Surface
+    // it in addition to any SRV/A-derived addresses.
+    if let Some((_, address)) = rec.txt.iter().find(|(k, _)| k == TXT_ADDRESS) {
+        if !address.is_empty() && !addrs.contains(address) {
+            addrs.push(address.clone());
+        }
+    }
     if let Some((_, relay)) = rec.txt.iter().find(|(k, _)| k == TXT_RELAY) {
         addrs.push(relay.clone());
     }
@@ -325,6 +340,32 @@ mod tests {
         assert_eq!(ev.node_id, "pk-node-id");
         assert!(ev.addrs.iter().any(|a| a == "192.168.1.5:4433"));
         assert!(ev.addrs.iter().any(|a| a == "https://relay.example"));
+    }
+
+    #[cfg(feature = "mdns")]
+    #[test]
+    fn peer_event_from_record_surfaces_address_txt() {
+        // Regression: #346 — an advertiser (iOS native) whose SRV port is not
+        // the QUIC port publishes the dialable `ip:port` in the `address` TXT.
+        // The browse event must surface it so the peer can be dialed over LAN.
+        let rec = ServiceRecord {
+            is_active: true,
+            service_type: "_iroh-http._udp.local.".to_string(),
+            instance_name: "inst".to_string(),
+            host: None,
+            port: 0,
+            addrs: vec![],
+            txt: vec![
+                (TXT_PK.to_string(), "pk-node-id".to_string()),
+                (TXT_ADDRESS.to_string(), "192.168.50.227:59234".to_string()),
+            ],
+        };
+        let ev = peer_event_from_record(&rec).expect("event");
+        assert!(
+            ev.addrs.iter().any(|a| a == "192.168.50.227:59234"),
+            "address TXT must be surfaced as a direct address, got {:?}",
+            ev.addrs
+        );
     }
 
     #[cfg(feature = "mdns")]
