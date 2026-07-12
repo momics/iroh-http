@@ -151,20 +151,25 @@ pub async fn fetch_request(
             *h = headers.clone();
         }
         // Infallible: method/uri/version/headers all came from a valid request.
-        builder.body(body).expect("rebuild request from valid parts")
+        builder
+            .body(body)
+            .expect("rebuild request from valid parts")
     };
 
     // Whole-fetch timeout budget: bounds attempt + retry together so a single
     // fetch never exceeds `cfg.timeout` even when it redials once (#336).
     let retry_seq = async {
         // ── Attempt 1: on the pooled (possibly reused) connection. ───────────
-        let first_body = if body_resendable {
-            Body::empty()
-        } else {
-            body
-        };
-        let (result, reused) =
-            attempt_send(endpoint, addr, node_id, build_req(first_body), cfg, &last_conn_id).await;
+        let first_body = if body_resendable { Body::empty() } else { body };
+        let (result, reused) = attempt_send(
+            endpoint,
+            addr,
+            node_id,
+            build_req(first_body),
+            cfg,
+            &last_conn_id,
+        )
+        .await;
 
         let first_err = match result {
             Ok(resp) => return Ok(resp),
@@ -290,7 +295,6 @@ async fn attempt_send(
     // Record the connection this attempt is about to use so eviction is scoped
     // to it and never closes a fresh replacement dialed by a concurrent request.
     *last_conn_id.lock().unwrap_or_else(|e| e.into_inner()) = Some(conn.stable_id());
-
 
     let (send, recv) = match conn.open_bi().await {
         Ok(pair) => pair,
