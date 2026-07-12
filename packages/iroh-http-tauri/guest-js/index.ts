@@ -235,7 +235,7 @@ class TauriAdapter extends IrohAdapter {
       task.finally(() => pending.delete(task));
     };
 
-    invoke(`${PLUGIN}|serve`, {
+    const started = invoke<void>(`${PLUGIN}|serve`, {
       args: {
         endpointHandle: Number(endpointHandle),
         maxConcurrency: options.serveOptions?.maxConcurrency ?? null,
@@ -253,16 +253,35 @@ class TauriAdapter extends IrohAdapter {
       },
       channel,
       connChannel,
-    }).catch((err: unknown) =>
-      console.error("[iroh-http-tauri] serve error:", err)
-    );
+    });
 
-    // Resolve only after the native serve loop has stopped AND all in-flight
-    // JS handler tasks have settled (responses written), so the serve/finished
-    // contract holds the same as Node and Deno.
-    return invoke<void>(`${PLUGIN}|wait_serve_stop`, {
-      endpointHandle: Number(endpointHandle),
-    }).then(() => Promise.allSettled([...pending])).then(() => {});
+    // Only wait for the loop to stop AFTER `serve` has resolved. The `serve`
+    // command installs this cycle's loop-done signal (via `set_serve_handle`)
+    // before it returns, so awaiting it guarantees `wait_serve_stop` observes
+    // THIS serve loop. Issuing the two IPC calls unordered (the old behaviour)
+    // let `wait_serve_stop` run first and latch the PREVIOUS cycle's already-
+    // `true` done signal — resolving `finished` against a stale loop and
+    // leaving the shared `serveRunning` guard corrupted across serve/stop
+    // cycles, so a later serve() threw "serve() is already running" (#336).
+    return started.then(
+      () =>
+        // Resolve only after the native serve loop has stopped AND all
+        // in-flight JS handler tasks have settled (responses written), so the
+        // serve/finished contract holds the same as Node and Deno.
+        invoke<void>(`${PLUGIN}|wait_serve_stop`, {
+          endpointHandle: Number(endpointHandle),
+        })
+          .then(() => Promise.allSettled([...pending]))
+          .then(() => {}),
+      (err: unknown) => {
+        // `serve` itself failed to start: surface it and settle `finished`
+        // rather than hanging on `wait_serve_stop` for a loop that never ran.
+        console.error("[iroh-http-tauri] serve error:", err);
+        return Promise.allSettled([...pending]).then(() => {
+          throw err;
+        });
+      },
+    );
   }
 
   closeEndpoint(handle: number, force?: boolean): Promise<void> {
