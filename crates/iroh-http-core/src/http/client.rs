@@ -112,12 +112,14 @@ pub async fn fetch_request(
 ) -> Result<hyper::Response<Body>, FetchError> {
     let node_id = addr.id;
 
-    // P2: the stable_id of the connection the most recent attempt actually
+    // P2/L1: the dial_seq of the connection the most recent attempt actually
     // used. Eviction is scoped to this so we only ever close the connection
     // that failed — never a fresh replacement a concurrent request dialed under
-    // the same key. `None` = no connection was obtained (connect failed / timed
-    // out before dialing), in which case eviction is a no-op.
-    let last_conn_id: std::sync::Mutex<Option<usize>> = std::sync::Mutex::new(None);
+    // the same key. A monotonic dial_seq (not a reusable stable_id pointer)
+    // makes that guarantee ABA-proof. `None` = no connection was obtained
+    // (connect failed / timed out before dialing), in which case eviction is a
+    // no-op.
+    let last_dial_seq: std::sync::Mutex<Option<u64>> = std::sync::Mutex::new(None);
 
     // Split the request so a transparent retry can rebuild it. A request whose
     // body is empty (exact size 0 — every GET/HEAD/DELETE the FFI layer builds
@@ -167,7 +169,7 @@ pub async fn fetch_request(
             node_id,
             build_req(first_body),
             cfg,
-            &last_conn_id,
+            &last_dial_seq,
         )
         .await;
 
@@ -187,10 +189,10 @@ pub async fn fetch_request(
         // concurrent/future request — dials a fresh one instead of reusing it.
         // Scoped to the connection attempt 1 used (P2).
         if retryable {
-            let failed_id = *last_conn_id.lock().unwrap_or_else(|e| e.into_inner());
+            let failed_seq = *last_dial_seq.lock().unwrap_or_else(|e| e.into_inner());
             endpoint
                 .pool()
-                .evict_and_close(node_id, ALPN, b"iroh-http fetch failed", failed_id)
+                .evict_and_close(node_id, ALPN, b"iroh-http fetch failed", failed_seq)
                 .await;
         }
 
@@ -208,14 +210,14 @@ pub async fn fetch_request(
                 node_id,
                 build_req(Body::empty()),
                 cfg,
-                &last_conn_id,
+                &last_dial_seq,
             )
             .await;
             if let Err(FetchError::ConnectionFailed { .. }) = &retry_result {
-                let failed_id = *last_conn_id.lock().unwrap_or_else(|e| e.into_inner());
+                let failed_seq = *last_dial_seq.lock().unwrap_or_else(|e| e.into_inner());
                 endpoint
                     .pool()
-                    .evict_and_close(node_id, ALPN, b"iroh-http fetch retry failed", failed_id)
+                    .evict_and_close(node_id, ALPN, b"iroh-http fetch retry failed", failed_seq)
                     .await;
             }
             return retry_result;
@@ -231,10 +233,10 @@ pub async fn fetch_request(
                 // Timed out across the whole sequence: evict the connection the
                 // in-flight attempt was using so the next request starts clean,
                 // then surface the bound (#336). Scoped to that connection (P2).
-                let failed_id = *last_conn_id.lock().unwrap_or_else(|e| e.into_inner());
+                let failed_seq = *last_dial_seq.lock().unwrap_or_else(|e| e.into_inner());
                 endpoint
                     .pool()
-                    .evict_and_close(node_id, ALPN, b"iroh-http fetch timed out", failed_id)
+                    .evict_and_close(node_id, ALPN, b"iroh-http fetch timed out", failed_seq)
                     .await;
                 Err(FetchError::Timeout)
             }
@@ -248,17 +250,17 @@ pub async fn fetch_request(
 /// [`crate::http::transport::pool::ConnectionPool::get_or_connect`]), which the
 /// caller uses to decide whether a connection failure is worth a single retry.
 ///
-/// Records the [`Connection::stable_id`](iroh::endpoint::Connection::stable_id)
-/// of the connection actually used into `last_conn_id` (or `None` if no
+/// Records the [`PooledConnection::dial_seq`](crate::http::transport::pool::PooledConnection::dial_seq)
+/// of the connection actually used into `last_dial_seq` (or `None` if no
 /// connection was obtained) so the caller can scope eviction to the exact
-/// connection that failed (P2).
+/// connection that failed (P2/L1).
 async fn attempt_send(
     endpoint: &IrohEndpoint,
     addr: &iroh::EndpointAddr,
     node_id: iroh::PublicKey,
     req: hyper::Request<Body>,
     cfg: &StackConfig,
-    last_conn_id: &std::sync::Mutex<Option<usize>>,
+    last_dial_seq: &std::sync::Mutex<Option<u64>>,
 ) -> (Result<hyper::Response<Body>, FetchError>, bool) {
     let ep_raw = endpoint.raw().clone();
     let addr_clone = addr.clone();
@@ -279,7 +281,7 @@ async fn attempt_send(
             // No connection was obtained — clear the identity so a subsequent
             // eviction (e.g. on timeout) is a no-op rather than closing an
             // unrelated cached connection.
-            *last_conn_id.lock().unwrap_or_else(|e| e.into_inner()) = None;
+            *last_dial_seq.lock().unwrap_or_else(|e| e.into_inner()) = None;
             return (
                 Err(FetchError::ConnectionFailed {
                     detail: e,
@@ -291,10 +293,10 @@ async fn attempt_send(
         }
     };
 
-    let conn = pooled.conn.clone();
     // Record the connection this attempt is about to use so eviction is scoped
     // to it and never closes a fresh replacement dialed by a concurrent request.
-    *last_conn_id.lock().unwrap_or_else(|e| e.into_inner()) = Some(conn.stable_id());
+    *last_dial_seq.lock().unwrap_or_else(|e| e.into_inner()) = Some(pooled.dial_seq);
+    let conn = pooled.conn.clone();
 
     let (send, recv) = match conn.open_bi().await {
         Ok(pair) => pair,
