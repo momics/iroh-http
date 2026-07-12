@@ -13,9 +13,7 @@ mod common;
 
 use std::time::Duration;
 
-use iroh_http_core::{
-    fetch, ffi_serve, respond, IrohEndpoint, RequestPayload, ServeOptions,
-};
+use iroh_http_core::{fetch, ffi_serve, respond, IrohEndpoint, RequestPayload, ServeOptions};
 
 /// Install a handler that routes `/status/<code>` to that HTTP status and
 /// everything else to 418, then register it as the endpoint's serve handle
@@ -77,7 +75,17 @@ async fn fetch_status(
     let mut last_err = None;
     for _ in 0..10 {
         match fetch(
-            client, server_id, path, "GET", &[], None, None, Some(addrs), None, true, None,
+            client,
+            server_id,
+            path,
+            "GET",
+            &[],
+            None,
+            None,
+            Some(addrs),
+            None,
+            true,
+            None,
         )
         .await
         {
@@ -221,7 +229,8 @@ async fn wait_serve_stop_ignores_stale_done_signal() {
     // ── Cycle B: start a new loop, then wait. wait_serve_stop must block on
     //    the NEW loop, not return instantly off cycle A's stale `true`. ──────
     serve_router(&server_ep);
-    let waited = tokio::time::timeout(Duration::from_millis(400), server_ep.wait_serve_stop()).await;
+    let waited =
+        tokio::time::timeout(Duration::from_millis(400), server_ep.wait_serve_stop()).await;
     assert!(
         waited.is_err(),
         "wait_serve_stop resolved while the current serve loop is still running \
@@ -250,7 +259,17 @@ async fn fetch_once_status(
     match tokio::time::timeout(
         timeout,
         fetch(
-            client, server_id, path, "GET", &[], None, None, Some(addrs), None, true, None,
+            client,
+            server_id,
+            path,
+            "GET",
+            &[],
+            None,
+            None,
+            Some(addrs),
+            None,
+            true,
+            None,
         ),
     )
     .await
@@ -301,8 +320,14 @@ async fn stop_serve_closes_active_connections() {
     // connection. Before the fix this returned 200 (the per-connection task was
     // still alive and serving); now the connection is closed so the request is
     // refused / not answered.
-    let status =
-        fetch_once_status(&client_ep, &server_id, &addrs, "/hello", Duration::from_secs(3)).await;
+    let status = fetch_once_status(
+        &client_ep,
+        &server_id,
+        &addrs,
+        "/hello",
+        Duration::from_secs(3),
+    )
+    .await;
     assert_eq!(
         status, None,
         "request was answered (status {status:?}) after stop_serve() — the \

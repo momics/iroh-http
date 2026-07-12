@@ -43,9 +43,7 @@ fn serve_ok(ep: &IrohEndpoint) {
                 vec![("content-length".into(), "0".into())],
             )
             .unwrap();
-            sep.handles()
-                .finish_body(payload.res_body_handle)
-                .unwrap();
+            sep.handles().finish_body(payload.res_body_handle).unwrap();
         },
     );
 }
@@ -103,7 +101,9 @@ async fn recreate_same_key_is_reachable_through_stale_pool() {
     .unwrap();
 
     // ── First incarnation ────────────────────────────────────────────────────
-    let server1 = IrohEndpoint::bind(loopback_opts_with_key(key)).await.unwrap();
+    let server1 = IrohEndpoint::bind(loopback_opts_with_key(key))
+        .await
+        .unwrap();
     let server_id = server1.node_id().to_string();
     let addrs1 = common::server_addrs(&server1);
     serve_ok(&server1);
@@ -117,7 +117,9 @@ async fn recreate_same_key_is_reachable_through_stale_pool() {
     server1.close_force().await;
 
     // ── Recreate with the SAME key ───────────────────────────────────────────
-    let server2 = IrohEndpoint::bind(loopback_opts_with_key(key)).await.unwrap();
+    let server2 = IrohEndpoint::bind(loopback_opts_with_key(key))
+        .await
+        .unwrap();
     assert_eq!(
         server2.node_id(),
         server_id,
