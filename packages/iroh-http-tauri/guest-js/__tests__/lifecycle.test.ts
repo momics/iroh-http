@@ -1,5 +1,16 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { withLifecycle, type LifecycleStorage } from "../lifecycle.ts";
+import {
+  installForegroundHealthCheck,
+  withLifecycle,
+  type LifecycleStorage,
+} from "../lifecycle.ts";
+
+/** Flush a few microtask + macrotask turns so async handlers settle. */
+async function flush(): Promise<void> {
+  for (let i = 0; i < 5; i++) {
+    await Promise.resolve();
+  }
+}
 
 function memoryStorage(): LifecycleStorage & { data: Map<string, string> } {
   const data = new Map<string, string>();
@@ -148,5 +159,81 @@ describe("withLifecycle", () => {
     expect(handle.error).toBe(error);
     expect(onError).toHaveBeenCalledWith(error);
     expect(storage.data.has("iroh-http-tauri:lifecycle:server")).toBe(false);
+  });
+});
+
+describe("installForegroundHealthCheck", () => {
+  it("triggers recovery when the foreground transport probe fails", async () => {
+    // Regression for #336: a foreground event fires while the endpoint handle
+    // still exists, but the transport health probe reports the transport is no
+    // longer usable. Recovery must be triggered — not treated as healthy.
+    const onUnhealthy = vi.fn();
+    let healthy = true;
+    const remove = installForegroundHealthCheck({
+      probe: () => Promise.resolve(healthy),
+      onUnhealthy,
+      enabled: true,
+      maxRetries: 2,
+      backoffMs: () => 0,
+    });
+
+    healthy = false;
+    document.dispatchEvent(new Event("visibilitychange"));
+    await flush();
+
+    expect(onUnhealthy).toHaveBeenCalledTimes(1);
+    remove();
+  });
+
+  it("treats a thrown probe (handle gone) as unhealthy", async () => {
+    const onUnhealthy = vi.fn();
+    const remove = installForegroundHealthCheck({
+      probe: () => Promise.reject(new Error("INVALID_HANDLE")),
+      onUnhealthy,
+      enabled: true,
+      maxRetries: 1,
+      backoffMs: () => 0,
+    });
+
+    document.dispatchEvent(new Event("visibilitychange"));
+    await flush();
+
+    expect(onUnhealthy).toHaveBeenCalledTimes(1);
+    remove();
+  });
+
+  it("does not trigger recovery while the transport stays healthy", async () => {
+    const onUnhealthy = vi.fn();
+    const remove = installForegroundHealthCheck({
+      probe: () => Promise.resolve(true),
+      onUnhealthy,
+      enabled: true,
+      maxRetries: 2,
+      backoffMs: () => 0,
+    });
+
+    document.dispatchEvent(new Event("visibilitychange"));
+    await flush();
+
+    expect(onUnhealthy).not.toHaveBeenCalled();
+    remove();
+  });
+
+  it("is inert when disabled", async () => {
+    const probe = vi.fn(() => Promise.resolve(false));
+    const onUnhealthy = vi.fn();
+    const remove = installForegroundHealthCheck({
+      probe,
+      onUnhealthy,
+      enabled: false,
+    });
+
+    // Returns a no-op remover and never wires listeners.
+    document.dispatchEvent(new Event("visibilitychange"));
+    await flush();
+
+    expect(probe).not.toHaveBeenCalled();
+    expect(onUnhealthy).not.toHaveBeenCalled();
+    remove();
   });
 });

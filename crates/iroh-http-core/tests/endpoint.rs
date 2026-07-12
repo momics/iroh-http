@@ -99,6 +99,65 @@ async fn endpoint_close() {
     // After close, connecting should fail
 }
 
+// ── Transport liveness vs. handle liveness (#336) ─────────────────────────────
+
+/// A freshly bound endpoint reports its transport as usable; once closed it
+/// must not. This is the primitive the mobile foreground probe needs — a live
+/// registry handle is not evidence that the underlying transport still works.
+#[tokio::test]
+async fn transport_alive_reflects_close() {
+    let opts = NodeOptions {
+        networking: NetworkingOptions {
+            disabled: true,
+            bind_addrs: vec!["127.0.0.1:0".into()],
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let ep = IrohEndpoint::bind(opts).await.unwrap();
+    assert!(
+        ep.transport_alive(),
+        "a freshly bound endpoint must report a usable transport"
+    );
+
+    ep.close().await;
+    assert!(
+        !ep.transport_alive(),
+        "a closed endpoint must not report its transport as usable"
+    );
+}
+
+/// Regression guard for #336: the endpoint *handle* can still resolve from the
+/// registry after the transport is force-closed. Foreground recovery must key
+/// off transport liveness, not handle existence — otherwise a half-live iOS
+/// node looks healthy and desktop peers hang until a long timeout.
+#[tokio::test]
+async fn handle_liveness_is_not_transport_liveness() {
+    let opts = NodeOptions {
+        networking: NetworkingOptions {
+            disabled: true,
+            bind_addrs: vec!["127.0.0.1:0".into()],
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let ep = IrohEndpoint::bind(opts).await.unwrap();
+    let handle = iroh_http_core::insert_endpoint(ep.clone());
+
+    ep.close_force().await;
+
+    // The handle still exists in the registry ...
+    let resolved = iroh_http_core::get_endpoint(handle)
+        .expect("handle should still resolve after force-close");
+    // ... but the transport behind it is no longer usable.
+    assert!(
+        !resolved.transport_alive(),
+        "transport must report dead even though the handle still resolves"
+    );
+
+    iroh_http_core::remove_endpoint(handle);
+}
+
 #[tokio::test]
 async fn serve_options_defaults() {
     let opts = ServeOptions::default();

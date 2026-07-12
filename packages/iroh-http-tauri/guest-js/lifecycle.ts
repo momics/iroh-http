@@ -253,6 +253,118 @@ export function withLifecycle(
   return handle;
 }
 
+/**
+ * Options for {@link installForegroundHealthCheck}.
+ */
+export interface ForegroundHealthCheckOptions {
+  /**
+   * Probe the underlying transport. Resolve `true` when the transport is still
+   * usable, or resolve `false` / reject when it is not. This must check real
+   * transport liveness — not merely that the endpoint handle exists (#336).
+   */
+  probe: () => Promise<boolean>;
+
+  /**
+   * Called when the probe reports the transport is unusable after exhausting
+   * `maxRetries`. This is the signal to tear down and recreate the node.
+   */
+  onUnhealthy: () => void;
+
+  /**
+   * Whether to install the listener at all. Callers gate this on mobile
+   * user-agent detection or an explicit opt-in.
+   * @default true
+   */
+  enabled?: boolean;
+
+  /**
+   * Maximum probe attempts per foreground event before declaring the transport
+   * dead.
+   * @default 3
+   */
+  maxRetries?: number;
+
+  /**
+   * Backoff (ms) before the retry following attempt `n` (1-based). A value of
+   * `0` skips the delay entirely.
+   * @default (n) => 100 * 2 ** n
+   */
+  backoffMs?: (attempt: number) => number;
+}
+
+/**
+ * Run a transport health probe whenever the document returns to the foreground
+ * and trigger `onUnhealthy` when the transport is no longer usable.
+ *
+ * On iOS the OS can invalidate an endpoint's socket while the app is
+ * suspended. When the app foregrounds, the endpoint *handle* still exists but
+ * the transport is dead. A handle-existence check (the old `ping`) reports
+ * healthy in this state, so `serve()` restarts on a dead endpoint and remote
+ * peers hang until a long timeout (#336). This wires a real health contract to
+ * the foreground event so recovery can be triggered deterministically.
+ *
+ * @returns a function that removes the installed listeners.
+ */
+export function installForegroundHealthCheck(
+  options: ForegroundHealthCheckOptions,
+): () => void {
+  const {
+    probe,
+    onUnhealthy,
+    enabled = true,
+    maxRetries = 3,
+    backoffMs = (attempt) => 100 * 2 ** attempt,
+  } = options;
+
+  if (!enabled || typeof document === "undefined") {
+    return () => {};
+  }
+
+  let running = false;
+  const handler = async (): Promise<void> => {
+    if (typeof document !== "undefined" && document.visibilityState !== "visible") {
+      return;
+    }
+    // Coalesce overlapping foreground events into a single probe sweep.
+    if (running) return;
+    running = true;
+    try {
+      for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        let healthy = false;
+        try {
+          healthy = await probe();
+        } catch {
+          healthy = false;
+        }
+        if (healthy) return;
+        if (attempt < maxRetries) {
+          const delay = Math.max(0, backoffMs(attempt));
+          if (delay > 0) {
+            await new Promise<void>((resolve) => setTimeout(resolve, delay));
+          }
+        }
+      }
+      onUnhealthy();
+    } finally {
+      running = false;
+    }
+  };
+
+  const listener = (): void => {
+    void handler();
+  };
+  document.addEventListener("visibilitychange", listener);
+  if (typeof window !== "undefined") {
+    window.addEventListener("pageshow", listener);
+  }
+  return () => {
+    document.removeEventListener("visibilitychange", listener);
+    if (typeof window !== "undefined") {
+      window.removeEventListener("pageshow", listener);
+    }
+  };
+}
+
 function defaultStorage(): LifecycleStorage | null {
   try {
     return typeof window !== "undefined" ? window.localStorage : null;

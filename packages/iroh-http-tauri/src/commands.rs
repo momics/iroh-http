@@ -216,9 +216,17 @@ pub async fn close_endpoint(endpoint_handle: u64, force: Option<bool>) -> Result
     Ok(())
 }
 
-// ── Ping (mobile lifecycle) ───────────────────────────────────────────────────
+// ── Health probe (mobile lifecycle) ──────────────────────────────────────────
 
-/// Trivial liveness probe — returns `true` when the endpoint exists.
+/// Transport health probe used by mobile foreground recovery.
+///
+/// Returns `Ok(true)` only when the underlying QUIC transport is still usable,
+/// `Ok(false)` when the handle exists but the transport is dead (e.g. iOS
+/// invalidated the socket during suspension), and `Err(INVALID_HANDLE)` when
+/// the endpoint is gone entirely.
+///
+/// This replaces the previous handle-existence check: a live registry handle
+/// is not evidence that remote peers can still reach this node (#336).
 #[command]
 pub async fn ping(endpoint_handle: u64) -> Result<bool, String> {
     let ep = state::get_endpoint(endpoint_handle).ok_or_else(|| {
@@ -227,9 +235,7 @@ pub async fn ping(endpoint_handle: u64) -> Result<bool, String> {
             format!("endpoint not found: {endpoint_handle}"),
         )
     })?;
-    // If the endpoint exists, it's alive.
-    let _ = ep.raw().id();
-    Ok(true)
+    Ok(ep.transport_alive())
 }
 
 // ── Address introspection ─────────────────────────────────────────────────────
