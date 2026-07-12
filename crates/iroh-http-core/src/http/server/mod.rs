@@ -144,6 +144,8 @@ where
     };
 
     let shutdown_notify = Arc::new(tokio::sync::Notify::new());
+    let close_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let close_connections = Arc::new(tokio::sync::Notify::new());
     let drain_dur = cfg.drain_timeout;
     let (done_tx, done_rx) = tokio::sync::watch::channel(false);
 
@@ -153,12 +155,16 @@ where
         svc,
         on_connection_event,
         shutdown_notify.clone(),
+        close_flag.clone(),
+        close_connections.clone(),
         done_tx,
     ));
 
     ServeHandle {
         join,
         shutdown_notify,
+        close_flag,
+        close_connections,
         drain_timeout: drain_dur,
         done_rx,
     }
