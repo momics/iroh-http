@@ -111,83 +111,190 @@ pub async fn fetch_request(
     cfg: &StackConfig,
 ) -> Result<hyper::Response<Body>, FetchError> {
     let node_id = addr.id;
-    let work = async {
-        let ep_raw = endpoint.raw().clone();
-        let addr_clone = addr.clone();
-        let max_header_size = endpoint.max_header_size();
 
-        let pooled = endpoint
-            .pool()
-            .get_or_connect(node_id, ALPN, || async move {
-                ep_raw
-                    .connect(addr_clone, ALPN)
-                    .await
-                    .map_err(|e| format!("connect: {e}"))
-            })
-            .await
-            .map_err(|e| FetchError::ConnectionFailed {
-                detail: e,
-                source: None,
-            })?;
-
-        let conn = pooled.conn.clone();
-
-        let (send, recv) = conn
-            .open_bi()
-            .await
-            .map_err(|e| FetchError::ConnectionFailed {
-                detail: format!("open_bi: {e}"),
-                source: None,
-            })?;
-        let io = TokioIo::new(IrohStream::new(send, recv));
-
-        let (sender, conn_task) = hyper::client::conn::http1::Builder::new()
-            // hyper requires max_buf_size >= 8192; clamp upward so small
-            // max_header_size values don't panic. Header-size enforcement
-            // happens at the byte-count check in `ffi::fetch` after the
-            // response is returned (deterministic, framing-independent).
-            .max_buf_size(max_header_size.max(8192))
-            .max_headers(128)
-            .handshake::<_, Body>(io)
-            .await
-            .map_err(|e| FetchError::ConnectionFailed {
-                detail: format!("hyper handshake: {e}"),
-                source: Some(e),
-            })?;
-
-        // Drive the connection state machine in the background.
-        tokio::spawn(conn_task);
-
-        // Dispatch through the shared client stack (Slice B / #184).
-        use tower::ServiceExt;
-        let svc = crate::http::server::stack::build_client_stack(sender, cfg);
-        svc.oneshot(req)
-            .await
-            .map_err(|e| FetchError::ConnectionFailed {
-                detail: format!("send_request: {e}"),
-                source: Some(e),
-            })
+    // Split the request so a transparent retry can rebuild it. A request whose
+    // body is empty (exact size 0 — every GET/HEAD/DELETE the FFI layer builds
+    // with `Body::empty()`) is safe to resend on a fresh connection: no body
+    // bytes are ever consumed, so resending is byte-for-byte identical (RFC
+    // 9110 §9.2.2). A streaming body may have been partially read by a failed
+    // attempt, so it is never retried.
+    let (parts, body) = req.into_parts();
+    let body_resendable = http_body::Body::size_hint(&body).exact() == Some(0);
+    let method = parts.method.clone();
+    let uri = parts.uri.clone();
+    let version = parts.version;
+    let headers = parts.headers.clone();
+    let build_req = |body: Body| -> hyper::Request<Body> {
+        let mut builder = hyper::Request::builder()
+            .method(method.clone())
+            .uri(uri.clone())
+            .version(version);
+        if let Some(h) = builder.headers_mut() {
+            *h = headers.clone();
+        }
+        // Infallible: method/uri/version/headers all came from a valid request.
+        builder.body(body).expect("rebuild request from valid parts")
     };
 
-    let result = match cfg.timeout {
-        Some(t) => match tokio::time::timeout(t, work).await {
+    // Whole-fetch timeout budget: bounds attempt + retry together so a single
+    // fetch never exceeds `cfg.timeout` even when it redials once (#336).
+    let retry_seq = async {
+        // ── Attempt 1: on the pooled (possibly reused) connection. ───────────
+        let first_body = if body_resendable {
+            Body::empty()
+        } else {
+            body
+        };
+        let (result, reused) = attempt_send(endpoint, addr, node_id, build_req(first_body), cfg).await;
+
+        let first_err = match result {
+            Ok(resp) => return Ok(resp),
+            Err(e) => e,
+        };
+
+        // Only connection-level failures are retryable: a stale pooled
+        // connection the peer closed (serve-loop replace, idle close) surfaces
+        // as `ConnectionFailed`, and no response head was received so resending
+        // is safe. A `Timeout` means the request was likely accepted but slow —
+        // resending would double the work, so it is not retried here.
+        let retryable = matches!(first_err, FetchError::ConnectionFailed { .. });
+
+        // Evict the (now known-bad) pooled connection so attempt 2 — and any
+        // concurrent/future request — dials a fresh one instead of reusing it.
+        if retryable {
+            endpoint
+                .pool()
+                .evict_and_close(node_id, ALPN, b"iroh-http fetch failed")
+                .await;
+        }
+
+        // Transparent single retry: only for a *reused* connection (a fresh
+        // dial that already failed would just fail again) carrying a resendable
+        // (empty) body. This makes pooled-connection reuse across a serve
+        // replace transparent (#119) while preserving the #336 invariant that
+        // the peer lands on the new serve loop via a fresh connection.
+        if retryable && reused && body_resendable {
+            let (retry_result, _) =
+                attempt_send(endpoint, addr, node_id, build_req(Body::empty()), cfg).await;
+            if let Err(FetchError::ConnectionFailed { .. }) = &retry_result {
+                endpoint
+                    .pool()
+                    .evict_and_close(node_id, ALPN, b"iroh-http fetch retry failed")
+                    .await;
+            }
+            return retry_result;
+        }
+
+        Err(first_err)
+    };
+
+    match cfg.timeout {
+        Some(t) => match tokio::time::timeout(t, retry_seq).await {
             Ok(r) => r,
-            Err(_) => Err(FetchError::Timeout),
+            Err(_) => {
+                // Timed out across the whole sequence: evict so the next
+                // request starts clean, then surface the bound (#336).
+                endpoint
+                    .pool()
+                    .evict_and_close(node_id, ALPN, b"iroh-http fetch timed out")
+                    .await;
+                Err(FetchError::Timeout)
+            }
         },
-        None => work.await,
+        None => retry_seq.await,
+    }
+}
+
+/// One connect→open_bi→handshake→send attempt. Returns the result together
+/// with whether the connection was **reused** from the pool (see
+/// [`crate::http::transport::pool::ConnectionPool::get_or_connect`]), which the
+/// caller uses to decide whether a connection failure is worth a single retry.
+async fn attempt_send(
+    endpoint: &IrohEndpoint,
+    addr: &iroh::EndpointAddr,
+    node_id: iroh::PublicKey,
+    req: hyper::Request<Body>,
+    cfg: &StackConfig,
+) -> (Result<hyper::Response<Body>, FetchError>, bool) {
+    let ep_raw = endpoint.raw().clone();
+    let addr_clone = addr.clone();
+    let max_header_size = endpoint.max_header_size();
+
+    let (pooled, reused) = match endpoint
+        .pool()
+        .get_or_connect(node_id, ALPN, || async move {
+            ep_raw
+                .connect(addr_clone, ALPN)
+                .await
+                .map_err(|e| format!("connect: {e}"))
+        })
+        .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            return (
+                Err(FetchError::ConnectionFailed {
+                    detail: e,
+                    source: None,
+                }),
+                // A failed connect means nothing was reused.
+                false,
+            )
+        }
     };
 
-    if matches!(
-        result,
-        Err(FetchError::Timeout | FetchError::ConnectionFailed { .. })
-    ) {
-        endpoint
-            .pool()
-            .evict_and_close(node_id, ALPN, b"iroh-http fetch failed")
-            .await;
-    }
+    let conn = pooled.conn.clone();
 
-    result
+    let (send, recv) = match conn.open_bi().await {
+        Ok(pair) => pair,
+        Err(e) => {
+            return (
+                Err(FetchError::ConnectionFailed {
+                    detail: format!("open_bi: {e}"),
+                    source: None,
+                }),
+                reused,
+            )
+        }
+    };
+    let io = TokioIo::new(IrohStream::new(send, recv));
+
+    let (sender, conn_task) = match hyper::client::conn::http1::Builder::new()
+        // hyper requires max_buf_size >= 8192; clamp upward so small
+        // max_header_size values don't panic. Header-size enforcement
+        // happens at the byte-count check in `ffi::fetch` after the
+        // response is returned (deterministic, framing-independent).
+        .max_buf_size(max_header_size.max(8192))
+        .max_headers(128)
+        .handshake::<_, Body>(io)
+        .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            return (
+                Err(FetchError::ConnectionFailed {
+                    detail: format!("hyper handshake: {e}"),
+                    source: Some(e),
+                }),
+                reused,
+            )
+        }
+    };
+
+    // Drive the connection state machine in the background.
+    tokio::spawn(conn_task);
+
+    // Dispatch through the shared client stack (Slice B / #184).
+    use tower::ServiceExt;
+    let svc = crate::http::server::stack::build_client_stack(sender, cfg);
+    let result = svc
+        .oneshot(req)
+        .await
+        .map_err(|e| FetchError::ConnectionFailed {
+            detail: format!("send_request: {e}"),
+            source: Some(e),
+        });
+    (result, reused)
 }
 
 // `extract_path` and the hyper-body→channel pumps moved to `ffi/fetch.rs`

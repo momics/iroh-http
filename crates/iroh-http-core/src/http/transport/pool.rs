@@ -78,12 +78,21 @@ impl ConnectionPool {
     /// `connect_fn` is called at most once per concurrent batch of callers on
     /// the same `(node_id, ALPN)` pair.  Concurrent callers wait for the
     /// single in-progress connect and receive the same result.
+    ///
+    /// The returned `bool` is `true` when the connection was **reused** from
+    /// the pool (a live cached hit) and `false` when it was freshly dialed.
+    /// Callers use this to decide whether a subsequent transport failure is
+    /// worth a transparent retry: a reused connection may have been closed by
+    /// the peer (e.g. a serve-loop replace, #336) between pooling and use, so
+    /// resending an idempotent request on a fresh connection is safe and
+    /// expected (RFC 9110 §9.2.2). A freshly-dialed connection that fails is
+    /// not retried — redialing again would not help.
     pub async fn get_or_connect<F, Fut>(
         &self,
         node_id: PublicKey,
         alpn: &'static [u8],
         connect_fn: F,
-    ) -> Result<PooledConnection, String>
+    ) -> Result<(PooledConnection, bool), String>
     where
         F: FnOnce() -> Fut + Send,
         Fut: std::future::Future<Output = Result<Connection, String>> + Send,
@@ -97,7 +106,7 @@ impl ConnectionPool {
                 self.emit(crate::events::TransportEvent::pool_hit(
                     pooled.remote_id_str.clone(),
                 ));
-                return Ok((*pooled).clone());
+                return Ok(((*pooled).clone(), true));
             }
             // Stale — invalidate and fall through to a fresh connect.
             tracing::debug!(peer = %pooled.remote_id_str, "iroh-http: pool stale, reconnecting");
@@ -132,7 +141,7 @@ impl ConnectionPool {
                     self.cache.invalidate(&key).await;
                     return Err("pooled connection closed immediately after connect".to_string());
                 }
-                Ok((*pooled).clone())
+                Ok(((*pooled).clone(), false))
             }
         }
     }

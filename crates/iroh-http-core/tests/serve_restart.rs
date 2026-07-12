@@ -91,6 +91,24 @@ async fn fetch_status(
     panic!("fetch never succeeded: {last_err:?}");
 }
 
+/// A single fetch with NO external retry loop, returning the routed status or
+/// the error. Used to prove that `fetch_request`'s *internal* transparent
+/// retry recovers a pooled connection the server force-closed on serve-replace
+/// — the caller must not need its own retry.
+async fn single_fetch(
+    client: &IrohEndpoint,
+    server_id: &str,
+    addrs: &[std::net::SocketAddr],
+    path: &str,
+) -> Result<u16, String> {
+    fetch(
+        client, server_id, path, "GET", &[], None, None, Some(addrs), None, true, None,
+    )
+    .await
+    .map(|res| res.status)
+    .map_err(|e| e.to_string())
+}
+
 /// A routed non-200 must survive a serve → stop → serve restart on the same
 /// live endpoint. Regression for the iOS foreground "blanket 200" symptom.
 #[tokio::test]
@@ -309,4 +327,51 @@ async fn stop_serve_closes_active_connections() {
          stopped serve loop is still serving on a pooled connection (the \
          on-device \"serve keeps answering post-stop\" bug)",
     );
+}
+
+/// A fetch on a pooled connection that a serve-replace has force-closed must be
+/// transparently retried on a fresh connection — the caller should NOT have to
+/// retry. Regression for #119: the #336 replace-path `shutdown_and_close`
+/// severs the client's pooled QUIC connection at the top of the next serve
+/// iteration, so a request reusing that connection races a close. Before the
+/// client-side single-retry fix this surfaced as a hard
+/// `NetworkError: ... serve loop replaced` / `send_request: connection error`.
+#[tokio::test]
+async fn fetch_retries_pooled_connection_closed_by_serve_replace() {
+    let (server_ep, client_ep) = common::make_pair().await;
+    let server_id = common::node_id(&server_ep);
+    let addrs = common::server_addrs(&server_ep);
+
+    // Warm the pool: first serve loop + one request establishes a pooled
+    // client→server QUIC connection that later iterations will try to reuse.
+    serve_router(&server_ep);
+    assert_eq!(
+        single_fetch(&client_ep, &server_id, &addrs, "/status/200")
+            .await
+            .expect("warm-up fetch should succeed"),
+        200,
+    );
+
+    // Each iteration replaces the serve loop (force-closing the pooled
+    // connection, exactly like the #119 burst test) then fires a SINGLE fetch
+    // with no external retry. Every one must still route correctly.
+    for iter in 0..10 {
+        // Replace the serve loop: set_serve_handle → shutdown_and_close on the
+        // previous handle severs the client's pooled connection.
+        serve_router(&server_ep);
+
+        let status = single_fetch(&client_ep, &server_id, &addrs, "/status/503")
+            .await
+            .unwrap_or_else(|e| {
+                panic!(
+                    "iter {iter}: single fetch after serve-replace failed ({e}) — \
+                     the client did not transparently retry the pooled connection \
+                     the server force-closed (#119)"
+                )
+            });
+        assert_eq!(
+            status, 503,
+            "iter {iter}: fetch after serve-replace must route to 503, got {status}",
+        );
+    }
 }
