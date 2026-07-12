@@ -316,25 +316,9 @@ export function makeServe(
         // desktop/iOS/Node/Deno are never forced to fully buffer (no regression).
         let bodyStream: ReadableStream<Uint8Array>;
         if (res.body) {
-          // IROH338_DIAG (TEMPORARY — remove before PR ready, #338): prove which
-          // branch runs on the Android WebView. Streaming path: never consume a
-          // present body, so we only log its truthiness/type here.
-          console.log(
-            `[IROH338_DIAG] branch=stream res.body=truthy typeof=${typeof res
-              .body} status=${res.status}`,
-          );
           bodyStream = res.body;
         } else {
           const buffered = new Uint8Array(await res.arrayBuffer());
-          // IROH338_DIAG (TEMPORARY — remove before PR ready, #338): the falsy
-          // res.body path is the Android case. `buffered` IS the body used for
-          // the real response (not an extra read), so logging its byteLength
-          // here does not consume anything and directly rules out the issue's
-          // caveat that res.arrayBuffer() might also be empty on that WebView.
-          console.log(
-            `[IROH338_DIAG] branch=buffered res.body=falsy typeof=${typeof res
-              .body} arrayBufferBytes=${buffered.byteLength} status=${res.status}`,
-          );
           bodyStream = new ReadableStream<Uint8Array>({
             start(controller) {
               if (buffered.byteLength > 0) controller.enqueue(buffered);
