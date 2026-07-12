@@ -101,8 +101,21 @@ async fn single_fetch(
     addrs: &[std::net::SocketAddr],
     path: &str,
 ) -> Result<u16, String> {
+    single_fetch_method(client, server_id, addrs, path, "GET").await
+}
+
+/// Like [`single_fetch`] but with a caller-chosen HTTP method and NO body, so a
+/// non-idempotent method (POST/PATCH) can be exercised against the transparent
+/// retry gate.
+async fn single_fetch_method(
+    client: &IrohEndpoint,
+    server_id: &str,
+    addrs: &[std::net::SocketAddr],
+    path: &str,
+    method: &str,
+) -> Result<u16, String> {
     fetch(
-        client, server_id, path, "GET", &[], None, None, Some(addrs), None, true, None,
+        client, server_id, path, method, &[], None, None, Some(addrs), None, true, None,
     )
     .await
     .map(|res| res.status)
@@ -473,4 +486,53 @@ async fn stop_serve_racing_restart_never_loses_stop() {
     tokio::time::timeout(Duration::from_secs(5), server_ep.wait_serve_stop())
         .await
         .expect("serve loop should stop after the racing rounds");
+}
+
+/// P1 (data-corruption): a non-idempotent request (empty-body POST) that fails
+/// on a REUSED pooled connection must NOT be transparently retried. The #119
+/// retry recovers GET (idempotent) transparently, but replaying a POST the
+/// peer's old serve loop may already have processed would double-execute it
+/// (RFC 9110 §9.2.2 permits replay only for idempotent methods). The FFI builds
+/// `Body::empty()` for any method, so body-emptiness alone must not authorize a
+/// resend.
+///
+/// Setup mirrors the GET retry test: warm a pooled connection, then replace the
+/// serve loop (force-closing that connection) and fire a POST with no external
+/// retry. On the iterations where attempt 1 reuses the just-closed connection
+/// and fails with `ConnectionFailed`, a correct client surfaces the error
+/// instead of retrying — so at least one POST must return `Err`. Before the
+/// idempotency guard every such POST was silently retried onto the new loop and
+/// returned `Ok(200)`, so `saw_error` stayed false (RED).
+#[tokio::test]
+async fn post_not_retried_on_pooled_connection_closed_by_serve_replace() {
+    let (server_ep, client_ep) = common::make_pair().await;
+    let server_id = common::node_id(&server_ep);
+    let addrs = common::server_addrs(&server_ep);
+
+    serve_router(&server_ep);
+    single_fetch_method(&client_ep, &server_id, &addrs, "/status/200", "GET")
+        .await
+        .expect("warm-up GET should succeed");
+
+    let mut saw_error = false;
+    for _ in 0..12 {
+        // Replace the serve loop → shutdown_and_close force-closes the pooled
+        // connection, so the next reuse races a closed connection.
+        serve_router(&server_ep);
+
+        if single_fetch_method(&client_ep, &server_id, &addrs, "/status/200", "POST")
+            .await
+            .is_err()
+        {
+            saw_error = true;
+        }
+    }
+
+    assert!(
+        saw_error,
+        "an empty-body POST that failed on a reused pooled connection was \
+         transparently retried instead of surfacing ConnectionFailed — a \
+         non-idempotent request must never be replayed, or the peer double- \
+         executes it (P1 / RFC 9110 §9.2.2)",
+    );
 }

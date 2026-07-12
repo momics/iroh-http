@@ -112,15 +112,33 @@ pub async fn fetch_request(
 ) -> Result<hyper::Response<Body>, FetchError> {
     let node_id = addr.id;
 
+    // P2: the stable_id of the connection the most recent attempt actually
+    // used. Eviction is scoped to this so we only ever close the connection
+    // that failed — never a fresh replacement a concurrent request dialed under
+    // the same key. `None` = no connection was obtained (connect failed / timed
+    // out before dialing), in which case eviction is a no-op.
+    let last_conn_id: std::sync::Mutex<Option<usize>> = std::sync::Mutex::new(None);
+
     // Split the request so a transparent retry can rebuild it. A request whose
     // body is empty (exact size 0 — every GET/HEAD/DELETE the FFI layer builds
-    // with `Body::empty()`) is safe to resend on a fresh connection: no body
-    // bytes are ever consumed, so resending is byte-for-byte identical (RFC
-    // 9110 §9.2.2). A streaming body may have been partially read by a failed
-    // attempt, so it is never retried.
+    // with `Body::empty()`) can be reconstructed byte-for-byte on a fresh
+    // connection. A streaming body may have been partially read by a failed
+    // attempt, so it is never resent.
     let (parts, body) = req.into_parts();
     let body_resendable = http_body::Body::size_hint(&body).exact() == Some(0);
     let method = parts.method.clone();
+    // P1: whether it is SAFE to transparently replay this request. RFC 9110
+    // §9.2.2 only permits automatic replay when the method is idempotent AND no
+    // response was received — body-emptiness is NOT a substitute for
+    // idempotency. The FFI builds `Body::empty()` for *any* method (including
+    // POST/PATCH) when no body reader is supplied, and `attempt_send` can
+    // surface `ConnectionFailed` even after the peer's (old) serve loop already
+    // processed the request bytes (the #336 replace-close race). Retrying an
+    // empty-body POST/PATCH would silently double-execute it. Gate the retry on
+    // `Method::is_idempotent()` (GET/HEAD/PUT/DELETE/OPTIONS/TRACE = true;
+    // POST/PATCH = false). The #119 recovery path and all iOS interop traffic
+    // are GET, so this does not regress it.
+    let retry_safe = body_resendable && method.is_idempotent();
     let uri = parts.uri.clone();
     let version = parts.version;
     let headers = parts.headers.clone();
@@ -145,7 +163,8 @@ pub async fn fetch_request(
         } else {
             body
         };
-        let (result, reused) = attempt_send(endpoint, addr, node_id, build_req(first_body), cfg).await;
+        let (result, reused) =
+            attempt_send(endpoint, addr, node_id, build_req(first_body), cfg, &last_conn_id).await;
 
         let first_err = match result {
             Ok(resp) => return Ok(resp),
@@ -161,25 +180,37 @@ pub async fn fetch_request(
 
         // Evict the (now known-bad) pooled connection so attempt 2 — and any
         // concurrent/future request — dials a fresh one instead of reusing it.
+        // Scoped to the connection attempt 1 used (P2).
         if retryable {
+            let failed_id = *last_conn_id.lock().unwrap_or_else(|e| e.into_inner());
             endpoint
                 .pool()
-                .evict_and_close(node_id, ALPN, b"iroh-http fetch failed")
+                .evict_and_close(node_id, ALPN, b"iroh-http fetch failed", failed_id)
                 .await;
         }
 
         // Transparent single retry: only for a *reused* connection (a fresh
-        // dial that already failed would just fail again) carrying a resendable
-        // (empty) body. This makes pooled-connection reuse across a serve
-        // replace transparent (#119) while preserving the #336 invariant that
-        // the peer lands on the new serve loop via a fresh connection.
-        if retryable && reused && body_resendable {
-            let (retry_result, _) =
-                attempt_send(endpoint, addr, node_id, build_req(Body::empty()), cfg).await;
+        // dial that already failed would just fail again) carrying a
+        // resendable, idempotent request (`retry_safe`). This makes pooled-
+        // connection reuse across a serve replace transparent (#119) while
+        // preserving the #336 invariant that the peer lands on the new serve
+        // loop via a fresh connection — and never double-executes a
+        // non-idempotent request (P1).
+        if retryable && reused && retry_safe {
+            let (retry_result, _) = attempt_send(
+                endpoint,
+                addr,
+                node_id,
+                build_req(Body::empty()),
+                cfg,
+                &last_conn_id,
+            )
+            .await;
             if let Err(FetchError::ConnectionFailed { .. }) = &retry_result {
+                let failed_id = *last_conn_id.lock().unwrap_or_else(|e| e.into_inner());
                 endpoint
                     .pool()
-                    .evict_and_close(node_id, ALPN, b"iroh-http fetch retry failed")
+                    .evict_and_close(node_id, ALPN, b"iroh-http fetch retry failed", failed_id)
                     .await;
             }
             return retry_result;
@@ -192,11 +223,13 @@ pub async fn fetch_request(
         Some(t) => match tokio::time::timeout(t, retry_seq).await {
             Ok(r) => r,
             Err(_) => {
-                // Timed out across the whole sequence: evict so the next
-                // request starts clean, then surface the bound (#336).
+                // Timed out across the whole sequence: evict the connection the
+                // in-flight attempt was using so the next request starts clean,
+                // then surface the bound (#336). Scoped to that connection (P2).
+                let failed_id = *last_conn_id.lock().unwrap_or_else(|e| e.into_inner());
                 endpoint
                     .pool()
-                    .evict_and_close(node_id, ALPN, b"iroh-http fetch timed out")
+                    .evict_and_close(node_id, ALPN, b"iroh-http fetch timed out", failed_id)
                     .await;
                 Err(FetchError::Timeout)
             }
@@ -209,12 +242,18 @@ pub async fn fetch_request(
 /// with whether the connection was **reused** from the pool (see
 /// [`crate::http::transport::pool::ConnectionPool::get_or_connect`]), which the
 /// caller uses to decide whether a connection failure is worth a single retry.
+///
+/// Records the [`Connection::stable_id`](iroh::endpoint::Connection::stable_id)
+/// of the connection actually used into `last_conn_id` (or `None` if no
+/// connection was obtained) so the caller can scope eviction to the exact
+/// connection that failed (P2).
 async fn attempt_send(
     endpoint: &IrohEndpoint,
     addr: &iroh::EndpointAddr,
     node_id: iroh::PublicKey,
     req: hyper::Request<Body>,
     cfg: &StackConfig,
+    last_conn_id: &std::sync::Mutex<Option<usize>>,
 ) -> (Result<hyper::Response<Body>, FetchError>, bool) {
     let ep_raw = endpoint.raw().clone();
     let addr_clone = addr.clone();
@@ -232,6 +271,10 @@ async fn attempt_send(
     {
         Ok(v) => v,
         Err(e) => {
+            // No connection was obtained — clear the identity so a subsequent
+            // eviction (e.g. on timeout) is a no-op rather than closing an
+            // unrelated cached connection.
+            *last_conn_id.lock().unwrap_or_else(|e| e.into_inner()) = None;
             return (
                 Err(FetchError::ConnectionFailed {
                     detail: e,
@@ -239,11 +282,15 @@ async fn attempt_send(
                 }),
                 // A failed connect means nothing was reused.
                 false,
-            )
+            );
         }
     };
 
     let conn = pooled.conn.clone();
+    // Record the connection this attempt is about to use so eviction is scoped
+    // to it and never closes a fresh replacement dialed by a concurrent request.
+    *last_conn_id.lock().unwrap_or_else(|e| e.into_inner()) = Some(conn.stable_id());
+
 
     let (send, recv) = match conn.open_bi().await {
         Ok(pair) => pair,
