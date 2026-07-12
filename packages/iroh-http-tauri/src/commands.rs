@@ -179,6 +179,17 @@ pub async fn create_endpoint<R: tauri::Runtime>(
             "iroh-http-tauri: replacing existing endpoint for node id"
         );
         old_ep.close_force().await;
+
+        // #336: the endpoint was rebuilt (foreground recovery / webview
+        // reload). Addresses discovered before the previous endpoint died may
+        // now be stale, so drop them and let a fresh browse repopulate the
+        // lookup instead of dialing dead paths.
+        #[cfg(mobile)]
+        if let Some(lookup) =
+            app.try_state::<crate::mobile_address_lookup::MobileAddressLookup>()
+        {
+            lookup.clear();
+        }
     }
 
     // Auto-bind the httpi:// scheme handler to the first endpoint created.
