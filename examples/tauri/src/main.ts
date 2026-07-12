@@ -1194,12 +1194,31 @@ interface TestPeer {
     setStatus(runSummary, "Running…");
 
     const startedAt = new Date().toISOString();
+    // Correlates the per-case and summary log lines for one run.
+    const runId = (globalThis.crypto?.randomUUID?.() ??
+      `${Date.now()}-${Math.random().toString(36).slice(2)}`);
     const rows: CaseRow[] = [];
     let index = 0;
 
     const record = (r: CaseRow) => {
-      appendGridRow(index++, r);
+      const seq = index++;
+      appendGridRow(seq, r);
       rows.push(r);
+      // Grep-anchored single line per case for adb logcat / iOS device logs.
+      console.log(
+        "IROH_INTEROP_CASE " +
+          JSON.stringify({
+            runId,
+            seq,
+            self: selfPlatform,
+            target: target.platform,
+            id: r.id,
+            ok: r.ok,
+            status: r.status,
+            latencyMs: r.latencyMs,
+            error: r.error,
+          }),
+      );
     };
 
     try {
@@ -1237,6 +1256,7 @@ interface TestPeer {
 
     const report = {
       schema: "iroh-http-interop/1",
+      runId,
       startedAt,
       finishedAt: new Date().toISOString(),
       direction: "outbound",
@@ -1245,11 +1265,11 @@ interface TestPeer {
       summary: { total: rows.length, passed, failed },
       cases: rows,
     };
-    const json = JSON.stringify(report, null, 2);
-    jsonLog.textContent = json;
-    // Emit compact JSON to the console → reaches logcat/stdout via the tracing
-    // wiring on device.
-    console.log("[iroh-http-interop]", JSON.stringify(report));
+    // On-screen: pretty, human-readable.
+    jsonLog.textContent = JSON.stringify(report, null, 2);
+    // Console: a single grep-anchored line for the whole run, so the operator
+    // can pull it verbatim from `adb logcat` / iOS device logs and parse it.
+    console.log("IROH_INTEROP_LOG " + JSON.stringify(report));
 
     running = false;
     refreshRunEnabled();
