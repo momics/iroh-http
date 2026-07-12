@@ -63,23 +63,34 @@ impl IrohEndpoint {
         // land on the stale loop's handler and get its old response (the
         // "half-live serve answers a blanket 200 instead of the routed status"
         // symptom). Shut the previous loop down so only the new one accepts.
-        let previous = self
+        //
+        // F2: take the previous handle, install the done signal, observe/clear
+        // the early-stop flag, and store the new handle all under ONE
+        // continuous hold of the `serve_handle` lock. Every step is
+        // non-blocking (no await), so the critical section stays short.
+        //
+        // Releasing the lock between `take()` and the final store previously
+        // left `serve_handle == None` for a window in which a concurrent
+        // `stop_serve()` (an independent Tauri command fired by JS abort/close
+        // at any time) would take its None branch and set
+        // `serve_stopped_early = true`. But this method had already read
+        // `was_stopped = false`, so the new loop was never shut down — the stop
+        // was lost and the loop ran forever; worse, the now-stuck flag would
+        // spuriously shut down the NEXT serve. `stop_serve()` sets the flag
+        // only while holding `serve_handle`, so holding it here forces a racing
+        // `stop_serve()` to either (a) run first and be observed via the flag
+        // swap below, or (b) block until the new handle is stored and then shut
+        // *it* down. Either way the stop is honoured exactly once.
+        let mut guard = self
             .inner
             .session
             .serve_handle
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .take();
-        if let Some(prev) = previous {
+            .unwrap_or_else(|e| e.into_inner());
+
+        if let Some(prev) = guard.take() {
             prev.shutdown_and_close();
         }
-
-        // Clear the early-stop flag and check if it was set.
-        let was_stopped = self
-            .inner
-            .session
-            .serve_stopped_early
-            .swap(false, std::sync::atomic::Ordering::AcqRel);
 
         *self
             .inner
@@ -88,16 +99,19 @@ impl IrohEndpoint {
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = Some(handle.subscribe_done());
 
+        // Clear the early-stop flag and check if it was set. Serialized with
+        // `stop_serve()`'s flag-set via the `serve_handle` lock we hold, so this
+        // read-and-clear can never miss a concurrent stop.
+        let was_stopped = self
+            .inner
+            .session
+            .serve_stopped_early
+            .swap(false, std::sync::atomic::Ordering::AcqRel);
         if was_stopped {
             handle.shutdown();
         }
 
-        *self
-            .inner
-            .session
-            .serve_handle
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = Some(handle);
+        *guard = Some(handle);
     }
 
     /// Signal the serve loop to stop accepting new connections.

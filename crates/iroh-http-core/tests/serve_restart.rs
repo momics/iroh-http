@@ -13,7 +13,9 @@ mod common;
 
 use std::time::Duration;
 
-use iroh_http_core::{fetch, ffi_serve, respond, IrohEndpoint, RequestPayload, ServeOptions};
+use iroh_http_core::{
+    fetch, ffi_serve, respond, IrohEndpoint, RequestPayload, ServeOptions,
+};
 
 /// Install a handler that routes `/status/<code>` to that HTTP status and
 /// everything else to 418, then register it as the endpoint's serve handle
@@ -75,17 +77,7 @@ async fn fetch_status(
     let mut last_err = None;
     for _ in 0..10 {
         match fetch(
-            client,
-            server_id,
-            path,
-            "GET",
-            &[],
-            None,
-            None,
-            Some(addrs),
-            None,
-            true,
-            None,
+            client, server_id, path, "GET", &[], None, None, Some(addrs), None, true, None,
         )
         .await
         {
@@ -97,6 +89,37 @@ async fn fetch_status(
         }
     }
     panic!("fetch never succeeded: {last_err:?}");
+}
+
+/// A single fetch with NO external retry loop, returning the routed status or
+/// the error. Used to prove that `fetch_request`'s *internal* transparent
+/// retry recovers a pooled connection the server force-closed on serve-replace
+/// — the caller must not need its own retry.
+async fn single_fetch(
+    client: &IrohEndpoint,
+    server_id: &str,
+    addrs: &[std::net::SocketAddr],
+    path: &str,
+) -> Result<u16, String> {
+    single_fetch_method(client, server_id, addrs, path, "GET").await
+}
+
+/// Like [`single_fetch`] but with a caller-chosen HTTP method and NO body, so a
+/// non-idempotent method (POST/PATCH) can be exercised against the transparent
+/// retry gate.
+async fn single_fetch_method(
+    client: &IrohEndpoint,
+    server_id: &str,
+    addrs: &[std::net::SocketAddr],
+    path: &str,
+    method: &str,
+) -> Result<u16, String> {
+    fetch(
+        client, server_id, path, method, &[], None, None, Some(addrs), None, true, None,
+    )
+    .await
+    .map(|res| res.status)
+    .map_err(|e| e.to_string())
 }
 
 /// A routed non-200 must survive a serve → stop → serve restart on the same
@@ -229,8 +252,7 @@ async fn wait_serve_stop_ignores_stale_done_signal() {
     // ── Cycle B: start a new loop, then wait. wait_serve_stop must block on
     //    the NEW loop, not return instantly off cycle A's stale `true`. ──────
     serve_router(&server_ep);
-    let waited =
-        tokio::time::timeout(Duration::from_millis(400), server_ep.wait_serve_stop()).await;
+    let waited = tokio::time::timeout(Duration::from_millis(400), server_ep.wait_serve_stop()).await;
     assert!(
         waited.is_err(),
         "wait_serve_stop resolved while the current serve loop is still running \
@@ -259,17 +281,7 @@ async fn fetch_once_status(
     match tokio::time::timeout(
         timeout,
         fetch(
-            client,
-            server_id,
-            path,
-            "GET",
-            &[],
-            None,
-            None,
-            Some(addrs),
-            None,
-            true,
-            None,
+            client, server_id, path, "GET", &[], None, None, Some(addrs), None, true, None,
         ),
     )
     .await
@@ -320,18 +332,207 @@ async fn stop_serve_closes_active_connections() {
     // connection. Before the fix this returned 200 (the per-connection task was
     // still alive and serving); now the connection is closed so the request is
     // refused / not answered.
-    let status = fetch_once_status(
-        &client_ep,
-        &server_id,
-        &addrs,
-        "/hello",
-        Duration::from_secs(3),
-    )
-    .await;
+    let status =
+        fetch_once_status(&client_ep, &server_id, &addrs, "/hello", Duration::from_secs(3)).await;
     assert_eq!(
         status, None,
         "request was answered (status {status:?}) after stop_serve() — the \
          stopped serve loop is still serving on a pooled connection (the \
          on-device \"serve keeps answering post-stop\" bug)",
+    );
+}
+
+/// A fetch on a pooled connection that a serve-replace has force-closed must be
+/// transparently retried on a fresh connection — the caller should NOT have to
+/// retry. Regression for #119: the #336 replace-path `shutdown_and_close`
+/// severs the client's pooled QUIC connection at the top of the next serve
+/// iteration, so a request reusing that connection races a close. Before the
+/// client-side single-retry fix this surfaced as a hard
+/// `NetworkError: ... serve loop replaced` / `send_request: connection error`.
+#[tokio::test]
+async fn fetch_retries_pooled_connection_closed_by_serve_replace() {
+    let (server_ep, client_ep) = common::make_pair().await;
+    let server_id = common::node_id(&server_ep);
+    let addrs = common::server_addrs(&server_ep);
+
+    // Warm the pool: first serve loop + one request establishes a pooled
+    // client→server QUIC connection that later iterations will try to reuse.
+    serve_router(&server_ep);
+    assert_eq!(
+        single_fetch(&client_ep, &server_id, &addrs, "/status/200")
+            .await
+            .expect("warm-up fetch should succeed"),
+        200,
+    );
+
+    // Each iteration replaces the serve loop (force-closing the pooled
+    // connection, exactly like the #119 burst test) then fires a SINGLE fetch
+    // with no external retry. Every one must still route correctly.
+    for iter in 0..10 {
+        // Replace the serve loop: set_serve_handle → shutdown_and_close on the
+        // previous handle severs the client's pooled connection.
+        serve_router(&server_ep);
+
+        let status = single_fetch(&client_ep, &server_id, &addrs, "/status/503")
+            .await
+            .unwrap_or_else(|e| {
+                panic!(
+                    "iter {iter}: single fetch after serve-replace failed ({e}) — \
+                     the client did not transparently retry the pooled connection \
+                     the server force-closed (#119)"
+                )
+            });
+        assert_eq!(
+            status, 503,
+            "iter {iter}: fetch after serve-replace must route to 503, got {status}",
+        );
+    }
+}
+
+/// F1 (lost close-wakeup): after a serve-replace force-closes active
+/// connections, an **idle** pooled connection must actually be torn down, so a
+/// later request over it can never be served by the stale/replaced loop.
+///
+/// The per-connection task parks in `accept_bi()`. Teardown sets `close_flag`
+/// then `close_connections.notify_waiters()`, which stores no permit and only
+/// wakes already-registered waiters. If the task loaded the flag *before*
+/// registering its waiter, the store+notify could land in that gap and be lost
+/// — the idle task would then sleep forever in `accept_bi()`, never re-check the
+/// flag, and keep serving the stale handler over the pooled connection. The fix
+/// registers the waiter (`Notified::enable()`) before the flag load. This test
+/// establishes an idle pooled connection, replaces the loop, and asserts the
+/// next fetch routes to the NEW handler (not the stale one).
+#[tokio::test]
+async fn idle_pooled_connection_closed_on_serve_replace() {
+    let (server_ep, client_ep) = common::make_pair().await;
+    let server_id = common::node_id(&server_ep);
+    let addrs = common::server_addrs(&server_ep);
+
+    // Stale loop answers everything 200; warm a pooled connection so its
+    // per-connection task is left parked idle in `accept_bi()`.
+    serve_constant(&server_ep, 200);
+    assert_eq!(
+        single_fetch(&client_ep, &server_id, &addrs, "/hello")
+            .await
+            .expect("warm-up fetch should succeed"),
+        200,
+    );
+
+    // Let the per-connection task settle back into its idle wait so the replace
+    // below hits the exact "parked in accept_bi" state the F1 race needs.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Replace the loop with one that answers 503. This force-closes the idle
+    // pooled connection; the parked task MUST wake and close it.
+    serve_constant(&server_ep, 503);
+
+    // Give the wake+close a moment to propagate before re-fetching.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // The next request must route to the NEW loop. A 200 here means the idle
+    // connection was never closed (lost wakeup) and the stale loop still serves.
+    let status = single_fetch(&client_ep, &server_id, &addrs, "/hello")
+        .await
+        .expect("fetch after replace should succeed (fresh connection)");
+    assert_eq!(
+        status, 503,
+        "idle pooled connection was still served by the stale loop after \
+         serve-replace (got {status}) — the close wakeup was lost (F1)",
+    );
+}
+
+/// F2 (lost-stop race): `stop_serve()` fired concurrently with a serve restart
+/// must never be dropped, and must never leave `serve_stopped_early` stuck true
+/// (which would spuriously shut down the NEXT healthy serve loop).
+///
+/// Best-effort stress test: repeatedly race `stop_serve()` against a serve
+/// restart to exercise the window where `set_serve_handle` momentarily holds no
+/// registered handle. Afterwards a fresh serve must be fully healthy (routes
+/// correctly, not immediately shut down) and still stoppable — proving no stop
+/// was lost into a stuck flag.
+#[tokio::test]
+async fn stop_serve_racing_restart_never_loses_stop() {
+    let (server_ep, client_ep) = common::make_pair().await;
+    let server_id = common::node_id(&server_ep);
+    let addrs = common::server_addrs(&server_ep);
+
+    serve_router(&server_ep);
+
+    for _ in 0..25 {
+        // Race a stop against a restart on the same endpoint.
+        let racer = server_ep.clone();
+        let stopper = tokio::spawn(async move { racer.stop_serve() });
+        serve_router(&server_ep);
+        stopper.await.unwrap();
+
+        // Whoever won, quiesce to a known-stopped state before the next round.
+        server_ep.stop_serve();
+        let _ = tokio::time::timeout(Duration::from_secs(5), server_ep.wait_serve_stop()).await;
+    }
+
+    // After all the racing, a clean serve must be fully alive — if a lost stop
+    // had left `serve_stopped_early` stuck true, this loop would be shut down
+    // the instant it registers and the fetch would never succeed.
+    serve_router(&server_ep);
+    assert_eq!(
+        fetch_status(&client_ep, &server_id, &addrs, "/status/503").await,
+        503,
+        "a fresh serve loop was not healthy after concurrent stop/restart — \
+         a lost stop left serve_stopped_early stuck, spuriously stopping it (F2)",
+    );
+
+    // And it must still stop cleanly.
+    server_ep.stop_serve();
+    tokio::time::timeout(Duration::from_secs(5), server_ep.wait_serve_stop())
+        .await
+        .expect("serve loop should stop after the racing rounds");
+}
+
+/// P1 (data-corruption): a non-idempotent request (empty-body POST) that fails
+/// on a REUSED pooled connection must NOT be transparently retried. The #119
+/// retry recovers GET (idempotent) transparently, but replaying a POST the
+/// peer's old serve loop may already have processed would double-execute it
+/// (RFC 9110 §9.2.2 permits replay only for idempotent methods). The FFI builds
+/// `Body::empty()` for any method, so body-emptiness alone must not authorize a
+/// resend.
+///
+/// Setup mirrors the GET retry test: warm a pooled connection, then replace the
+/// serve loop (force-closing that connection) and fire a POST with no external
+/// retry. On the iterations where attempt 1 reuses the just-closed connection
+/// and fails with `ConnectionFailed`, a correct client surfaces the error
+/// instead of retrying — so at least one POST must return `Err`. Before the
+/// idempotency guard every such POST was silently retried onto the new loop and
+/// returned `Ok(200)`, so `saw_error` stayed false (RED).
+#[tokio::test]
+async fn post_not_retried_on_pooled_connection_closed_by_serve_replace() {
+    let (server_ep, client_ep) = common::make_pair().await;
+    let server_id = common::node_id(&server_ep);
+    let addrs = common::server_addrs(&server_ep);
+
+    serve_router(&server_ep);
+    single_fetch_method(&client_ep, &server_id, &addrs, "/status/200", "GET")
+        .await
+        .expect("warm-up GET should succeed");
+
+    let mut saw_error = false;
+    for _ in 0..12 {
+        // Replace the serve loop → shutdown_and_close force-closes the pooled
+        // connection, so the next reuse races a closed connection.
+        serve_router(&server_ep);
+
+        if single_fetch_method(&client_ep, &server_id, &addrs, "/status/200", "POST")
+            .await
+            .is_err()
+        {
+            saw_error = true;
+        }
+    }
+
+    assert!(
+        saw_error,
+        "an empty-body POST that failed on a reused pooled connection was \
+         transparently retried instead of surfacing ConnectionFailed — a \
+         non-idempotent request must never be replayed, or the peer double- \
+         executes it (P1 / RFC 9110 §9.2.2)",
     );
 }
