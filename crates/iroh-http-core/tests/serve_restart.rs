@@ -235,3 +235,78 @@ async fn wait_serve_stop_ignores_stale_done_signal() {
         .await
         .expect("cycle B: wait_serve_stop should resolve after stop_serve");
 }
+
+/// A single fetch with no reconnect retry, bounded by `timeout`. Returns the
+/// routed status if the request was *answered*, or `None` if it was refused /
+/// not answered within the bound. Used to assert a stopped serve loop does not
+/// keep answering.
+async fn fetch_once_status(
+    client: &IrohEndpoint,
+    server_id: &str,
+    addrs: &[std::net::SocketAddr],
+    path: &str,
+    timeout: Duration,
+) -> Option<u16> {
+    match tokio::time::timeout(
+        timeout,
+        fetch(
+            client, server_id, path, "GET", &[], None, None, Some(addrs), None, true, None,
+        ),
+    )
+    .await
+    {
+        Ok(Ok(res)) => Some(res.status),
+        // Connection refused/failed, or bounded-out: not answered.
+        Ok(Err(_)) | Err(_) => None,
+    }
+}
+
+/// An explicit `stop_serve()` must be authoritative: after it, a peer whose
+/// QUIC connection is still open must NOT keep getting served. Regression for
+/// the on-device iOS symptom where, after stopping the server, the desktop peer
+/// kept receiving `200`s over its already-open pooled connection — requests
+/// were dispatched to live per-connection tasks *seconds after* the serve loop
+/// logged "all in-flight requests drained".
+///
+/// Root cause: graceful `stop_serve()` → `shutdown()` broke only the *accept*
+/// loop (no new connections) but left the detached per-connection tasks
+/// `accept_bi()`-ing on pooled connections. The fix closes active connections
+/// after the drain completes (drain-then-close), so a stopped loop never
+/// serves.
+#[tokio::test]
+async fn stop_serve_closes_active_connections() {
+    let (server_ep, client_ep) = common::make_pair().await;
+    let server_id = common::node_id(&server_ep);
+    let addrs = common::server_addrs(&server_ep);
+
+    // ── Serve, then establish a pooled connection with one served request. ───
+    serve_constant(&server_ep, 200);
+    assert_eq!(
+        fetch_status(&client_ep, &server_id, &addrs, "/hello").await,
+        200,
+        "baseline: request should be served while the server is running",
+    );
+
+    // ── Stop serving (mirrors the tauri stop_serve + wait_serve_stop path). ──
+    server_ep.stop_serve();
+    tokio::time::timeout(Duration::from_secs(5), server_ep.wait_serve_stop())
+        .await
+        .expect("serve loop should stop");
+
+    // Give the drain-then-close a moment to tear down the pooled connection,
+    // then fire a request like the desktop peer does after the server stops.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // The stopped loop must NOT answer over the peer's still-open pooled
+    // connection. Before the fix this returned 200 (the per-connection task was
+    // still alive and serving); now the connection is closed so the request is
+    // refused / not answered.
+    let status =
+        fetch_once_status(&client_ep, &server_id, &addrs, "/hello", Duration::from_secs(3)).await;
+    assert_eq!(
+        status, None,
+        "request was answered (status {status:?}) after stop_serve() — the \
+         stopped serve loop is still serving on a pooled connection (the \
+         on-device \"serve keeps answering post-stop\" bug)",
+    );
+}

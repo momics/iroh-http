@@ -300,6 +300,24 @@ pub(super) async fn accept_loop<S>(
             _ = tokio::time::sleep(remaining) => {}
         }
     }
+
+    // #336 (stop path): the drain above only stops the *accept* loop and waits
+    // for in-flight requests to finish. The per-connection tasks spawned above
+    // are detached and keep `accept_bi()`-ing on already-open (pooled) QUIC
+    // connections, so without closing them a peer whose connection is still
+    // open keeps getting served AFTER stop — requests dispatched seconds after
+    // "all in-flight requests drained" (the "serve keeps answering post-stop"
+    // symptom). Now that in-flight work has drained, force the active
+    // connections closed so no new request is served on this stopped loop and
+    // the peer must redial (landing on a fresh loop if serve is restarted).
+    //
+    // This is the graceful, drain-THEN-close counterpart to the replace path's
+    // `shutdown_and_close()`, which sets `close_flag` up front for an immediate
+    // sever. Setting it here (idempotent: replace may have set it already) is
+    // harmless and unifies the invariant: a stopped serve loop never serves.
+    close_flag.store(true, Ordering::Release);
+    close_connections.notify_waiters();
+
     let _ = done_tx.send(true);
 }
 

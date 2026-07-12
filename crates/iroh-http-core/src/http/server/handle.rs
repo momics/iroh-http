@@ -10,8 +10,11 @@ pub struct ServeHandle {
     pub(super) join: tokio::task::JoinHandle<()>,
     pub(super) shutdown_notify: Arc<tokio::sync::Notify>,
     /// Set to `true` and paired with `close_connections` to force the accept
-    /// loop's active per-connection tasks to close their QUIC connections
-    /// immediately (used when a serve loop is replaced, not on graceful stop).
+    /// loop's active per-connection tasks to close their QUIC connections.
+    /// [`shutdown_and_close`](ServeHandle::shutdown_and_close) sets this
+    /// up-front for an *immediate* sever (serve-loop replace); graceful
+    /// `shutdown` sets it only after the drain completes (drain-then-close).
+    /// Either way, a stopped serve loop never serves a new request.
     pub(super) close_flag: Arc<AtomicBool>,
     /// Woken (via `notify_waiters`) to tell active connection tasks to
     /// re-check `close_flag` and tear their connection down.
@@ -22,14 +25,18 @@ pub struct ServeHandle {
 }
 
 impl ServeHandle {
+    /// Gracefully stop the serve loop: stop accepting new connections, drain
+    /// in-flight requests (up to `drain_timeout`), then close the remaining
+    /// active connections so no request is served after the loop has stopped.
     pub fn shutdown(&self) {
         self.shutdown_notify.notify_one();
     }
-    /// Stop the accept loop **and** force every active connection closed.
+    /// Stop the accept loop **and** force every active connection closed
+    /// *immediately*, without waiting for the graceful drain.
     ///
-    /// Unlike [`shutdown`], which lets in-flight requests drain on their
-    /// existing (pooled) connections, this severs the connections so remote
-    /// peers must reconnect. Used when a serve loop is being *replaced* on the
+    /// Unlike [`shutdown`], which drains in-flight requests before closing
+    /// connections, this severs the connections up front so remote peers must
+    /// reconnect right away. Used when a serve loop is being *replaced* on the
     /// same endpoint (#336): a client's pooled connection would otherwise keep
     /// being served by the old loop's handler, returning stale responses (the
     /// iOS foreground "blanket 200" symptom). Closing the connections forces
