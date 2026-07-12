@@ -29,6 +29,14 @@ pub struct DiscoveryOptions {
     pub dns_server: Option<String>,
     /// Whether to enable DNS discovery. Default: `true`.
     pub enabled: bool,
+    /// Explicit DNS nameserver IPs (e.g. `"8.8.8.8"`) for iroh's resolver.
+    ///
+    /// iroh's default resolver reads the host's system DNS config, but that is
+    /// unavailable on some platforms — notably Android, which has no
+    /// `/etc/resolv.conf` and requires a JNI-initialised `ndk_context`. When
+    /// non-empty, a resolver is built from these servers so relay, pkarr, and
+    /// DNS-discovery lookups work. Empty means use iroh's default resolver.
+    pub dns_nameservers: Vec<String>,
 }
 
 impl Default for DiscoveryOptions {
@@ -36,6 +44,7 @@ impl Default for DiscoveryOptions {
         Self {
             dns_server: None,
             enabled: true,
+            dns_nameservers: Vec::new(),
         }
     }
 }

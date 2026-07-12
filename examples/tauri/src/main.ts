@@ -112,6 +112,51 @@ persistKey(node.secretKey.toBytes());
   });
 }
 
+// ── Keyboard-aware viewport (mobile) ─────────────────────────────────────────
+//
+// Tauri renders edge-to-edge on Android, so the native soft keyboard slides
+// over the webview instead of resizing it — a focused input near the bottom
+// (e.g. the peer node-id field) ends up hidden behind the keyboard and can't be
+// pasted into. The `visualViewport` API reports the region left visible above
+// the keyboard; pad the body by the keyboard's height so the page can scroll
+// far enough, and pull the focused field up into view. Works on iOS too.
+
+{
+  const vv = window.visualViewport;
+  if (vv) {
+    const isTextField = (node: EventTarget | null): node is HTMLElement =>
+      node instanceof HTMLElement &&
+      (node.tagName === "INPUT" || node.tagName === "TEXTAREA");
+
+    const keyboardHeight = (): number =>
+      Math.max(0, window.innerHeight - vv.height - vv.offsetTop);
+
+    const syncInset = (): void => {
+      const kb = keyboardHeight();
+      document.body.style.paddingBottom = kb > 0 ? `${kb}px` : "";
+      if (kb > 0 && isTextField(document.activeElement)) {
+        document.activeElement.scrollIntoView({ block: "center" });
+      }
+    };
+
+    vv.addEventListener("resize", syncInset);
+    vv.addEventListener("scroll", syncInset);
+
+    document.addEventListener("focusin", (e) => {
+      if (!isTextField(e.target)) return;
+      // Wait for the keyboard to animate in and update `visualViewport`.
+      window.setTimeout(() => {
+        syncInset();
+        (e.target as HTMLElement).scrollIntoView({ block: "center" });
+      }, 300);
+    });
+
+    document.addEventListener("focusout", () => {
+      document.body.style.paddingBottom = "";
+    });
+  }
+}
+
 // ── Identity ───────────────────────────────────────────────────────────────────
 
 async function copyText(

@@ -100,6 +100,8 @@ pub async fn create_endpoint<R: tauri::Runtime>(
                 discovery: DiscoveryOptions {
                     dns_server: a.dns_discovery,
                     enabled: a.dns_discovery_enabled.unwrap_or(true),
+                    // Populated natively on mobile after opts are built (see below).
+                    dns_nameservers: Vec::new(),
                 },
                 pool: PoolOptions {
                     max_connections: a.max_pooled_connections,
@@ -132,6 +134,25 @@ pub async fn create_endpoint<R: tauri::Runtime>(
         })
         .transpose()?
         .unwrap_or_default();
+
+    // On mobile, iroh's default DNS resolver cannot read the system nameservers
+    // (Android has no `/etc/resolv.conf` and needs a JNI-initialised
+    // `ndk_context`), so relay/pkarr/DNS-discovery lookups time out. Query the
+    // platform's active nameservers natively and hand them to the endpoint.
+    // Best-effort: on failure or an empty result we fall back to iroh's default
+    // resolver (which works on iOS/desktop).
+    #[cfg(mobile)]
+    let opts = {
+        let mut opts = opts;
+        if let Some(mdns) = app.try_state::<crate::mobile_mdns::MobileMdns<R>>() {
+            if let Ok(servers) = mdns.get_dns_servers() {
+                if !servers.is_empty() {
+                    opts.discovery.dns_nameservers = servers;
+                }
+            }
+        }
+        opts
+    };
 
     let ep = iroh_http_core::endpoint::IrohEndpoint::bind(opts)
         .await

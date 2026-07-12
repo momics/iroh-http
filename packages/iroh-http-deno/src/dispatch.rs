@@ -342,6 +342,7 @@ async fn create_endpoint(p: Value) -> Value {
         discovery: DiscoveryOptions {
             dns_server: args.dns_discovery,
             enabled: args.dns_discovery_enabled.unwrap_or(true),
+            dns_nameservers: Vec::new(),
         },
         pool: PoolOptions {
             max_connections: args.max_pooled_connections,
