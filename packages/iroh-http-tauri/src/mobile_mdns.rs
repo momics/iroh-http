@@ -70,6 +70,11 @@ struct AdvertiseStartPayload<'a> {
     /// Relay URL, if any. Optional.
     #[serde(skip_serializing_if = "Option::is_none")]
     relay: Option<&'a str>,
+    /// Primary direct `ip:port` address, if known. Published as an `address`
+    /// TXT entry so browsing peers can dial this node over the LAN. Carries the
+    /// real bound QUIC port (never port 0). See #346.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    address: Option<&'a str>,
 }
 
 #[derive(Serialize)]
@@ -147,6 +152,7 @@ impl<R: Runtime> MobileMdns<R> {
         service_name: &str,
         pk: &str,
         relay: Option<&str>,
+        address: Option<&str>,
     ) -> Result<u64, String> {
         let resp: AdvertiseStartResponse = self
             .0
@@ -156,6 +162,7 @@ impl<R: Runtime> MobileMdns<R> {
                     service_name,
                     pk,
                     relay,
+                    address,
                 },
             )
             .map_err(|e| e.to_string())?;

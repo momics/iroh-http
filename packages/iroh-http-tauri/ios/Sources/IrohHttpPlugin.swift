@@ -20,6 +20,9 @@ struct AdvertiseStartArgs: Decodable {
     let serviceName: String
     let pk: String
     let relay: String?
+    /// Primary direct `ip:port` address to publish so browsing peers can dial
+    /// this node over the LAN. Carries the real bound QUIC port (never 0). #346.
+    let address: String?
 }
 
 struct AdvertiseStopArgs: Decodable {
@@ -242,6 +245,10 @@ class IrohHttpPlugin: Plugin {
             currentPks.insert(nodeId)
 
             var addrs: [String] = []
+            // #346: a direct `ip:port` address published by the advertiser lets
+            // this peer be dialed over the LAN. It already carries the real
+            // bound QUIC port, so it is surfaced verbatim.
+            if let address = txt["address"], !address.isEmpty { addrs.append(address) }
             if let relay = txt["relay"], !relay.isEmpty { addrs.append(relay) }
 
             if let name = instanceName {
@@ -305,6 +312,11 @@ class IrohHttpPlugin: Plugin {
 
         var txtPairs: [String: String] = ["pk": args.pk]
         if let relay = args.relay { txtPairs["relay"] = relay }
+        // #346: publish the node's direct `ip:port` address so peers can dial it
+        // over the LAN. The iOS `NWListener`'s own UDP port is unrelated to the
+        // QUIC socket, so the SRV port is not usable — the reconciled address
+        // (with the real bound QUIC port) travels in this TXT entry instead.
+        if let address = args.address, !address.isEmpty { txtPairs["address"] = address }
         let txtData = encodeTxtData(txtPairs)
 
         listener.service = NWListener.Service(

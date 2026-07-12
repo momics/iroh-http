@@ -132,6 +132,14 @@ fn build_endpoint_data(addrs: &[String]) -> EndpointData {
 
     for addr in addrs {
         if let Ok(sock) = addr.parse::<SocketAddr>() {
+            // A port-0 direct address is undialable (#346); never feed it to
+            // the dialer as a `TransportAddr::Ip`.
+            if sock.port() == 0 {
+                tracing::warn!(
+                    "iroh-http-tauri: skipping discovered direct address {sock} with port 0 (#346)"
+                );
+                continue;
+            }
             ip_addrs.push(TransportAddr::Ip(sock));
         } else if let Ok(url) = addr.parse::<RelayUrl>() {
             relay_urls.push(url);
@@ -322,5 +330,27 @@ mod tests {
     fn resolve_unknown_id_returns_none() {
         let lookup = MobileAddressLookup::new();
         assert!(lookup.resolve(endpoint_id(9)).is_none());
+    }
+
+    // Regression: #346 — the iOS re-emit snapshot can carry a direct address
+    // with port 0. It must never reach the dialer as a `TransportAddr::Ip`.
+    #[test]
+    fn build_endpoint_data_drops_port_zero_direct_addr() {
+        let data = build_endpoint_data(&[
+            "192.168.50.227:0".to_string(),
+            "192.168.50.227:59234".to_string(),
+        ]);
+        let ips: Vec<String> = data
+            .addrs()
+            .filter_map(|a| match a {
+                TransportAddr::Ip(s) => Some(s.to_string()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            ips,
+            vec!["192.168.50.227:59234".to_string()],
+            "port-0 direct address must be dropped, only the well-formed one kept"
+        );
     }
 }

@@ -1454,9 +1454,28 @@ pub fn advertise_peer<R: tauri::Runtime>(
     })?;
     let node_id = ep.node_id().to_string();
     let relay = ep.home_relay();
+    // #346: publish a primary direct `ip:port` address so browsing peers can
+    // dial this node over the LAN. The address carries the real bound QUIC port
+    // (reconciled from `bound_sockets`), never port 0 — which is what made iOS
+    // nodes undialable ("invalid socket address syntax" at the dialer).
+    let address = primary_direct_addr(&ep);
     state
-        .advertise_peer_start(&service_name, &node_id, relay.as_deref())
+        .advertise_peer_start(&service_name, &node_id, relay.as_deref(), address.as_deref())
         .map_err(|e| format_error_json("REFUSED", e))
+}
+
+/// Pick the primary direct address to advertise: the first routable
+/// (non-loopback, non-unspecified) reconciled direct address, falling back to
+/// the first available. Returns `None` when the endpoint has no usable direct
+/// address. See #346.
+#[cfg(mobile)]
+fn primary_direct_addr(ep: &iroh_http_core::IrohEndpoint) -> Option<String> {
+    let addrs = ep.direct_socket_addrs();
+    addrs
+        .iter()
+        .find(|a| !a.ip().is_loopback() && !a.ip().is_unspecified())
+        .or_else(|| addrs.first())
+        .map(|a| a.to_string())
 }
 
 /// Stop advertising this node on the local network.

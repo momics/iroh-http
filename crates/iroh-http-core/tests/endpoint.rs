@@ -85,6 +85,37 @@ async fn endpoint_bound_sockets_non_empty() {
     assert!(!sockets.is_empty(), "bound_sockets should not be empty");
 }
 
+// Regression: #346 — every direct (non-relay) address in a bound endpoint's
+// advertised `node_addr()` must carry a real, non-zero port. On iOS the derived
+// address arrived with port 0, so peers rejected it with
+// `invalid socket address syntax`. The port is reconciled from `bound_sockets`.
+#[tokio::test]
+async fn node_addr_direct_addresses_carry_nonzero_port() {
+    let opts = NodeOptions {
+        networking: NetworkingOptions {
+            disabled: true,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let ep = IrohEndpoint::bind(opts).await.unwrap();
+    let info = ep.node_addr();
+    for a in &info.addrs {
+        // Relay URLs are not socket addresses — skip them.
+        if a.contains("://") {
+            continue;
+        }
+        let sock: std::net::SocketAddr = a
+            .parse()
+            .unwrap_or_else(|e| panic!("advertised direct address {a:?} must parse: {e}"));
+        assert_ne!(
+            sock.port(),
+            0,
+            "advertised direct address {a:?} must carry a non-zero port"
+        );
+    }
+}
+
 #[tokio::test]
 async fn endpoint_close() {
     let opts = NodeOptions {

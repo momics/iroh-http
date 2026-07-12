@@ -65,14 +65,34 @@ impl IrohEndpoint {
         !self.inner.transport.ep.is_closed() && !self.bound_sockets().is_empty()
     }
 
+    /// Reconciled direct socket addresses for this endpoint.
+    ///
+    /// These are the endpoint's derived local IP addresses with their ports
+    /// reconciled against the real bound sockets, so a platform that enumerates
+    /// an address with port 0 (iOS, #346) yields the real bound QUIC port. Any
+    /// address that cannot be given a usable port is omitted. Relay URLs are not
+    /// included. This is the direct-address list that should be advertised.
+    pub fn direct_socket_addrs(&self) -> Vec<std::net::SocketAddr> {
+        let candidates: Vec<std::net::SocketAddr> =
+            self.inner.transport.ep.addr().ip_addrs().copied().collect();
+        let bound = self.bound_sockets();
+        super::bind::reconcile_direct_addr_ports(&candidates, &bound)
+    }
+
     /// Full node address: node ID + relay URL(s) + direct socket addresses.
+    ///
+    /// Direct-address ports are reconciled against the endpoint's bound sockets
+    /// so a platform that enumerates a local address with port 0 (iOS, #346)
+    /// still advertises the real bound QUIC port. Any address that cannot be
+    /// given a usable port is dropped rather than advertised as an undialable
+    /// `:0`.
     pub fn node_addr(&self) -> NodeAddrInfo {
         let addr = self.inner.transport.ep.addr();
         let mut addrs = Vec::new();
         for relay in addr.relay_urls() {
             addrs.push(relay.to_string());
         }
-        for da in addr.ip_addrs() {
+        for da in self.direct_socket_addrs() {
             addrs.push(da.to_string());
         }
         NodeAddrInfo {

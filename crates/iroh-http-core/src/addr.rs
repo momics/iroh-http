@@ -38,6 +38,13 @@ pub fn parse_node_addr(s: &str) -> Result<ParsedNodeAddr, CoreError> {
             let addr = addr_str
                 .parse::<std::net::SocketAddr>()
                 .map_err(|_| CoreError::invalid_input(format!("malformed address: {addr_str}")))?;
+            // #346: a port-0 direct address is undialable; reject it here rather
+            // than letting a useless `:0` reach the dialer.
+            if addr.port() == 0 {
+                return Err(CoreError::invalid_input(format!(
+                    "direct address {addr_str} has no port (port 0)"
+                )));
+            }
             direct_addrs.push(addr);
         }
         return Ok(ParsedNodeAddr {
