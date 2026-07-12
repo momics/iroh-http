@@ -51,7 +51,11 @@ private final class BrowseSession {
     let id: UInt64
     let browser: NWBrowser
     var pendingEvents: [[String: Any]] = []
-    var knownNodes: [String: String] = [:]  // fullServiceName → nodeId
+    // fullServiceName → (nodeId, signature). The signature is (nodeId + sorted
+    // dialable addrs) so a peer that rebinds to a new address under the SAME
+    // nodeId (the foreground-restart-rebind case, #336) re-emits instead of
+    // being suppressed by a nodeId-only dedup (#350 review M2).
+    var knownNodes: [String: (nodeId: String, signature: String)] = [:]
 
     init(id: UInt64, browser: NWBrowser) {
         self.id = id
@@ -199,11 +203,14 @@ class IrohHttpPlugin: Plugin {
         browser.stateUpdateHandler = { [weak self] state in
             if case .failed(let error) = state {
                 if case .dns(let code) = error, code == -65569 {
-                    browser.cancel()
-                    self?.queue.async { self?.browseSessions.removeValue(forKey: browseId) }
+                    // Expected on duplicate/teardown; not worth logging.
                 } else {
                     NSLog("[iroh-http-mdns] browse \(browseId) failed: \(error.localizedDescription)")
                 }
+                // #350 review L4: on any terminal failure cancel and drop the
+                // session so it doesn't leak in the map.
+                browser.cancel()
+                self?.queue.async { self?.browseSessions.removeValue(forKey: browseId) }
             }
         }
 
@@ -261,8 +268,12 @@ class IrohHttpPlugin: Plugin {
             if let relay = txt["relay"], !relay.isEmpty { addrs.append(relay) }
 
             if let name = instanceName {
-                if session.knownNodes[name] != nodeId {
-                    session.knownNodes[name] = nodeId
+                // #350 review M2: dedup on (nodeId + sorted addrs) so a rebind
+                // under the same nodeId re-emits with the new address instead of
+                // being suppressed.
+                let signature = nodeId + "|" + addrs.sorted().joined(separator: ",")
+                if session.knownNodes[name]?.signature != signature {
+                    session.knownNodes[name] = (nodeId: nodeId, signature: signature)
                     session.pendingEvents.append([
                         "type": "discovered",
                         "nodeId": nodeId,
@@ -273,10 +284,10 @@ class IrohHttpPlugin: Plugin {
         }
 
         // Emit "expired" for nodes that vanished from the result set.
-        let expiredNames = session.knownNodes.filter { !currentPks.contains($0.value) }.map { $0.key }
+        let expiredNames = session.knownNodes.filter { !currentPks.contains($0.value.nodeId) }.map { $0.key }
         for name in expiredNames {
-            if let pk = session.knownNodes.removeValue(forKey: name) {
-                session.pendingEvents.append(["type": "expired", "nodeId": pk, "addrs": []])
+            if let snapshot = session.knownNodes.removeValue(forKey: name) {
+                session.pendingEvents.append(["type": "expired", "nodeId": snapshot.nodeId, "addrs": []])
             }
         }
     }
@@ -339,11 +350,14 @@ class IrohHttpPlugin: Plugin {
         listener.stateUpdateHandler = { [weak self] state in
             if case .failed(let error) = state {
                 if case .dns(let code) = error, code == -65569 {
-                    listener.cancel()
-                    self?.queue.async { self?.advertiseSessions.removeValue(forKey: advertiseId) }
+                    // Expected on duplicate/teardown; not worth logging.
                 } else {
                     NSLog("[iroh-http-mdns] advertise \(advertiseId) failed: \(error.localizedDescription)")
                 }
+                // #350 review L4: on any terminal failure cancel and drop the
+                // session so it doesn't leak in the map.
+                listener.cancel()
+                self?.queue.async { self?.advertiseSessions.removeValue(forKey: advertiseId) }
             }
         }
 
@@ -393,11 +407,14 @@ class IrohHttpPlugin: Plugin {
         browser.stateUpdateHandler = { [weak self] state in
             if case .failed(let error) = state {
                 if case .dns(let code) = error, code == -65569 {
-                    browser.cancel()
-                    self?.queue.async { self?.dnsSdBrowseSessions.removeValue(forKey: browseId) }
+                    // Expected on duplicate/teardown; not worth logging.
                 } else {
                     NSLog("[iroh-http-dnssd] browse \(browseId) failed: \(error.localizedDescription)")
                 }
+                // #350 review L4: on any terminal failure cancel and drop the
+                // session so it doesn't leak in the map.
+                browser.cancel()
+                self?.queue.async { self?.dnsSdBrowseSessions.removeValue(forKey: browseId) }
             }
         }
 
@@ -534,11 +551,14 @@ class IrohHttpPlugin: Plugin {
         listener.stateUpdateHandler = { [weak self] state in
             if case .failed(let error) = state {
                 if case .dns(let code) = error, code == -65569 {
-                    listener.cancel()
-                    self?.queue.async { self?.advertiseSessions.removeValue(forKey: advertiseId) }
+                    // Expected on duplicate/teardown; not worth logging.
                 } else {
                     NSLog("[iroh-http-dnssd] advertise \(advertiseId) failed: \(error.localizedDescription)")
                 }
+                // #350 review L4: on any terminal failure cancel and drop the
+                // session so it doesn't leak in the map.
+                listener.cancel()
+                self?.queue.async { self?.advertiseSessions.removeValue(forKey: advertiseId) }
             }
         }
 

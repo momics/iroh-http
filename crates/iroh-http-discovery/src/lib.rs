@@ -222,12 +222,13 @@ pub async fn browse_peers(
 /// Select a dialable `ip:<port>` address to advertise from the endpoint's
 /// direct addresses.
 ///
-/// Picks the first routable IP (skipping loopback and unspecified addresses)
-/// and pairs it with `bound_port` — the endpoint's real bound QUIC port — since
-/// the ports reported by `ip_addrs()` can be placeholders (`:0`/`:1`) rather
-/// than the socket the endpoint actually listens on (#346). Returns `None` when
-/// no routable address is available (e.g. loopback-only), in which case no
-/// `address` TXT is published and peers fall back to relay/SRV.
+/// Picks the first routable IP (skipping loopback, unspecified and link-local
+/// addresses) and pairs it with `bound_port` — the endpoint's real bound QUIC
+/// port — since the ports reported by `ip_addrs()` can be placeholders
+/// (`:0`/`:1`) rather than the socket the endpoint actually listens on (#346).
+/// Returns `None` when no routable address is available (e.g. loopback- or
+/// link-local-only), in which case no `address` TXT is published and peers fall
+/// back to relay/SRV.
 ///
 /// Interface ranking (preferring the LAN subnet of the browsing peer over a
 /// VPN/egress NIC) is tracked separately in #348.
@@ -235,8 +236,24 @@ fn select_advertise_address(ip_addrs: &[SocketAddr], bound_port: u16) -> Option<
     ip_addrs
         .iter()
         .map(SocketAddr::ip)
-        .find(|ip| !ip.is_loopback() && !ip.is_unspecified())
+        .find(is_routable_ip)
         .map(|ip| SocketAddr::new(ip, bound_port).to_string())
+}
+
+/// Whether `ip` is routable off-link: not loopback, unspecified, or link-local.
+///
+/// A link-local address (IPv4 `169.254.0.0/16`, IPv6 `fe80::/10`) is only valid
+/// on its own segment, so advertising it as a dialable address makes a browsing
+/// peer's direct dial fail (#350). `Ipv6Addr::is_unicast_link_local` is still
+/// unstable, so the `fe80::/10` prefix is matched by hand.
+fn is_routable_ip(ip: &IpAddr) -> bool {
+    if ip.is_loopback() || ip.is_unspecified() {
+        return false;
+    }
+    match ip {
+        IpAddr::V4(v4) => !v4.is_link_local(),
+        IpAddr::V6(v6) => (v6.segments()[0] & 0xffc0) != 0xfe80,
+    }
 }
 
 /// Start advertising this node on the local network via DNS-SD.
@@ -461,5 +478,28 @@ mod tests {
         let ip_addrs = vec!["[2001:db8::1]:1".parse().unwrap()];
         let addr = select_advertise_address(&ip_addrs, 443).expect("address");
         assert_eq!(addr, "[2001:db8::1]:443");
+    }
+
+    #[test]
+    fn select_advertise_address_skips_link_local() {
+        // #350 review L3 — an IPv4 link-local (169.254/16) or IPv6 link-local
+        // (fe80::/10) is unroutable off-link; a browsing peer handed it as the
+        // dialable `address` fails the direct dial. Prefer a real LAN address.
+        let ip_addrs = vec![
+            "169.254.10.1:1".parse().unwrap(),
+            "[fe80::1]:1".parse().unwrap(),
+            "192.168.1.9:1".parse().unwrap(),
+        ];
+        let addr = select_advertise_address(&ip_addrs, 443).expect("address");
+        assert_eq!(addr, "192.168.1.9:443");
+    }
+
+    #[test]
+    fn select_advertise_address_none_when_only_link_local() {
+        let ip_addrs = vec![
+            "169.254.10.1:1".parse().unwrap(),
+            "[fe80::1]:1".parse().unwrap(),
+        ];
+        assert_eq!(select_advertise_address(&ip_addrs, 443), None);
     }
 }

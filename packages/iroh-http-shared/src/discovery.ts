@@ -143,13 +143,21 @@ export function isDialableSocketAddr(s: string): boolean {
   const idx = s.lastIndexOf(":");
   if (idx <= 0 || idx === s.length - 1) return false;
   const host = s.slice(0, idx);
-  const port = Number(s.slice(idx + 1));
-  if (!Number.isInteger(port) || port <= 0 || port > 65535) return false;
-  // Bracketed IPv6 (`[::1]:443`) or a host that contains no stray colon
-  // (IPv4 / hostname). A bare, unbracketed IPv6 has multiple colons and no
-  // brackets — reject it as ambiguous rather than mis-parse it.
-  if (host.startsWith("[")) return host.endsWith("]") && host.length > 2;
-  return !host.includes(":") && host.length > 0;
+  const portStr = s.slice(idx + 1);
+  // Strict decimal 1–5 digits. `Number()` would otherwise accept "0x1a",
+  // "4e2", "+443", " 443", "443 " — the raw, unparseable string would then
+  // reach the dialer, where `parse_direct_addrs` errors and (all-or-nothing)
+  // drops the ENTIRE direct-address list, leaving the peer relay-only (#350).
+  if (!/^[0-9]{1,5}$/.test(portStr)) return false;
+  const port = Number(portStr);
+  if (port < 1 || port > 65535) return false;
+  // Bracketed IPv6 (`[::1]:443`) or a host with no stray colon, bracket, or
+  // whitespace (IPv4 / hostname). A bare, unbracketed IPv6 has multiple colons
+  // and no brackets — reject it as ambiguous rather than mis-parse it.
+  if (host.startsWith("[")) {
+    return host.endsWith("]") && host.length > 2 && !/[\s]/.test(host);
+  }
+  return host.length > 0 && !/[:[\]\s]/.test(host);
 }
 
 /**

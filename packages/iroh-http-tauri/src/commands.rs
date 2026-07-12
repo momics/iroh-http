@@ -1521,19 +1521,34 @@ fn select_primary_direct_addr(
     bound_port: Option<u16>,
     fallback_ip: Option<std::net::IpAddr>,
 ) -> Option<std::net::SocketAddr> {
-    let is_routable = |a: &std::net::SocketAddr| {
-        a.port() != 0 && !a.ip().is_loopback() && !a.ip().is_unspecified()
-    };
+    let is_routable = |a: &std::net::SocketAddr| a.port() != 0 && is_routable_ip(&a.ip());
     let routable = reconciled.iter().copied().find(is_routable);
     let ip = routable
         .map(|a| a.ip())
-        .or_else(|| fallback_ip.filter(|ip| !ip.is_loopback() && !ip.is_unspecified()))?;
+        .or_else(|| fallback_ip.filter(is_routable_ip))?;
     // Prefer the real bound QUIC port; the reconciled port (e.g. iOS `:1`) is
     // only a last resort so a working advertisement is never dropped.
     let port = bound_port
         .filter(|p| *p != 0)
         .or_else(|| routable.map(|a| a.port()))?;
     Some(std::net::SocketAddr::new(ip, port))
+}
+
+/// Whether `ip` is routable off-link: not loopback, unspecified, or link-local.
+///
+/// A link-local address (IPv4 `169.254.0.0/16`, IPv6 `fe80::/10`) is only valid
+/// on its own segment, so advertising it as this node's dialable address makes
+/// a browsing peer's direct dial fail (#350). `Ipv6Addr::is_unicast_link_local`
+/// is still unstable, so the `fe80::/10` prefix is matched by hand.
+#[cfg(any(mobile, test))]
+fn is_routable_ip(ip: &std::net::IpAddr) -> bool {
+    if ip.is_loopback() || ip.is_unspecified() {
+        return false;
+    }
+    match ip {
+        std::net::IpAddr::V4(v4) => !v4.is_link_local(),
+        std::net::IpAddr::V6(v6) => (v6.segments()[0] & 0xffc0) != 0xfe80,
+    }
 }
 
 /// Stop advertising this node on the local network.
@@ -2124,6 +2139,23 @@ mod primary_direct_addr_tests {
         let fallback = Some(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)));
         assert_eq!(
             select_primary_direct_addr(&reconciled, Some(62546), fallback),
+            None
+        );
+    }
+
+    #[test]
+    fn skips_link_local_reconciled_and_fallback() {
+        // #350 review L3 — an IPv4 link-local (169.254/16) or IPv6 link-local
+        // (fe80::/10) is not routable off-link; advertising it as the dialable
+        // address makes the direct dial fail. Prefer a real LAN address.
+        let reconciled = vec![v4([169, 254, 1, 5], 62546), v4([192, 168, 50, 227], 62546)];
+        let out = select_primary_direct_addr(&reconciled, Some(62546), None);
+        assert_eq!(out, Some(v4([192, 168, 50, 227], 62546)));
+
+        // A link-local-only fallback must not be synthesised into an address.
+        let link_local_fallback = Some(IpAddr::V4(Ipv4Addr::new(169, 254, 1, 5)));
+        assert_eq!(
+            select_primary_direct_addr(&[], Some(62546), link_local_fallback),
             None
         );
     }

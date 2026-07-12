@@ -114,4 +114,33 @@ describe("asIrohPeer address handling (#346)", () => {
     expect(peer?.addrs).toContain("https://relay.example");
     expect(peer?.addrs).not.toContain("192.168.50.227");
   });
+
+  // Regression: #350 review M1 — the port was validated with `Number()`, which
+  // accepts "0x1a", "4e2", " 443", "1_000". The raw string then reached the
+  // dialer, where parse_direct_addrs errors and drops the ENTIRE direct-addr
+  // list (all-or-nothing), leaving the peer relay-only — the exact failure the
+  // guard exists to prevent, moved one layer in.
+  it.each([
+    "1.2.3.4:0x1a",
+    "1.2.3.4:4e2",
+    "1.2.3.4: 443",
+    "1.2.3.4:443 ",
+    "1.2.3.4:1_000",
+    "1.2.3.4:+443",
+  ])("drops the non-decimal / malformed port address %j", (bad) => {
+    const peer = asIrohPeer(record({ txt: { pk: "nodeabc" }, addrs: [bad] }));
+    expect(peer?.addrs).not.toContain(bad);
+    expect(peer?.addrs).toHaveLength(0);
+  });
+
+  it("still accepts strictly-decimal ports", () => {
+    const peer = asIrohPeer(
+      record({
+        txt: { pk: "nodeabc" },
+        addrs: ["1.2.3.4:443", "[2001:db8::1]:443"],
+      }),
+    );
+    expect(peer?.addrs).toContain("1.2.3.4:443");
+    expect(peer?.addrs).toContain("[2001:db8::1]:443");
+  });
 });
