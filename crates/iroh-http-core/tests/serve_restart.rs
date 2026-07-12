@@ -11,8 +11,11 @@
 
 mod common;
 
-use std::time::Duration;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
+use bytes::Bytes;
 use iroh_http_core::{fetch, ffi_serve, respond, IrohEndpoint, RequestPayload, ServeOptions};
 
 /// Install a handler that routes `/status/<code>` to that HTTP status and
@@ -569,5 +572,276 @@ async fn post_not_retried_on_pooled_connection_closed_by_serve_replace() {
          transparently retried instead of surfacing ConnectionFailed — a \
          non-idempotent request must never be replayed, or the peer double- \
          executes it (P1 / RFC 9110 §9.2.2)",
+    );
+}
+
+/// P1 (at-most-once, stronger than the client-error assertion above): prove by
+/// SERVER-SIDE execution count that a non-idempotent request is executed at
+/// most once even in the dangerous window the idempotency gate closes — where
+/// attempt 1 REACHES the peer and the handler RUNS, and only then the
+/// connection is severed so the client sees `ConnectionFailed`. Without the
+/// gate the client transparently replays the POST onto the new serve loop →
+/// the handler runs a SECOND time → double execution / data corruption.
+///
+/// To make that window deterministic (rather than racing the #119 close) the
+/// test uses two serve generations:
+///   * a SLOW loop whose handler increments the counter, signals the test, then
+///     stalls without responding — so attempt 1 has provably executed on the
+///     peer but its response never arrives;
+///   * a FAST loop (installed by the replace, which force-closes attempt 1's
+///     connection) whose handler increments and responds immediately — where a
+///     buggy replay lands and executes a second time.
+/// With the gate the POST is never replayed: the counter stays at 1 and the
+/// client surfaces the error. RED before the gate: the counter reaches 2.
+#[tokio::test]
+async fn post_executed_at_most_once_across_serve_replace() {
+    let (server_ep, client_ep) = common::make_pair().await;
+    let server_id = common::node_id(&server_ep);
+    let addrs = common::server_addrs(&server_ep);
+
+    // Executions of the target POST path, across both serve generations.
+    let exec_count = Arc::new(AtomicUsize::new(0));
+    // Fired by the slow handler once it has received (and counted) the request.
+    let received = Arc::new(tokio::sync::Notify::new());
+
+    // Generation 1: slow. Non-target paths (warm-up) answer immediately; the
+    // target path counts, signals, then stalls so attempt 1 executes on the
+    // peer but never gets a response.
+    {
+        let handler_ep = server_ep.clone();
+        let exec = exec_count.clone();
+        let received = received.clone();
+        let handle = ffi_serve(
+            server_ep.clone(),
+            ServeOptions::default(),
+            move |payload: RequestPayload| {
+                let ep = handler_ep.clone();
+                let exec = exec.clone();
+                let received = received.clone();
+                tokio::spawn(async move {
+                    if payload.url.contains("/exec/target") {
+                        exec.fetch_add(1, Ordering::SeqCst);
+                        received.notify_one();
+                        // Stall: attempt 1 has executed but its response never
+                        // arrives, so the replace below severs it mid-request.
+                        tokio::time::sleep(Duration::from_secs(10)).await;
+                    }
+                    respond(ep.handles(), payload.req_handle, 200, vec![]).unwrap();
+                    ep.handles().finish_body(payload.res_body_handle).unwrap();
+                });
+            },
+        );
+        server_ep.set_serve_handle(handle);
+    }
+
+    // Warm a pooled connection so attempt 1 reuses it (reused == true, the only
+    // case the transparent retry fires for).
+    single_fetch_method(&client_ep, &server_id, &addrs, "/warm", "GET")
+        .await
+        .expect("warm-up GET should succeed");
+
+    // Fire the POST; it will reach the slow loop and stall.
+    let client = client_ep.clone();
+    let sid = server_id.clone();
+    let addrs_c = addrs.clone();
+    let post_task = tokio::spawn(async move {
+        single_fetch_method(&client, &sid, &addrs_c, "/exec/target", "POST").await
+    });
+
+    // Wait until the peer has provably executed attempt 1.
+    received.notified().await;
+
+    // Generation 2: fast. Installing it force-closes attempt 1's connection
+    // (shutdown_and_close), so attempt 1's `svc.oneshot` fails with
+    // ConnectionFailed *after* the handler already ran. A buggy replay lands
+    // here and executes a second time.
+    {
+        let handler_ep = server_ep.clone();
+        let exec = exec_count.clone();
+        let handle = ffi_serve(
+            server_ep.clone(),
+            ServeOptions::default(),
+            move |payload: RequestPayload| {
+                let ep = handler_ep.clone();
+                let exec = exec.clone();
+                tokio::spawn(async move {
+                    if payload.url.contains("/exec/target") {
+                        exec.fetch_add(1, Ordering::SeqCst);
+                    }
+                    respond(ep.handles(), payload.req_handle, 200, vec![]).unwrap();
+                    ep.handles().finish_body(payload.res_body_handle).unwrap();
+                });
+            },
+        );
+        server_ep.set_serve_handle(handle);
+    }
+
+    // The POST resolves (Err with the gate; Ok via replay without it).
+    let _ = tokio::time::timeout(Duration::from_secs(5), post_task)
+        .await
+        .expect("POST task did not settle within 5s");
+
+    // Allow any (buggy) replay to reach and execute on the fast loop.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    assert_eq!(
+        exec_count.load(Ordering::SeqCst),
+        1,
+        "the POST executed on the server more than once — a non-idempotent \
+         request was transparently replayed across a serve replace after it had \
+         already run on the peer, double-executing it (P1 / RFC 9110 §9.2.2)",
+    );
+}
+
+/// M1 / F3 (drain-then-close must not truncate): a request that is IN FLIGHT
+/// when `stop_serve()` is called must complete uncorrupted. Graceful stop
+/// drains in-flight requests before force-closing connections; if the drain or
+/// the `no_new_streams`/close ordering were wrong, the force-close could sever
+/// the connection mid-response and truncate (or error) the in-flight request.
+///
+/// The handler signals when it has begun (request now in-flight), then streams
+/// a known multi-chunk body after a delay. The test waits for that signal, calls
+/// `stop_serve()` while the request is mid-flight, then asserts the client still
+/// receives the FULL, byte-exact body and a 200 — never a truncated body or a
+/// connection error.
+#[tokio::test]
+async fn in_flight_request_completes_uncorrupted_across_stop() {
+    let (server_ep, client_ep) = common::make_pair().await;
+    let server_id = common::node_id(&server_ep);
+    let addrs = common::server_addrs(&server_ep);
+
+    // A recognizable, chunk-spanning body so any truncation is detectable.
+    let expected: Vec<u8> = (0..8192u32).map(|i| (i % 251) as u8).collect();
+    let expected_handler = expected.clone();
+
+    let started = Arc::new(tokio::sync::Notify::new());
+    let started_handler = started.clone();
+
+    let handler_ep = server_ep.clone();
+    let handle = ffi_serve(
+        server_ep.clone(),
+        ServeOptions::default(),
+        move |payload: RequestPayload| {
+            let ep = handler_ep.clone();
+            let started = started_handler.clone();
+            let body = expected_handler.clone();
+            tokio::spawn(async move {
+                // Signal the test that the request is now in-flight, then hold
+                // it in-flight so `stop_serve()` lands mid-request and the drain
+                // has to wait for us.
+                started.notify_one();
+                tokio::time::sleep(Duration::from_millis(400)).await;
+                respond(ep.handles(), payload.req_handle, 200, vec![]).unwrap();
+                // Stream the body in two chunks so a mid-response close would
+                // truncate it.
+                let res = payload.res_body_handle;
+                ep.handles()
+                    .send_chunk(res, Bytes::from(body[..4096].to_vec()))
+                    .await
+                    .unwrap();
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                ep.handles()
+                    .send_chunk(res, Bytes::from(body[4096..].to_vec()))
+                    .await
+                    .unwrap();
+                ep.handles().finish_body(res).unwrap();
+            });
+        },
+    );
+    server_ep.set_serve_handle(handle);
+
+    // Fire the request and read its full body on a task.
+    let client = client_ep.clone();
+    let sid = server_id.clone();
+    let addrs_c = addrs.clone();
+    let fetch_task = tokio::spawn(async move {
+        let res = fetch(
+            &client,
+            &sid,
+            "/slow",
+            "GET",
+            &[],
+            None,
+            None,
+            Some(&addrs_c),
+            None,
+            true,
+            None,
+        )
+        .await
+        .expect("in-flight fetch should return a response head, not a connection error");
+        let mut body = Vec::new();
+        while let Some(chunk) = client.handles().next_chunk(res.body_handle).await.unwrap() {
+            body.extend_from_slice(&chunk);
+        }
+        (res.status, body)
+    });
+
+    // Wait until the request is actually in-flight, then stop while it runs.
+    started.notified().await;
+    server_ep.stop_serve();
+
+    let (status, body) = tokio::time::timeout(Duration::from_secs(5), fetch_task)
+        .await
+        .expect("in-flight request did not complete within 5s after stop_serve")
+        .expect("fetch task panicked");
+
+    assert_eq!(status, 200, "in-flight request lost its status across stop");
+    assert_eq!(
+        body, expected,
+        "in-flight response body was truncated/corrupted by the stop force-close \
+         — drain-then-close must let an in-flight request finish intact (M1/F3)",
+    );
+
+    // And the loop must still stop cleanly afterwards.
+    tokio::time::timeout(Duration::from_secs(5), server_ep.wait_serve_stop())
+        .await
+        .expect("serve loop should stop after the in-flight request drained");
+}
+
+/// Whole-fetch timeout budget (#336): a fetch that cannot reach the peer is
+/// bounded by the configured timeout — the single budget wraps connect +
+/// attempt + any transparent retry together, so total latency is ≈ `timeout`,
+/// never a multiple of it. Guards against a regression that moves the timeout
+/// inside a per-attempt scope (which would let connect+retry run up to 2×).
+///
+/// Points a fetch at an unroutable TEST-NET-1 address (RFC 5737, guaranteed to
+/// black-hole) with a short timeout and asserts it returns a timeout well under
+/// 2× the budget. (The #119 test proves the retry path itself recovers when the
+/// peer IS reachable; this asserts the outer bound holds when it is not.)
+#[tokio::test]
+async fn fetch_is_bounded_by_configured_timeout() {
+    let (_server_ep, client_ep) = common::make_pair().await;
+    // A random, unknown node id at an unroutable address — the QUIC handshake
+    // can never complete, so without the whole-fetch timeout this would hang.
+    let unknown_id = common::node_id(&_server_ep);
+    let black_hole: std::net::SocketAddr = "192.0.2.1:9".parse().unwrap();
+
+    let budget = Duration::from_millis(800);
+    let start = Instant::now();
+    let res = fetch(
+        &client_ep,
+        &unknown_id,
+        "/never",
+        "GET",
+        &[],
+        None,
+        None,
+        Some(&[black_hole]),
+        Some(budget),
+        true,
+        None,
+    )
+    .await;
+    let elapsed = start.elapsed();
+
+    assert!(
+        res.is_err(),
+        "fetch to an unreachable peer must fail, not hang"
+    );
+    assert!(
+        elapsed < budget.saturating_mul(2),
+        "fetch took {elapsed:?} — the whole-fetch timeout budget ({budget:?}) must \
+         bound connect + attempt + retry together, never run to 2× (#336)",
     );
 }

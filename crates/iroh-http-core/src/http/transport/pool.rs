@@ -9,10 +9,15 @@
 //! `close_reason()`.  Closed connections are invalidated and one retry is
 //! attempted so the caller always gets a live connection on the first call.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use iroh::endpoint::Connection;
 use iroh::PublicKey;
+
+/// Process-wide monotonic dial counter. Each `PooledConnection` gets a unique,
+/// never-reused id from this. See [`PooledConnection::dial_seq`].
+static DIAL_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// A pooled QUIC connection (clone-cheap).
 #[derive(Clone)]
@@ -20,14 +25,27 @@ pub(crate) struct PooledConnection {
     pub conn: Connection,
     /// Cached base32-encoded remote node ID, computed once per connection.
     pub remote_id_str: String,
+    /// Monotonic per-dial sequence number, unique for the lifetime of the
+    /// process (L1). Eviction is scoped to this rather than
+    /// [`Connection::stable_id`]: `stable_id` is a heap pointer (the address of
+    /// the connection's inner state), unique only among *live* connections, so
+    /// after a connection is dropped the allocator may reuse that address for a
+    /// fresh connection cached under the same key — an ABA hazard that could
+    /// make eviction false-match and close a healthy replacement (the exact
+    /// thing P2 prevents). A monotonic counter never repeats, so
+    /// [`ConnectionPool::evict_and_close`] can identify the exact connection
+    /// instance that failed with certainty.
+    pub dial_seq: u64,
 }
 
 impl PooledConnection {
     pub fn new(conn: Connection) -> Self {
         let remote_id_str = crate::base32_encode(conn.remote_id().as_bytes());
+        let dial_seq = DIAL_SEQ.fetch_add(1, Ordering::Relaxed);
         Self {
             conn,
             remote_id_str,
+            dial_seq,
         }
     }
 }
@@ -165,7 +183,7 @@ impl ConnectionPool {
 
     /// Remove and close the cached connection for `(node_id, alpn)` **only if
     /// it is the same connection that failed**, identified by
-    /// `expected_stable_id`.
+    /// `expected_dial_seq`.
     ///
     /// Used after request-level transport failures where QUIC may not have
     /// observed a close yet, but reusing the connection would keep future
@@ -176,20 +194,26 @@ impl ConnectionPool {
     /// serve loop) under the same key; closing *that* healthy connection would
     /// make the concurrent request — or the next reuse — fail spuriously. So we
     /// close+invalidate only when the currently-cached connection's
-    /// [`Connection::stable_id`] matches the one that failed. `None` means the
-    /// caller captured no specific connection (e.g. the connect itself failed,
-    /// or a timeout fired before any connection was obtained); in that case we
-    /// must not touch a possibly-healthy cached connection, so it is a no-op.
+    /// [`PooledConnection::dial_seq`] matches the one that failed. `None` means
+    /// the caller captured no specific connection (e.g. the connect itself
+    /// failed, or a timeout fired before any connection was obtained); in that
+    /// case we must not touch a possibly-healthy cached connection, so it is a
+    /// no-op.
+    ///
+    /// L1: the match uses the monotonic `dial_seq` rather than
+    /// `Connection::stable_id` so the guarantee is absolute rather than
+    /// ABA-probabilistic (a dropped connection's `stable_id` address can be
+    /// reused by a fresh connection; `dial_seq` never repeats).
     pub(crate) async fn evict_and_close(
         &self,
         node_id: PublicKey,
         alpn: &'static [u8],
         reason: &'static [u8],
-        expected_stable_id: Option<usize>,
+        expected_dial_seq: Option<u64>,
     ) {
         let key = PoolKey { node_id, alpn };
         if let Some(pooled) = self.cache.get(&key).await {
-            if expected_stable_id != Some(pooled.conn.stable_id()) {
+            if expected_dial_seq != Some(pooled.dial_seq) {
                 // Either no identity was captured, or a fresher replacement is
                 // now cached — leave the cached connection untouched.
                 tracing::debug!(
@@ -285,21 +309,21 @@ mod tests {
         (client, node_id, pooled, server_guard)
     }
 
-    /// P2: `evict_and_close` is connection-scoped — it must close+invalidate
+    /// P2/L1: `evict_and_close` is connection-scoped — it must close+invalidate
     /// only when the currently-cached connection is the one that failed
-    /// (matching `stable_id`). A mismatched id (a fresher replacement dialed by
+    /// (matching `dial_seq`). A mismatched id (a fresher replacement dialed by
     /// a concurrent request) or `None` (no captured identity) must leave the
     /// cached connection untouched. Otherwise one request's cleanup destroys
     /// another request's healthy connection.
     #[tokio::test]
     async fn evict_and_close_only_closes_the_matching_connection() {
         let (client, node_id, pooled, _server_guard) = pooled_connection().await;
-        let sid = pooled.conn.stable_id();
+        let seq = pooled.dial_seq;
 
-        // Mismatched stable_id → must be a no-op (this is a fresher replacement).
+        // Mismatched dial_seq → must be a no-op (this is a fresher replacement).
         client
             .pool()
-            .evict_and_close(node_id, crate::ALPN, b"test", Some(sid.wrapping_add(1)))
+            .evict_and_close(node_id, crate::ALPN, b"test", Some(seq.wrapping_add(1)))
             .await;
         assert!(
             client
@@ -307,11 +331,11 @@ mod tests {
                 .get_existing(node_id, crate::ALPN)
                 .await
                 .is_some(),
-            "evict with a mismatched stable_id removed a healthy connection (P2)",
+            "evict with a mismatched dial_seq removed a healthy connection (P2)",
         );
         assert!(
             pooled.conn.close_reason().is_none(),
-            "evict with a mismatched stable_id closed a healthy connection (P2)",
+            "evict with a mismatched dial_seq closed a healthy connection (P2)",
         );
 
         // No captured identity → must also be a no-op.
@@ -329,10 +353,10 @@ mod tests {
         );
         assert!(pooled.conn.close_reason().is_none());
 
-        // Matching stable_id → must close + invalidate.
+        // Matching dial_seq → must close + invalidate.
         client
             .pool()
-            .evict_and_close(node_id, crate::ALPN, b"test", Some(sid))
+            .evict_and_close(node_id, crate::ALPN, b"test", Some(seq))
             .await;
         assert!(
             client
@@ -340,7 +364,7 @@ mod tests {
                 .get_existing(node_id, crate::ALPN)
                 .await
                 .is_none(),
-            "evict with the matching stable_id did not remove the failed connection",
+            "evict with the matching dial_seq did not remove the failed connection",
         );
     }
 }

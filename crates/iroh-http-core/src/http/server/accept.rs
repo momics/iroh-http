@@ -286,7 +286,23 @@ pub(super) async fn accept_loop<S>(
                 let (send, recv) = match accepted {
                     // Close signal woke us; re-check the flag at the loop top.
                     None => continue,
-                    Some(Ok(pair)) => pair,
+                    Some(Ok(pair)) => {
+                        // M1: the flag check at the loop top can't catch a
+                        // stream that `accept_bi()` was already parked on when
+                        // graceful stop began — that call returns ONE more
+                        // stream. `no_new_streams` is stored BEFORE the drain's
+                        // zero-check, so re-loading it here (after accept_bi
+                        // returns, before we count the request in-flight)
+                        // closes the residual window: refuse the late stream and
+                        // fall through to the close branch instead of dispatching
+                        // it, so it is cleanly rejected rather than served and
+                        // then truncated mid-response by the force-close.
+                        if no_new_streams_conn.load(Ordering::Acquire) {
+                            drop(pair);
+                            continue;
+                        }
+                        pair
+                    }
                     Some(Err(_)) => break,
                 };
 
@@ -335,6 +351,20 @@ pub(super) async fn accept_loop<S>(
         .checked_add(cfg.drain_timeout)
         .unwrap_or_else(|| tokio::time::Instant::now() + Duration::from_secs(86_400));
     loop {
+        // M2: register the drain waiter BEFORE loading `in_flight`, same shape
+        // as F1. `RequestTracker::drop` wakes us via `notify_waiters()`, which
+        // stores NO permit — it only wakes tasks already registered. If we
+        // created `notified()` *inside* the select (after the load), a
+        // last-request drain landing in the gap between the load and the
+        // registration would be lost, and we'd sleep the full `remaining`
+        // (up to the whole `drain_timeout`, default 30s) before re-checking —
+        // stalling `done_tx.send(true)` and, downstream, the JS `serveRunning`
+        // guard. `enable()` registers up front so any drain after the load
+        // wakes us and any before is caught by the `== 0` load.
+        let drain_fut = drain_notify.notified();
+        tokio::pin!(drain_fut);
+        drain_fut.as_mut().enable();
+
         if in_flight.load(Ordering::Acquire) == 0 {
             tracing::info!("iroh-http: all in-flight requests drained");
             break;
@@ -348,7 +378,7 @@ pub(super) async fn accept_loop<S>(
             break;
         }
         tokio::select! {
-            _ = drain_notify.notified() => {}
+            _ = &mut drain_fut => {}
             _ = tokio::time::sleep(remaining) => {}
         }
     }
