@@ -19,6 +19,8 @@
 	    serviceName "iroh-http" over UDP -> "_iroh-http._udp".
 	  - the generic DNS-SD demo (node.advertise/node.browse) defaults to
 	    serviceName "demo-printer" over TCP -> "_demo-printer._tcp".
+	  - the cross-device interop harness (Test tab) advertises and browses
+	    serviceName "iroh-http-test" over UDP -> "_iroh-http-test._udp".
 
 	  Add an entry for each additional serviceName/protocol pair you use.
 	-->
@@ -26,6 +28,7 @@
 	<array>
 		<string>_iroh-http._udp</string>
 		<string>_demo-printer._tcp</string>
+		<string>_iroh-http-test._udp</string>
 	</array>
 </dict>
 </plist>
