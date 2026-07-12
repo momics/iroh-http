@@ -154,6 +154,28 @@ impl ConnectionPool {
         }
     }
 
+    /// Remove and close the cached connection for `(node_id, alpn)`, if any.
+    ///
+    /// Used after request-level transport failures where QUIC may not have
+    /// observed a close yet, but reusing the connection would keep future
+    /// requests stuck on the same dead path.
+    pub(crate) async fn evict_and_close(
+        &self,
+        node_id: PublicKey,
+        alpn: &'static [u8],
+        reason: &'static [u8],
+    ) {
+        let key = PoolKey { node_id, alpn };
+        if let Some(pooled) = self.cache.get(&key).await {
+            tracing::debug!(peer = %pooled.remote_id_str, "iroh-http: pool evict and close");
+            self.emit(crate::events::TransportEvent::pool_evict(
+                pooled.remote_id_str.clone(),
+            ));
+            pooled.conn.close(0u32.into(), reason);
+        }
+        self.cache.invalidate(&key).await;
+    }
+
     /// Number of live entries (for testing).
     #[cfg(test)]
     pub async fn len(&self) -> usize {

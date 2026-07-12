@@ -170,7 +170,16 @@ pub async fn create_endpoint<R: tauri::Runtime>(
     }
 
     let node_id = ep.node_id().to_string();
-    let handle = state::insert_endpoint(ep);
+    let (handle, replaced) = state::replace_endpoint_for_node_id(node_id.clone(), ep);
+    if let Some((old_handle, old_ep)) = replaced {
+        tracing::warn!(
+            node_id = %node_id,
+            old_handle,
+            new_handle = handle,
+            "iroh-http-tauri: replacing existing endpoint for node id"
+        );
+        old_ep.close_force().await;
+    }
 
     // Auto-bind the httpi:// scheme handler to the first endpoint created.
     // `try_state` returns None when `with_scheme()` was not set, so this

@@ -725,6 +725,16 @@ export async function createNode(options?: NodeOptions): Promise<IrohNode> {
 
 export type { IrohNode, NodeOptions };
 export {
+  withLifecycle,
+  type LifecycleContext,
+  type LifecycleHandle,
+  type LifecycleOptions,
+  type LifecycleResource,
+  type LifecycleStartReason,
+  type LifecycleState,
+  type LifecycleStorage,
+} from "./lifecycle.js";
+export {
   asIrohPeer,
   IROH_HTTP_SERVICE,
   PublicKey,
