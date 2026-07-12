@@ -305,3 +305,84 @@ pub fn parse_direct_addrs(
         }
     }
 }
+
+#[cfg(test)]
+mod direct_addr_tests {
+    use super::{parse_direct_addrs, reconcile_direct_addr_ports};
+    use std::net::SocketAddr;
+
+    fn sock(s: &str) -> SocketAddr {
+        s.parse().unwrap()
+    }
+
+    // Regression: #346 — iOS advertises a direct address whose port is 0, even
+    // though the QUIC socket is bound to a real port (seen as `:59234` in iOS
+    // syslog). The derived/advertised address must carry the real bound port.
+    #[test]
+    fn reconcile_substitutes_bound_port_for_port_zero() {
+        let candidates = vec![sock("192.168.50.227:0")];
+        let bound = vec![sock("192.168.50.227:59234")];
+        let out = reconcile_direct_addr_ports(&candidates, &bound);
+        assert_eq!(out, vec![sock("192.168.50.227:59234")]);
+        assert!(
+            out.iter().all(|a| a.port() != 0),
+            "no reconciled direct address may carry port 0, got {out:?}"
+        );
+    }
+
+    #[test]
+    fn reconcile_prefers_bound_socket_of_same_ip_family() {
+        // A port-0 IPv4 candidate must take an IPv4 bound port, not the IPv6 one.
+        let candidates = vec![sock("192.168.50.227:0"), sock("[fe80::1]:0")];
+        let bound = vec![sock("[::]:60000"), sock("0.0.0.0:59234")];
+        let out = reconcile_direct_addr_ports(&candidates, &bound);
+        assert_eq!(out[0], sock("192.168.50.227:59234"));
+        assert_eq!(out[1], sock("[fe80::1]:60000"));
+    }
+
+    #[test]
+    fn reconcile_keeps_nonzero_ports_untouched() {
+        let candidates = vec![sock("10.0.0.5:4433")];
+        let bound = vec![sock("0.0.0.0:59234")];
+        let out = reconcile_direct_addr_ports(&candidates, &bound);
+        assert_eq!(out, vec![sock("10.0.0.5:4433")]);
+    }
+
+    #[test]
+    fn reconcile_drops_port_zero_when_no_bound_port_available() {
+        let candidates = vec![sock("192.168.50.227:0")];
+        let bound: Vec<SocketAddr> = vec![];
+        let out = reconcile_direct_addr_ports(&candidates, &bound);
+        assert!(
+            out.is_empty(),
+            "a port-0 address with no bound port to borrow must be dropped, got {out:?}"
+        );
+    }
+
+    // Regression: #346 — a port-0 direct address must be rejected loudly before
+    // it reaches the dialer, not silently handed to iroh as a useless `:0`.
+    #[test]
+    fn parse_direct_addrs_rejects_port_zero() {
+        let err = parse_direct_addrs(&Some(vec!["192.168.50.227:0".to_string()]))
+            .expect_err("port-0 direct address must be rejected");
+        assert!(
+            err.contains("192.168.50.227:0") && err.contains("port 0"),
+            "error should name the offending address and port 0, got: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_direct_addrs_still_rejects_portless_bare_ip() {
+        // The exact shape observed in #346: a bare IPv4 with no `:port`.
+        let err = parse_direct_addrs(&Some(vec!["192.168.50.227".to_string()]))
+            .expect_err("bare IP without a port must be rejected");
+        assert!(err.contains("192.168.50.227"));
+    }
+
+    #[test]
+    fn parse_direct_addrs_accepts_well_formed() {
+        let out = parse_direct_addrs(&Some(vec!["192.168.50.227:59234".to_string()]))
+            .expect("well-formed address parses");
+        assert_eq!(out, Some(vec![sock("192.168.50.227:59234")]));
+    }
+}

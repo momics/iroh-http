@@ -165,4 +165,27 @@ mod tests {
         let lookup = MdnsSdAddressLookup::new();
         assert!(lookup.upsert("not-a-node-id", &[]).is_err());
     }
+
+    // Regression: #346 — a re-emitted direct address with port 0 must never
+    // become a dialable `TransportAddr::Ip`; it is silently useless and would
+    // fail at connect time. Drop it, keep well-formed entries.
+    #[test]
+    fn build_endpoint_data_drops_port_zero_direct_addr() {
+        let data = build_endpoint_data(&[
+            "192.168.50.227:0".to_string(),
+            "192.168.50.227:59234".to_string(),
+        ]);
+        let ips: Vec<String> = data
+            .addrs()
+            .filter_map(|a| match a {
+                TransportAddr::Ip(s) => Some(s.to_string()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            ips,
+            vec!["192.168.50.227:59234".to_string()],
+            "port-0 direct address must be dropped, only the well-formed one kept"
+        );
+    }
 }

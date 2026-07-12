@@ -283,4 +283,26 @@ mod tests {
         let lookup = MobileAddressLookup::new();
         assert!(lookup.resolve(endpoint_id(9)).is_none());
     }
+
+    // Regression: #346 — the iOS re-emit snapshot can carry a direct address
+    // with port 0. It must never reach the dialer as a `TransportAddr::Ip`.
+    #[test]
+    fn build_endpoint_data_drops_port_zero_direct_addr() {
+        let data = build_endpoint_data(&[
+            "192.168.50.227:0".to_string(),
+            "192.168.50.227:59234".to_string(),
+        ]);
+        let ips: Vec<String> = data
+            .addrs()
+            .filter_map(|a| match a {
+                TransportAddr::Ip(s) => Some(s.to_string()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            ips,
+            vec!["192.168.50.227:59234".to_string()],
+            "port-0 direct address must be dropped, only the well-formed one kept"
+        );
+    }
 }
