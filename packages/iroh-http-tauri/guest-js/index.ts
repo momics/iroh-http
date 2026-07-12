@@ -38,6 +38,18 @@ import type {
 
 const PLUGIN = "plugin:iroh-http";
 
+/**
+ * #338: Detect the Rust `send_chunk` rejection that means the platform WebView
+ * did not deliver our raw binary invoke payload as binary (the Android System
+ * WebView turns it into JSON). The command signals this with INVALID_INPUT and
+ * the message "expected raw binary body or base64 string"; on that specific
+ * error we retry the chunk base64-encoded via the command's JSON compat path.
+ */
+function isRawBinaryUnsupported(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return msg.includes("raw binary body or base64");
+}
+
 /** Tauri-specific request payload shape (camelCase, serialised from Rust). */
 interface TauriRequestPayload {
   reqHandle: number;
@@ -54,6 +66,11 @@ interface TauriRequestPayload {
 class TauriAdapter extends IrohAdapter {
   #epHandle: number;
   #sessionFnsCache: RawSessionFns;
+  // #338: How `sendChunk` encodes body bytes over the Tauri IPC channel. Starts
+  // on the fast raw-binary path and sticks to base64 once a platform WebView is
+  // found to reject raw payloads (the Android System WebView). Per-adapter, so
+  // desktop / iOS nodes are never affected.
+  #sendChunkMode: "raw" | "base64" = "raw";
 
   constructor(epHandle: number) {
     super();
@@ -85,13 +102,49 @@ class TauriAdapter extends IrohAdapter {
     );
   }
 
-  sendChunk(handle: bigint, chunk: Uint8Array): Promise<void> {
-    return invoke(`${PLUGIN}|send_chunk`, chunk, {
-      headers: {
-        "iroh-ep": String(this.#epHandle),
-        "iroh-handle": String(bigintToSafeNumber(handle)),
-      },
-    });
+  async sendChunk(handle: bigint, chunk: Uint8Array): Promise<void> {
+    const headers = {
+      "iroh-ep": String(this.#epHandle),
+      "iroh-handle": String(bigintToSafeNumber(handle)),
+    };
+    // #338: The Android System WebView does not transmit a raw `Uint8Array`
+    // invoke payload as `InvokeBody::Raw` — it arrives as JSON and the Rust
+    // `send_chunk` command rejects it with INVALID_INPUT ("expected raw binary
+    // body or base64 string"). That command also accepts a base64 string via its
+    // JSON compatibility path. Desktop and iOS (WKWebView) deliver raw binary
+    // fine, so we stay on the fast raw path there and only switch — permanently,
+    // for this adapter — after the platform proves it can't handle raw binary.
+    // `pipeToWriter` awaits one `sendChunk` at a time per body, so switching
+    // mid-stream never reorders chunks.
+    if (this.#sendChunkMode === "base64") {
+      await this.#sendChunkBase64(chunk, headers);
+      return;
+    }
+    try {
+      await invoke(`${PLUGIN}|send_chunk`, chunk, { headers });
+    } catch (err) {
+      if (!isRawBinaryUnsupported(err)) throw err;
+      this.#sendChunkMode = "base64";
+      await this.#sendChunkBase64(chunk, headers);
+    }
+  }
+
+  /**
+   * Send a body chunk over the `send_chunk` command's base64 JSON compat path
+   * (the Rust side reads it via `val.as_str()`). Tauri's `InvokeArgs` type does
+   * not include a bare string, but a string payload serialises to a JSON string
+   * at runtime — exactly what the command expects — so the cast is required and
+   * safe.
+   */
+  #sendChunkBase64(
+    chunk: Uint8Array,
+    headers: Record<string, string>,
+  ): Promise<void> {
+    return invoke(
+      `${PLUGIN}|send_chunk`,
+      encodeBase64(chunk) as unknown as Parameters<typeof invoke>[1],
+      { headers },
+    );
   }
 
   finishBody(handle: bigint): Promise<void> {
@@ -734,6 +787,7 @@ export type { IrohNode, NodeOptions };
 export function _createAdapterForTesting(epHandle: number): IrohAdapter {
   return new TauriAdapter(epHandle);
 }
+
 export {
   asIrohPeer,
   IROH_HTTP_SERVICE,
