@@ -36,6 +36,8 @@ export type {
 export {
   asIrohPeer,
   IROH_HTTP_SERVICE,
+  isDialableSocketAddr,
+  TXT_KEY_ADDRESS,
   TXT_KEY_PUBLIC_KEY,
   TXT_KEY_RELAY,
 } from "./discovery.js";

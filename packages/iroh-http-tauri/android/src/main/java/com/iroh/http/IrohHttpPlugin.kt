@@ -350,6 +350,18 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
     private fun protoSuffix(protocol: String): String =
         if (protocol.equals("tcp", ignoreCase = true)) "_tcp" else "_udp"
 
+    /**
+     * Format a host + port as a dialable socket-address string (#346). IPv6
+     * literals are bracketed and any interface scope suffix (`%wlan0`) is
+     * stripped so the result parses as a Rust `SocketAddr`.
+     */
+    private fun formatSocketAddr(host: String, port: Int): String =
+        if (host.contains(':')) {
+            "[${host.substringBefore('%')}]:$port"
+        } else {
+            "$host:$port"
+        }
+
     @Command
     fun browse_start(invoke: Invoke) {
         val manager = nsd() ?: return invoke.reject("NsdManager unavailable")
@@ -379,7 +391,21 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
 
                         val addrs = JSONArray()
                         val hostAddr = resolved.host?.hostAddress
-                        if (!hostAddr.isNullOrEmpty()) addrs.put(hostAddr)
+                        // #346: `addrs` must hold well-formed socket addresses.
+                        // A bare, port-less host (the resolved A-record IP) is
+                        // undialable and fails `parse_direct_addrs` for the whole
+                        // list, so pair it with the SRV port. Advertisers whose
+                        // SRV port is not the QUIC port (iOS) additionally publish
+                        // a dialable `address` TXT that the consumer prefers.
+                        if (!hostAddr.isNullOrEmpty() && resolved.port > 0) {
+                            addrs.put(formatSocketAddr(hostAddr, resolved.port))
+                        }
+                        // IROH346_DIAG: temporary greppable diagnostic. Revert
+                        // once the on-device browse/dial path is confirmed.
+                        Log.d(
+                            "IROH346_DIAG",
+                            "dnssd browse resolved name=$name host=$hostAddr port=${resolved.port} txt=$txt addrs=$addrs",
+                        )
 
                         val record = JSObject()
                         record.put("isActive", true)

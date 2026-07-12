@@ -122,13 +122,60 @@ export const TXT_KEY_PUBLIC_KEY = "pk";
 export const TXT_KEY_RELAY = "relay";
 
 /**
+ * TXT key carrying a dialable direct `ip:port` address.
+ *
+ * Advertisers whose SRV port is not the real QUIC port — notably the iOS
+ * native `NWListener`, whose UDP port is unrelated to the QUIC socket, and
+ * whose resolved A-record host carries no port at all — publish the dialable
+ * `ip:<bound QUIC port>` here instead. See #346.
+ */
+export const TXT_KEY_ADDRESS = "address";
+
+/**
+ * Whether `s` is a well-formed, dialable `ip:port` socket address.
+ *
+ * Rejects bare IPs (no port), an explicit `:0` port, and anything else that
+ * cannot be dialed. A bare A-record host (`192.168.50.227`) or a `:0` address
+ * would otherwise fail `parse_direct_addrs` at dial time and poison the whole
+ * direct-address list (#346).
+ */
+export function isDialableSocketAddr(s: string): boolean {
+  const idx = s.lastIndexOf(":");
+  if (idx <= 0 || idx === s.length - 1) return false;
+  const host = s.slice(0, idx);
+  const port = Number(s.slice(idx + 1));
+  if (!Number.isInteger(port) || port <= 0 || port > 65535) return false;
+  // Bracketed IPv6 (`[::1]:443`) or a host that contains no stray colon
+  // (IPv4 / hostname). A bare, unbracketed IPv6 has multiple colons and no
+  // brackets — reject it as ambiguous rather than mis-parse it.
+  if (host.startsWith("[")) return host.endsWith("]") && host.length > 2;
+  return !host.includes(":") && host.length > 0;
+}
+
+/**
  * Interpret a generic {@link ServiceRecord} as an iroh-http {@link DiscoveredPeer}.
  *
  * Reads the peer's public key from the `pk` TXT property, falling back to the
  * instance label. Returns `null` when neither yields a node id.
+ *
+ * Addresses are sanitised for the dialer (#346): the dialable `address` TXT
+ * entry (which carries the real bound QUIC port) is surfaced first, then any
+ * well-formed `ip:port` socket addresses from the resolved set. Bare,
+ * port-less hosts (an iOS A-record resolves to a portless IP) and `:0`
+ * addresses are dropped so they can never fail `parse_direct_addrs` and poison
+ * the whole list.
  */
 export function asIrohPeer(record: ServiceRecord): DiscoveredPeer | null {
   const nodeId = record.txt[TXT_KEY_PUBLIC_KEY] ?? record.instanceName;
   if (!nodeId) return null;
-  return { nodeId, addrs: record.addrs, isActive: record.isActive };
+
+  const addrs: string[] = [];
+  const push = (a: string | undefined) => {
+    if (a && isDialableSocketAddr(a) && !addrs.includes(a)) addrs.push(a);
+  };
+
+  push(record.txt[TXT_KEY_ADDRESS]);
+  for (const a of record.addrs) push(a);
+
+  return { nodeId, addrs, isActive: record.isActive };
 }
