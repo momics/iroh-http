@@ -175,6 +175,11 @@ export function withLifecycle(
       if (persist) persistRunning();
       setState("running");
     } catch (err) {
+      // #350 F15: abort the controller before clearing it. If `run` started
+      // native work on `ctx.signal` and then threw before returning cleanup,
+      // clearing `controller` without aborting would orphan that work — a later
+      // `close()` could no longer reach the signal to cancel it.
+      nextController.abort();
       if (controller === nextController) {
         controller = null;
       }
@@ -188,6 +193,18 @@ export function withLifecycle(
   const enqueue = (fn: () => Promise<void>): Promise<void> => {
     operation = operation.then(fn, fn);
     return operation;
+  };
+
+  // #350 F4: abort the in-flight run's controller BEFORE queueing a
+  // stop/restart/close. `startInternal` awaits `run({ signal })` inside the
+  // serialized operation chain; a natural signal-owned run (e.g. one that stays
+  // pending until its signal aborts) would otherwise block the queue forever,
+  // so the queued stop/restart/close (whose only abort happens inside their own
+  // cleanup) could never run — a deadlock. Aborting the current controller here
+  // unblocks the pending run so the chain can drain to the queued operation,
+  // which still performs cleanup and state transitions in order.
+  const abortCurrent = (): void => {
+    controller?.abort();
   };
 
   const handle: LifecycleHandle = {
@@ -211,6 +228,7 @@ export function withLifecycle(
       });
     },
     restart(_reason?: string) {
+      abortCurrent();
       return enqueue(async () => {
         setState("stopping");
         await runCleanup();
@@ -218,6 +236,7 @@ export function withLifecycle(
       });
     },
     stop() {
+      abortCurrent();
       return enqueue(async () => {
         clearPersisted();
         if (state === "stopped") return;
@@ -227,6 +246,7 @@ export function withLifecycle(
       });
     },
     close() {
+      abortCurrent();
       return enqueue(async () => {
         disposed = true;
         clearPersisted();
@@ -248,9 +268,10 @@ export function withLifecycle(
       return;
     }
     if (!shouldRestore()) return;
-    void enqueue(() => startInternal("visible", true)).catch((err) => {
-      options.onError?.(err);
-    });
+    // #350 F30: `startInternal` already invokes `options.onError` in its catch
+    // before rejecting, so swallow the rejection here rather than calling
+    // `onError` a second time. The callback is handled at one layer only.
+    void enqueue(() => startInternal("visible", true)).catch(() => {});
   };
 
   const removeVisibilityListener = installVisibilityListener(visibilityHandler);

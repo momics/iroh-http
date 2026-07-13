@@ -160,6 +160,75 @@ describe("withLifecycle", () => {
     expect(onError).toHaveBeenCalledWith(error);
     expect(storage.data.has("iroh-http-tauri:lifecycle:server")).toBe(false);
   });
+
+  it("stop() unblocks a start whose run stays pending until aborted (#350 F4)", async () => {
+    const storage = memoryStorage();
+    let sawAbort = false;
+    const handle = withLifecycle(
+      "server",
+      (ctx) =>
+        // A signal-owned run that resolves only once its signal aborts.
+        new Promise<() => void>((resolve) => {
+          ctx.signal.addEventListener("abort", () => {
+            sawAbort = true;
+            resolve(() => {});
+          });
+        }),
+      { storage },
+    );
+
+    const started = handle.start();
+    await flush();
+    expect(handle.state).toBe("starting");
+
+    // Must not deadlock: stop aborts the in-flight start's controller so the
+    // serialized queue can drain to the stop operation.
+    await handle.stop();
+    await started;
+
+    expect(sawAbort).toBe(true);
+    expect(handle.state).toBe("stopped");
+  });
+
+  it("aborts the signal when a start fails after taking the signal (#350 F15)", async () => {
+    const storage = memoryStorage();
+    let capturedSignal: AbortSignal | undefined;
+    const handle = withLifecycle(
+      "server",
+      (ctx) => {
+        capturedSignal = ctx.signal;
+        throw new Error("late failure");
+      },
+      { storage },
+    );
+
+    await expect(handle.start()).rejects.toThrow("late failure");
+
+    // The failed start must have aborted the signal it handed to `run`, and
+    // must not leave a dangling controller behind.
+    expect(capturedSignal?.aborted).toBe(true);
+    expect(handle.signal).toBeNull();
+  });
+
+  it("calls onError once for a visibility-triggered start failure (#350 F30)", async () => {
+    const storage = memoryStorage();
+    storage.setItem("iroh-http-tauri:lifecycle:server", "running");
+    const onError = vi.fn();
+    const error = new Error("visible boom");
+    withLifecycle(
+      "server",
+      () => {
+        throw error;
+      },
+      { storage, onError },
+    );
+
+    document.dispatchEvent(new Event("visibilitychange"));
+    await flush();
+
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onError).toHaveBeenCalledWith(error);
+  });
 });
 
 describe("installForegroundHealthCheck", () => {
