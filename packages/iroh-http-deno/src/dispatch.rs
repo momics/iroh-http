@@ -340,11 +340,10 @@ async fn create_endpoint(p: Value) -> Value {
             proxy_from_env: args.proxy_from_env.unwrap_or(false),
             disabled: args.disable_networking.unwrap_or(false),
         },
-        discovery: DiscoveryOptions {
-            dns_server: args.dns_discovery,
-            enabled: args.dns_discovery_enabled.unwrap_or(true),
-            dns_nameservers: Vec::new(),
-        },
+        discovery: DiscoveryOptions::new(
+            args.dns_discovery,
+            args.dns_discovery_enabled.unwrap_or(true),
+        ),
         pool: PoolOptions {
             max_connections: args.max_pooled_connections,
             idle_timeout_ms: endpoint.pool_idle_timeout_ms,

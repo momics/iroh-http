@@ -136,10 +136,11 @@ impl IrohEndpoint {
         // which has no `/etc/resolv.conf` and needs a JNI-initialised
         // `ndk_context`). When explicit nameservers are supplied, build a
         // resolver from them so relay, pkarr, and DNS-discovery lookups resolve
-        // instead of timing out. Unparseable entries are skipped.
+        // instead of timing out.
         if !opts.discovery.dns_nameservers.is_empty() {
             let mut resolver = iroh::dns::DnsResolver::builder();
             let mut added = 0usize;
+            let mut rejected: Vec<&str> = Vec::new();
             for ns in &opts.discovery.dns_nameservers {
                 if let Ok(ip) = ns.parse::<std::net::IpAddr>() {
                     resolver = resolver.with_nameserver(
@@ -147,11 +148,29 @@ impl IrohEndpoint {
                         iroh::dns::DnsProtocol::Udp,
                     );
                     added = added.saturating_add(1);
+                } else {
+                    rejected.push(ns.as_str());
                 }
             }
-            if added > 0 {
-                builder = builder.dns_resolver(resolver.build());
+            if !rejected.is_empty() {
+                tracing::warn!(
+                    "iroh-http: ignoring {} unparseable DNS nameserver(s): {}",
+                    rejected.len(),
+                    rejected.join(", "),
+                );
             }
+            // F26: explicit nameservers were requested but NONE parsed. Failing
+            // silently would fall back to the default resolver — exactly the
+            // broken path (e.g. Android) these servers were supplied to avoid.
+            // Surface it instead of shipping a node that can't resolve.
+            if added == 0 {
+                return Err(crate::CoreError::invalid_input(format!(
+                    "all {} supplied dns_nameservers were invalid (expected IP addresses): {}",
+                    rejected.len(),
+                    rejected.join(", "),
+                )));
+            }
+            builder = builder.dns_resolver(resolver.build());
         }
 
         if let Some(key_bytes) = opts.key {
@@ -572,5 +591,59 @@ mod direct_addr_tests {
                 "Rust must reject undialable {s:?} that the TS sanitiser rejects"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod dns_nameserver_tests {
+    use super::IrohEndpoint;
+    use crate::endpoint::config::{DiscoveryOptions, NodeOptions};
+
+    // Regression: #350 F26 — explicit DNS nameservers that all fail to parse
+    // must fail the bind, not silently fall back to the default resolver (which
+    // is exactly the broken path, e.g. Android with no /etc/resolv.conf, that
+    // supplying nameservers was meant to avoid).
+    #[tokio::test]
+    async fn bind_rejects_all_invalid_dns_nameservers() {
+        let discovery = {
+            let mut d = DiscoveryOptions::new(None, true);
+            d.dns_nameservers = vec!["not-an-ip".to_string(), "999.1.1.1".to_string()];
+            d
+        };
+        let opts = NodeOptions {
+            discovery,
+            ..Default::default()
+        };
+
+        let err = match IrohEndpoint::bind(opts).await {
+            Ok(_) => panic!("bind must fail when no supplied dns_nameserver parses"),
+            Err(e) => e,
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("dns_nameservers") && msg.contains("not-an-ip"),
+            "error should name the rejected nameservers, got: {msg}"
+        );
+    }
+
+    // A mix of valid + invalid entries binds successfully (invalid ones are
+    // warned and skipped) — only an all-invalid list is fatal.
+    #[tokio::test]
+    async fn bind_accepts_when_at_least_one_dns_nameserver_parses() {
+        let discovery = {
+            let mut d = DiscoveryOptions::new(None, true);
+            d.dns_nameservers = vec!["bogus".to_string(), "8.8.8.8".to_string()];
+            d
+        };
+        let opts = NodeOptions {
+            discovery,
+            ..Default::default()
+        };
+
+        let ep = match IrohEndpoint::bind(opts).await {
+            Ok(ep) => ep,
+            Err(e) => panic!("bind should succeed when at least one nameserver is valid: {e}"),
+        };
+        ep.close().await;
     }
 }

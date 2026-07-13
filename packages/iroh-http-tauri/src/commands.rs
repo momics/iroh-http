@@ -97,12 +97,10 @@ pub async fn create_endpoint<R: tauri::Runtime>(
                     proxy_from_env: a.proxy_from_env.unwrap_or(false),
                     disabled: a.disable_networking.unwrap_or(false),
                 },
-                discovery: DiscoveryOptions {
-                    dns_server: a.dns_discovery,
-                    enabled: a.dns_discovery_enabled.unwrap_or(true),
-                    // Populated natively on mobile after opts are built (see below).
-                    dns_nameservers: Vec::new(),
-                },
+                discovery: DiscoveryOptions::new(
+                    a.dns_discovery,
+                    a.dns_discovery_enabled.unwrap_or(true),
+                ),
                 pool: PoolOptions {
                     max_connections: a.max_pooled_connections,
                     idle_timeout_ms: endpoint.pool_idle_timeout_ms,

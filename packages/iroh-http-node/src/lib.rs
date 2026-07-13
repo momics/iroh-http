@@ -353,11 +353,10 @@ pub async fn create_endpoint(options: Option<JsNodeOptions>) -> napi::Result<JsE
                     proxy_from_env: o.proxy_from_env.unwrap_or(false),
                     disabled: o.disable_networking.unwrap_or(false),
                 },
-                discovery: DiscoveryOptions {
-                    dns_server: o.dns_discovery,
-                    enabled: o.dns_discovery_enabled.unwrap_or(true),
-                    dns_nameservers: Vec::new(),
-                },
+                discovery: DiscoveryOptions::new(
+                    o.dns_discovery,
+                    o.dns_discovery_enabled.unwrap_or(true),
+                ),
                 pool: PoolOptions {
                     max_connections: o.max_pooled_connections.map(|v| v as usize),
                     idle_timeout_ms: endpoint.pool_idle_timeout_ms,

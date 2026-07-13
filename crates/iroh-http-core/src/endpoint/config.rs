@@ -23,7 +23,13 @@ pub struct NetworkingOptions {
 }
 
 /// DNS-based peer discovery configuration.
+///
+/// Marked `#[non_exhaustive]` so future additive fields are not a
+/// source-compatibility break for downstream crates: construct it via
+/// [`DiscoveryOptions::new`] (or [`Default`]) and set optional fields on the
+/// returned value rather than with an exhaustive struct literal.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct DiscoveryOptions {
     /// DNS discovery server URL. Uses n0 DNS defaults when `None`.
     pub dns_server: Option<String>,
@@ -37,6 +43,21 @@ pub struct DiscoveryOptions {
     /// non-empty, a resolver is built from these servers so relay, pkarr, and
     /// DNS-discovery lookups work. Empty means use iroh's default resolver.
     pub dns_nameservers: Vec<String>,
+}
+
+impl DiscoveryOptions {
+    /// Construct a `DiscoveryOptions` with an empty `dns_nameservers` list.
+    ///
+    /// The forward-compatible constructor for downstream crates: since the
+    /// struct is `#[non_exhaustive]` they cannot use a struct literal. Set
+    /// `dns_nameservers` (or any future field) on the returned value.
+    pub fn new(dns_server: Option<String>, enabled: bool) -> Self {
+        Self {
+            dns_server,
+            enabled,
+            dns_nameservers: Vec::new(),
+        }
+    }
 }
 
 impl Default for DiscoveryOptions {
