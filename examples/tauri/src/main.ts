@@ -1536,6 +1536,19 @@ function detectPlatform(): TestPlatform {
   // deno-lint-ignore no-explicit-any
   let lastPayload: any = null;
 
+  // A build may bake in a default collector id (VITE_IROH_COLLECTOR_ID) so the
+  // field is pre-filled and the operator can submit with one tap — no pasting a
+  // 52-char node id on a phone. A user-entered value (localStorage) wins.
+  const bakedCollector = (() => {
+    try {
+      // deno-lint-ignore no-explicit-any
+      const env = (import.meta as any).env;
+      const v = env?.VITE_IROH_COLLECTOR_ID;
+      return typeof v === "string" ? v.trim() : "";
+    } catch {
+      return "";
+    }
+  })();
   const storedCollector = (() => {
     try {
       return localStorage.getItem(COLLECTOR_STORAGE) ?? "";
@@ -1543,7 +1556,8 @@ function detectPlatform(): TestPlatform {
       return "";
     }
   })();
-  if (storedCollector) collectorIdInput.value = storedCollector;
+  const initialCollector = storedCollector || bakedCollector;
+  if (initialCollector) collectorIdInput.value = initialCollector;
 
   function parseCollectorTarget(
     raw: string,
