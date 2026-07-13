@@ -3,8 +3,10 @@ package com.iroh.http
 import android.app.Activity
 import android.content.Context
 import android.net.ConnectivityManager
+import android.net.Network
 import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
+import android.os.Build
 import android.util.Log
 import app.tauri.annotation.Command
 import app.tauri.annotation.InvokeArg
@@ -130,13 +132,31 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
         val servers = JSONArray()
         try {
             val cm = activity.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
-            val network = cm?.activeNetwork
-            val props = network?.let { cm.getLinkProperties(it) }
-            props?.dnsServers?.forEach { addr ->
-                val host = addr.hostAddress
-                if (!host.isNullOrEmpty()) servers.put(host)
+            if (cm != null) {
+                val networks: List<Network> =
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                        // getActiveNetwork() is API 23+. On older devices it
+                        // throws NoSuchMethodError (a linkage Error, NOT an
+                        // Exception), which would otherwise crash endpoint
+                        // creation on the declared minSdk=21 range (#350 F2).
+                        cm.activeNetwork?.let { listOf(it) } ?: emptyList()
+                    } else {
+                        // API 21/22 fallback: allNetworks (added in API 21).
+                        @Suppress("DEPRECATION")
+                        cm.allNetworks.toList()
+                    }
+                for (network in networks) {
+                    val props = cm.getLinkProperties(network) ?: continue
+                    for (addr in props.dnsServers) {
+                        val host = addr.hostAddress
+                        if (!host.isNullOrEmpty()) servers.put(host)
+                    }
+                }
             }
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
+            // Catch Throwable (not just Exception) so a linkage/verification
+            // Error on an unexpected OS version degrades to the default
+            // resolver instead of crashing the app (#350 F2).
             Log.e("iroh-http-dns", "get_dns_servers failed: ${e.message}")
         }
         val ret = JSObject()
