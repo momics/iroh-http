@@ -61,9 +61,9 @@ console.log(`  self: ${client.publicKey.toString()}\n`);
 
 // Resolve the peer's dialable direct addr so direct-dial has something to use.
 const serverDiscovery = await server.discoveryInfo().catch(() => null);
-const peerAddrs = serverDiscovery?.directAddress
-  ? [serverDiscovery.directAddress]
-  : [];
+const peerAddrs = serverDiscovery?.directAddresses?.length
+  ? serverDiscovery.directAddresses
+  : (serverDiscovery?.directAddress ? [serverDiscovery.directAddress] : []);
 
 let groups = buildSuite({
   node: client,

@@ -119,14 +119,19 @@ export function buildSuite(ctx) {
           throw new Error(`discoveryInfo failed: ${e}`);
         });
         const latencyMs = round(now() - t);
-        const dialable = !!di.directAddress &&
-          (!isDialableSocketAddr || isDialableSocketAddr(di.directAddress));
+        const candidates = di.directAddresses?.length
+          ? di.directAddresses
+          : (di.directAddress ? [di.directAddress] : []);
+        const dialable = candidates.length > 0 &&
+          candidates.every((a) =>
+            !isDialableSocketAddr || isDialableSocketAddr(a)
+          );
         const hasRelay = !!di.relayUrl;
         return {
           ok: dialable || hasRelay,
           latencyMs,
           detail:
-            `directAddress=${di.directAddress ?? "null"} relayUrl=${
+            `directAddresses=[${candidates.join(", ") || "none"}] relayUrl=${
               di.relayUrl ?? "null"
             }` +
             (dialable ? "" : " (no routable direct addr — relay only)"),
@@ -140,6 +145,9 @@ export function buildSuite(ctx) {
       async run() {
         const t = now();
         const di = await node.discoveryInfo().catch(() => null);
+        const advCandidates = di?.directAddresses?.length
+          ? di.directAddresses
+          : (di?.directAddress ? [di.directAddress] : []);
         // F9: iOS only permits Bonjour types declared in Info.ios.plist, so the
         // suite must use the statically-declared `iroh-http-test` type — a random
         // type is silently denied on iOS and the case degrades to a skip that
@@ -153,7 +161,9 @@ export function buildSuite(ctx) {
         }`;
         const ac = new AbortController();
         const txt = { pk: self.nodeId };
-        if (di?.directAddress) txt[TXT_KEY_ADDRESS] = di.directAddress;
+        if (advCandidates.length > 0) {
+          txt[TXT_KEY_ADDRESS] = advCandidates.join(",");
+        }
         if (di?.relayUrl) txt[TXT_KEY_RELAY] = di.relayUrl;
 
         node
@@ -207,13 +217,15 @@ export function buildSuite(ctx) {
           };
         }
         const dialable = !!addressTxt &&
-          (!isDialableSocketAddr || isDialableSocketAddr(addressTxt));
+          addressTxt.split(",").every((a) =>
+            !isDialableSocketAddr || isDialableSocketAddr(a.trim())
+          );
         return {
-          ok: sawActive && (dialable || !di?.directAddress),
+          ok: sawActive && (dialable || advCandidates.length === 0),
           latencyMs,
           detail:
             `isActive=${sawActive} address TXT=${addressTxt ?? "absent"}` +
-            (di?.directAddress
+            (advCandidates.length > 0
               ? dialable
                 ? " (dialable ✓)"
                 : " (present but NOT dialable ✗ — W1 regression)"

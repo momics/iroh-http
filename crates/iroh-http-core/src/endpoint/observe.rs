@@ -117,6 +117,21 @@ impl IrohEndpoint {
         select_dialable_direct(&self.direct_socket_addrs())
     }
 
+    /// All routable dialable direct addresses as `ip:port`, in enumeration
+    /// order, deduplicated.
+    ///
+    /// Unlike [`Self::dialable_direct_address`], which returns only the first
+    /// routable candidate, this exposes every routable direct address so an
+    /// advertiser can publish them all and let the dialing peer race the paths
+    /// (iroh probes candidate addresses concurrently). This is what lets a node
+    /// with several routable interfaces — e.g. a mobile device on both a VPN
+    /// `10.x` interface and the real LAN `192.168.x` — be reached over the LAN
+    /// instead of only advertising whichever interface happens to sort first
+    /// (#348). Ports are already reconciled against the bound QUIC socket.
+    pub fn dialable_direct_addresses(&self) -> Vec<String> {
+        select_dialable_directs(&self.direct_socket_addrs())
+    }
+
     /// Home relay URL, or `None` if not connected to a relay.
     pub fn home_relay(&self) -> Option<String> {
         self.inner
@@ -333,6 +348,25 @@ fn select_dialable_direct(addrs: &[std::net::SocketAddr]) -> Option<String> {
         .map(|a| a.to_string())
 }
 
+/// All routable, non-placeholder-port direct addresses, formatted for
+/// advertisement, deduplicated in enumeration order.
+///
+/// The plural of [`select_dialable_direct`]: an advertiser publishes every
+/// routable candidate so a browsing peer can direct-dial whichever interface is
+/// actually reachable, rather than only the first-enumerated one (#348).
+fn select_dialable_directs(addrs: &[std::net::SocketAddr]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for a in addrs {
+        if is_routable_ip(&a.ip()) && !super::bind::is_placeholder_port(a.port()) {
+            let s = a.to_string();
+            if !out.contains(&s) {
+                out.push(s);
+            }
+        }
+    }
+    out
+}
+
 /// Whether `ip` is routable off-link: not loopback, unspecified, or link-local.
 ///
 /// A link-local address (IPv4 `169.254.0.0/16`, IPv6 `fe80::/10`) is only valid
@@ -352,7 +386,7 @@ fn is_routable_ip(ip: &std::net::IpAddr) -> bool {
 
 #[cfg(test)]
 mod dialable_tests {
-    use super::{is_routable_ip, select_dialable_direct};
+    use super::{is_routable_ip, select_dialable_direct, select_dialable_directs};
     use std::net::SocketAddr;
 
     #[test]
@@ -435,5 +469,37 @@ mod dialable_tests {
         assert!(!is_routable_ip(&"0.0.0.0".parse().unwrap()));
         assert!(!is_routable_ip(&"169.254.1.1".parse().unwrap()));
         assert!(!is_routable_ip(&"fe80::1".parse().unwrap()));
+    }
+
+    // Regression: #348 — every routable candidate is advertised, not just the
+    // first, so a node on both a VPN `10.x` interface and the real LAN can be
+    // direct-dialed over the LAN. Non-routable and placeholder-port addresses
+    // are still dropped, and duplicates collapse.
+    #[test]
+    fn plural_keeps_all_routable_candidates() {
+        let addrs: Vec<SocketAddr> = vec![
+            "127.0.0.1:59234".parse().unwrap(),
+            "10.12.222.17:56604".parse().unwrap(),
+            "192.168.50.227:56604".parse().unwrap(),
+            "169.254.10.1:56604".parse().unwrap(),
+            "192.168.50.227:1".parse().unwrap(),
+            "10.12.222.17:56604".parse().unwrap(),
+        ];
+        assert_eq!(
+            select_dialable_directs(&addrs),
+            vec![
+                "10.12.222.17:56604".to_string(),
+                "192.168.50.227:56604".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn plural_empty_when_none_routable() {
+        let addrs: Vec<SocketAddr> = vec![
+            "127.0.0.1:59234".parse().unwrap(),
+            "169.254.10.1:56604".parse().unwrap(),
+        ];
+        assert!(select_dialable_directs(&addrs).is_empty());
     }
 }

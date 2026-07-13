@@ -470,6 +470,7 @@ fn discovery_info_dispatch(p: Value) -> Value {
         Some(ep) => ok(json!({
             "nodeId": ep.node_id(),
             "directAddress": ep.dialable_direct_address(),
+            "directAddresses": ep.dialable_direct_addresses(),
             "relayUrl": ep.home_relay(),
         })),
     }

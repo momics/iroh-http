@@ -41,6 +41,43 @@ describe("asIrohPeer address handling (#346)", () => {
     expect(peer?.addrs).toContain("192.168.50.227:62546");
   });
 
+  // #348: a device on several routable interfaces advertises a comma-separated
+  // `address` TXT (e.g. a VPN `10.x` plus the real LAN `192.168.x`). asIrohPeer
+  // must surface every dialable candidate so iroh can race the paths and reach
+  // the peer over whichever interface is actually reachable.
+  it("splits a comma-separated `address` TXT into all dialable candidates", () => {
+    const peer = asIrohPeer(
+      record({
+        txt: {
+          pk: "nodeabc",
+          address: "10.12.222.17:56604,192.168.50.227:56604",
+        },
+        addrs: [],
+      }),
+    );
+    expect(peer).not.toBeNull();
+    expect(peer?.addrs).toContain("10.12.222.17:56604");
+    expect(peer?.addrs).toContain("192.168.50.227:56604");
+  });
+
+  it("drops undialable entries within a comma-separated `address` TXT", () => {
+    const peer = asIrohPeer(
+      record({
+        // A bare (port-less) host and a whitespace-padded valid addr; only the
+        // valid `ip:port` candidates survive.
+        txt: {
+          pk: "nodeabc",
+          address: "192.168.50.227, 10.0.0.5:56604 ,192.168.50.227:56604",
+        },
+        addrs: [],
+      }),
+    );
+    expect(peer).not.toBeNull();
+    expect(peer?.addrs).not.toContain("192.168.50.227");
+    expect(peer?.addrs).toContain("10.0.0.5:56604");
+    expect(peer?.addrs).toContain("192.168.50.227:56604");
+  });
+
   it("drops a bare, port-less A-record host so it never reaches the dialer", () => {
     const peer = asIrohPeer(
       record({

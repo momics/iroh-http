@@ -60,16 +60,21 @@ export interface NodeAddrInfo {
 
 /**
  * A node's discovery info: its id, its first dialable direct `ip:port` address
- * (or `null` when only loopback/link-local addresses are available), and its
- * home relay URL (or `null`).
+ * (or `null` when only loopback/link-local addresses are available), all of its
+ * routable dialable direct addresses, and its home relay URL (or `null`).
  *
- * The `directAddress` carries the real bound QUIC port — unlike the placeholder
- * ports (`:0`/`:1`) that raw address enumeration can report — so it can be
- * advertised directly for LAN direct-dial instead of relay-only fallback.
+ * The `directAddress`/`directAddresses` carry the real bound QUIC port — unlike
+ * the placeholder ports (`:0`/`:1`) that raw address enumeration can report — so
+ * they can be advertised directly for LAN direct-dial instead of relay-only
+ * fallback. `directAddresses` lists *every* routable candidate (a device may be
+ * on several interfaces, e.g. a VPN `10.x` and the real LAN `192.168.x`), so an
+ * advertiser can publish them all and let the dialing peer race the paths (#348).
+ * `directAddress` is retained as the first candidate for back-compat.
  */
 export interface DiscoveryInfo {
   nodeId: string;
   directAddress: string | null;
+  directAddresses: string[];
   relayUrl: string | null;
 }
 

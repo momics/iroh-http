@@ -1253,6 +1253,11 @@ function detectPlatform(): TestPlatform {
     //     stays a generic-record placeholder; the dialable address rides in the
     //     `address` TXT, which `asIrohPeer()` reads back on browse.
     const di = await node.discoveryInfo().catch(() => null);
+    const dialable = di
+      ? (di.directAddresses.length > 0
+        ? di.directAddresses.join(",")
+        : di.directAddress ?? undefined)
+      : undefined;
     void node.advertise({
       serviceName: TEST_SERVICE,
       instanceName: selfId,
@@ -1263,7 +1268,7 @@ function detectPlatform(): TestPlatform {
         [TEST_TXT_KEY]: "1",
         platform: selfPlatform,
         caps: "http-compliance",
-        ...(di?.directAddress ? { [TXT_KEY_ADDRESS]: di.directAddress } : {}),
+        ...(dialable ? { [TXT_KEY_ADDRESS]: dialable } : {}),
         ...(di?.relayUrl ? { [TXT_KEY_RELAY]: di.relayUrl } : {}),
       },
       signal: ac.signal,

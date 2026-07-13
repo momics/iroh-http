@@ -78,7 +78,8 @@ export declare function createEndpoint(options?: JsNodeOptions | undefined | nul
  *
  * `directAddress` carries the real bound QUIC port (or null when only
  * loopback/link-local addresses are available); safe to advertise for
- * LAN direct-dial.
+ * LAN direct-dial. `directAddresses` carries *all* routable candidates so an
+ * advertiser can publish them and let the dialer race the paths (#348).
  */
 export declare function discoveryInfo(endpointHandle: number): JsDiscoveryInfo
 
@@ -150,6 +151,7 @@ export interface JsConnectionEvent {
 export interface JsDiscoveryInfo {
   nodeId: string
   directAddress?: string
+  directAddresses: Array<string>
   relayUrl?: string
 }
 

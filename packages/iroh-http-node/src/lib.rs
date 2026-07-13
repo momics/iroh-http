@@ -784,6 +784,7 @@ pub struct JsNodeAddrInfo {
 pub struct JsDiscoveryInfo {
     pub node_id: String,
     pub direct_address: Option<String>,
+    pub direct_addresses: Vec<String>,
     pub relay_url: Option<String>,
 }
 
@@ -844,13 +845,15 @@ pub fn home_relay(endpoint_handle: u32) -> napi::Result<Option<String>> {
 ///
 /// `directAddress` carries the real bound QUIC port (or null when only
 /// loopback/link-local addresses are available); safe to advertise for
-/// LAN direct-dial.
+/// LAN direct-dial. `directAddresses` carries *all* routable candidates so an
+/// advertiser can publish them and let the dialer race the paths (#348).
 #[napi]
 pub fn discovery_info(endpoint_handle: u32) -> napi::Result<JsDiscoveryInfo> {
     let ep = get_endpoint(endpoint_handle)?;
     Ok(JsDiscoveryInfo {
         node_id: ep.node_id().to_string(),
         direct_address: ep.dialable_direct_address(),
+        direct_addresses: ep.dialable_direct_addresses(),
         relay_url: ep.home_relay(),
     })
 }

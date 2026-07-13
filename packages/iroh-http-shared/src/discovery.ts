@@ -254,7 +254,14 @@ export function asIrohPeer(record: ServiceRecord): DiscoveredPeer | null {
     if (isRelayUrl(a) || isDialableSocketAddr(a)) addrs.push(a);
   };
 
-  push(record.txt[TXT_KEY_ADDRESS]);
+  // The `address` TXT may carry several comma-separated candidates — a node can
+  // be on multiple routable interfaces (e.g. a VPN `10.x` and the real LAN
+  // `192.168.x`), and advertising them all lets the dialer race the paths and
+  // reach the peer over whichever is actually reachable (#348). Each candidate
+  // is still validated as a dialable `ip:port` by `push`.
+  for (const a of (record.txt[TXT_KEY_ADDRESS] ?? "").split(",")) {
+    push(a.trim());
+  }
   push(record.txt[TXT_KEY_RELAY]);
   for (const a of record.addrs) push(a);
 

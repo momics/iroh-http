@@ -267,6 +267,7 @@ pub struct NodeAddrPayload {
 pub struct DiscoveryInfoPayload {
     pub node_id: String,
     pub direct_address: Option<String>,
+    pub direct_addresses: Vec<String>,
     pub relay_url: Option<String>,
 }
 
@@ -327,11 +328,16 @@ pub fn discovery_info(endpoint_handle: u64) -> Result<DiscoveryInfoPayload, Stri
     })?;
     #[cfg(not(mobile))]
     let direct_address = ep.dialable_direct_address();
+    #[cfg(not(mobile))]
+    let direct_addresses = ep.dialable_direct_addresses();
     #[cfg(mobile)]
     let direct_address = primary_direct_addr(&ep);
+    #[cfg(mobile)]
+    let direct_addresses = primary_direct_addrs(&ep);
     Ok(DiscoveryInfoPayload {
         node_id: ep.node_id().to_string(),
         direct_address,
+        direct_addresses,
         relay_url: ep.home_relay(),
     })
 }
@@ -1663,6 +1669,22 @@ fn primary_direct_addr(ep: &iroh_http_core::IrohEndpoint) -> Option<String> {
         .map(|a| a.to_string())
 }
 
+/// All routable direct addresses to advertise on mobile (#348).
+///
+/// The plural of [`primary_direct_addr`]: every routable reconciled address is
+/// paired with a real same-family bound QUIC port and kept, so a device on both
+/// a VPN `10.x` interface and the real LAN advertises both and the dialing peer
+/// can reach it over the LAN instead of only the first-enumerated interface.
+#[cfg(mobile)]
+fn primary_direct_addrs(ep: &iroh_http_core::IrohEndpoint) -> Vec<String> {
+    let reconciled = ep.direct_socket_addrs();
+    let bound_sockets = ep.bound_sockets();
+    select_primary_direct_addrs(&reconciled, &bound_sockets, local_routable_ip())
+        .into_iter()
+        .map(|a| a.to_string())
+        .collect()
+}
+
 /// Discover a routable local IP without enumerating interfaces.
 ///
 /// A `connect`ed UDP socket sends no packets but makes the kernel select the
@@ -1719,6 +1741,52 @@ fn select_primary_direct_addr(
                 .filter(|p| !is_placeholder_port(*p))
         })?;
     Some(std::net::SocketAddr::new(ip, port))
+}
+
+/// All routable direct addresses (#348), pure for testing.
+///
+/// The plural of [`select_primary_direct_addr`]: every routable reconciled IP is
+/// paired with a real same-family bound QUIC port (falling back to its own port
+/// when non-placeholder) and kept in enumeration order, deduplicated. When no
+/// reconciled address is routable, it synthesizes one from `fallback_ip` + the
+/// real bound port, mirroring the singular selector's iOS fallback. Unlike the
+/// singular selector, a routable IP whose port cannot be resolved is skipped
+/// rather than aborting the whole list, so one bad candidate never suppresses
+/// the others.
+#[cfg(any(mobile, test))]
+fn select_primary_direct_addrs(
+    reconciled: &[std::net::SocketAddr],
+    bound_sockets: &[std::net::SocketAddr],
+    fallback_ip: Option<std::net::IpAddr>,
+) -> Vec<std::net::SocketAddr> {
+    let port_for = |want_v6: bool, own: u16| -> Option<u16> {
+        bound_sockets
+            .iter()
+            .find(|s| s.is_ipv6() == want_v6 && !is_placeholder_port(s.port()))
+            .map(|s| s.port())
+            .or_else(|| (!is_placeholder_port(own)).then_some(own))
+    };
+    let mut out: Vec<std::net::SocketAddr> = Vec::new();
+    for a in reconciled
+        .iter()
+        .copied()
+        .filter(|a| is_routable_ip(&a.ip()))
+    {
+        if let Some(port) = port_for(a.ip().is_ipv6(), a.port()) {
+            let sa = std::net::SocketAddr::new(a.ip(), port);
+            if !out.contains(&sa) {
+                out.push(sa);
+            }
+        }
+    }
+    if out.is_empty() {
+        if let Some(ip) = fallback_ip.filter(is_routable_ip) {
+            if let Some(port) = port_for(ip.is_ipv6(), 0) {
+                out.push(std::net::SocketAddr::new(ip, port));
+            }
+        }
+    }
+    out
 }
 
 /// Whether `port` is a non-dialable placeholder (`0` unspecified, or `1` — the
@@ -2420,5 +2488,45 @@ mod primary_direct_addr_tests {
             select_primary_direct_addr(&[], &bound_v4(62546), link_local_fallback),
             None
         );
+    }
+
+    // Regression: #348 — the device-pass iOS case. iOS enumerated a VPN `10.x`
+    // interface first and the real LAN `192.168.x` second; the singular selector
+    // advertised only the 10.x address, so LAN peers could not direct-dial and
+    // fell back to relay. The plural selector keeps BOTH, so iroh can race the
+    // paths and reach the device over the LAN.
+    #[test]
+    fn plural_keeps_vpn_and_lan_candidates() {
+        use super::select_primary_direct_addrs;
+        let reconciled = vec![v4([10, 12, 222, 17], 56604), v4([192, 168, 50, 227], 56604)];
+        let out = select_primary_direct_addrs(&reconciled, &bound_v4(56604), None);
+        assert_eq!(out, vec![v4([10, 12, 222, 17], 56604), v4([192, 168, 50, 227], 56604)]);
+    }
+
+    #[test]
+    fn plural_reconciles_ports_dedups_and_drops_non_routable() {
+        use super::select_primary_direct_addrs;
+        // Placeholder ports (:1) borrow the real bound QUIC port; loopback and
+        // link-local are dropped; the 10.x placeholder reconciles to the same
+        // ip:port as the explicit 10.x entry, so the duplicate collapses.
+        let reconciled = vec![
+            v4([127, 0, 0, 1], 56604),
+            v4([169, 254, 1, 5], 56604),
+            v4([10, 12, 222, 17], 1),
+            v4([192, 168, 50, 227], 56604),
+            v4([10, 12, 222, 17], 56604),
+        ];
+        let out = select_primary_direct_addrs(&reconciled, &bound_v4(56604), None);
+        assert_eq!(out, vec![v4([10, 12, 222, 17], 56604), v4([192, 168, 50, 227], 56604)]);
+    }
+
+    #[test]
+    fn plural_falls_back_like_singular_when_nothing_routable() {
+        use super::select_primary_direct_addrs;
+        let fallback = Some(IpAddr::V4(Ipv4Addr::new(192, 168, 50, 227)));
+        let out = select_primary_direct_addrs(&[], &bound_v4(62546), fallback);
+        assert_eq!(out, vec![v4([192, 168, 50, 227], 62546)]);
+        // No routable input and no usable fallback → empty.
+        assert!(select_primary_direct_addrs(&[], &[], None).is_empty());
     }
 }

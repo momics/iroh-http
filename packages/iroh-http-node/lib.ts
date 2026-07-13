@@ -338,6 +338,7 @@ class NodeAdapter extends IrohAdapter {
     return {
       nodeId: info.nodeId,
       directAddress: info.directAddress ?? null,
+      directAddresses: info.directAddresses ?? [],
       relayUrl: info.relayUrl ?? null,
     } satisfies DiscoveryInfo;
   }
