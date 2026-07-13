@@ -231,6 +231,50 @@ impl ConnectionPool {
         }
     }
 
+    /// Remove the cached connection for `(node_id, alpn)` **without closing
+    /// it**, only if it is the same connection identified by
+    /// `expected_dial_seq`.
+    ///
+    /// F6: used when a request must stop reusing a pooled connection (for
+    /// example after a local response-head timeout) but the QUIC connection may
+    /// still be multiplexing other in-flight requests on independent
+    /// bi-streams. Closing it — as [`evict_and_close`](Self::evict_and_close)
+    /// does — resets *every* stream on the shared connection, cascading one
+    /// request's timeout into unrelated (and possibly non-idempotent) request
+    /// failures. Invalidating only the pool entry makes future requests redial
+    /// while leaving live connection clones and their streams untouched; the
+    /// timed-out request's own stream is reset when its dropped future releases
+    /// the send/recv handles.
+    ///
+    /// The `expected_dial_seq` scoping matches
+    /// [`evict_and_close`](Self::evict_and_close): a mismatched id (a fresher
+    /// replacement) or `None` (no captured identity) is a no-op.
+    pub(crate) async fn evict_only(
+        &self,
+        node_id: PublicKey,
+        alpn: &'static [u8],
+        expected_dial_seq: Option<u64>,
+    ) {
+        let key = PoolKey { node_id, alpn };
+        if let Some(pooled) = self.cache.get(&key).await {
+            if expected_dial_seq != Some(pooled.dial_seq) {
+                tracing::debug!(
+                    peer = %pooled.remote_id_str,
+                    "iroh-http: pool evict-only skipped — cached connection is not the one to drop",
+                );
+                return;
+            }
+            tracing::debug!(
+                peer = %pooled.remote_id_str,
+                "iroh-http: pool evict-only (invalidate without close)",
+            );
+            self.emit(crate::events::TransportEvent::pool_evict(
+                pooled.remote_id_str.clone(),
+            ));
+            self.cache.invalidate(&key).await;
+        }
+    }
+
     /// Number of live entries (for testing).
     #[cfg(test)]
     pub async fn len(&self) -> usize {
@@ -365,6 +409,50 @@ mod tests {
                 .await
                 .is_none(),
             "evict with the matching dial_seq did not remove the failed connection",
+        );
+    }
+
+    /// F6: `evict_only` must remove the pool entry (so future requests redial)
+    /// while leaving the underlying QUIC connection open — otherwise a local
+    /// timeout on one request would close the shared connection and reset every
+    /// other multiplexed request's stream.
+    #[tokio::test]
+    async fn evict_only_removes_entry_without_closing_connection() {
+        let (client, node_id, pooled, _server_guard) = pooled_connection().await;
+        let seq = pooled.dial_seq;
+
+        // Mismatched dial_seq / None → no-op, entry stays.
+        client
+            .pool()
+            .evict_only(node_id, crate::ALPN, Some(seq.wrapping_add(1)))
+            .await;
+        client.pool().evict_only(node_id, crate::ALPN, None).await;
+        assert!(
+            client
+                .pool()
+                .get_existing(node_id, crate::ALPN)
+                .await
+                .is_some(),
+            "evict_only with a non-matching id removed a healthy connection",
+        );
+
+        // Matching dial_seq → entry removed, but the connection stays OPEN so
+        // any concurrent stream on it survives.
+        client
+            .pool()
+            .evict_only(node_id, crate::ALPN, Some(seq))
+            .await;
+        assert!(
+            client
+                .pool()
+                .get_existing(node_id, crate::ALPN)
+                .await
+                .is_none(),
+            "evict_only did not remove the pool entry",
+        );
+        assert!(
+            pooled.conn.close_reason().is_none(),
+            "evict_only closed the shared connection (F6 cascade); it must only invalidate",
         );
     }
 }

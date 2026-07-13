@@ -126,6 +126,12 @@ pub async fn fetch_request(
     // with `Body::empty()`) can be reconstructed byte-for-byte on a fresh
     // connection. A streaming body may have been partially read by a failed
     // attempt, so it is never resent.
+    //
+    // F18: attempt 1 is sent as the *original* request (`from_parts`) so its
+    // extensions and real body — including any trailers or error frame a
+    // zero-data body may still emit — reach the peer unchanged. Only the
+    // transparent retry, which is gated on `retry_safe`, is rebuilt from the
+    // cloned method/uri/version/headers with a fresh `Body::empty()`.
     let (parts, body) = req.into_parts();
     let body_resendable = http_body::Body::size_hint(&body).exact() == Some(0);
     let method = parts.method.clone();
@@ -144,7 +150,8 @@ pub async fn fetch_request(
     let uri = parts.uri.clone();
     let version = parts.version;
     let headers = parts.headers.clone();
-    let build_req = |body: Body| -> hyper::Request<Body> {
+    // Only used to rebuild a transparent retry — never for attempt 1.
+    let build_retry = |body: Body| -> hyper::Request<Body> {
         let mut builder = hyper::Request::builder()
             .method(method.clone())
             .uri(uri.clone())
@@ -157,21 +164,15 @@ pub async fn fetch_request(
             .body(body)
             .expect("rebuild request from valid parts")
     };
+    // Reassemble the untouched first request without cloning the body.
+    let first_req = hyper::Request::from_parts(parts, body);
 
     // Whole-fetch timeout budget: bounds attempt + retry together so a single
     // fetch never exceeds `cfg.timeout` even when it redials once (#336).
     let retry_seq = async {
         // ── Attempt 1: on the pooled (possibly reused) connection. ───────────
-        let first_body = if body_resendable { Body::empty() } else { body };
-        let (result, reused) = attempt_send(
-            endpoint,
-            addr,
-            node_id,
-            build_req(first_body),
-            cfg,
-            &last_dial_seq,
-        )
-        .await;
+        let (result, reused) =
+            attempt_send(endpoint, addr, node_id, first_req, cfg, &last_dial_seq).await;
 
         let first_err = match result {
             Ok(resp) => return Ok(resp),
@@ -208,7 +209,7 @@ pub async fn fetch_request(
                 endpoint,
                 addr,
                 node_id,
-                build_req(Body::empty()),
+                build_retry(Body::empty()),
                 cfg,
                 &last_dial_seq,
             )
@@ -230,14 +231,16 @@ pub async fn fetch_request(
         Some(t) => match tokio::time::timeout(t, retry_seq).await {
             Ok(r) => r,
             Err(_) => {
-                // Timed out across the whole sequence: evict the connection the
-                // in-flight attempt was using so the next request starts clean,
-                // then surface the bound (#336). Scoped to that connection (P2).
+                // Timed out across the whole sequence. F6: invalidate the pool
+                // entry so the next request redials, but do NOT close the shared
+                // QUIC connection — it may still be multiplexing other in-flight
+                // requests on independent bi-streams, and closing it would reset
+                // them (cascading this local timeout into unrelated failures).
+                // This request's own stream is reset when the cancelled
+                // `retry_seq` future drops its send/recv handles. Scoped to the
+                // connection the in-flight attempt used (P2).
                 let failed_seq = *last_dial_seq.lock().unwrap_or_else(|e| e.into_inner());
-                endpoint
-                    .pool()
-                    .evict_and_close(node_id, ALPN, b"iroh-http fetch timed out", failed_seq)
-                    .await;
+                endpoint.pool().evict_only(node_id, ALPN, failed_seq).await;
                 Err(FetchError::Timeout)
             }
         },
