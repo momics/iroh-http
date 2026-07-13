@@ -1136,26 +1136,31 @@ function detectPlatform(): TestPlatform {
   // F21: instance-name → nodeId, so an expiry event (empty TXT, so `asIrohPeer`
   // yields no pk) can still be mapped back to the peer it retires.
   const testInstanceToNodeId = new Map<string, string>();
+  // A peer can be advertised under several DNS-SD instance names at once — iOS
+  // renames its Bonjour instance on conflict (e.g. `pk` → `pk-<suffix>`), so the
+  // same nodeId is briefly live under two names. Track the live instances per
+  // nodeId so a stale instance's expiry only retires the peer once its *last*
+  // instance is gone, instead of evicting a peer that is still advertised.
+  const testNodeIdToInstances = new Map<string, Set<string>>();
 
   // F24: testing mode serves the compliance handler on the app's real,
-  // relay-reachable node — `test=1` is only an mDNS marker, not authorization.
-  // Guard the served fixtures: only the local node (self-loopback baseline) and
-  // peers we actually discovered advertising testing mode may drive them, and
-  // bound body size + concurrency so an allow-listed peer still can't exhaust
-  // memory. Relay stays enabled so the relay-fallback suite group is testable.
-  // ≥ the largest compliance fixture (body-size-5mb) plus headroom.
+  // relay-reachable node. The right exposure control here is *resource* bounds,
+  // not an identity allow-list: every caller is already cryptographically
+  // authenticated by QUIC (its public-key `Peer-Id`), and testing mode is an
+  // explicit, ephemeral opt-in the operator toggles on. An earlier `testPeers`
+  // allow-list 403-ed legitimately-authenticated peers whose generic test-mode
+  // DNS-SD record failed to reach this node (iOS Bonjour instance renaming drops
+  // the peer out of `testPeers`), which blocked the entire suite for an
+  // iOS-as-client run. QUIC authentication already keeps the open internet from
+  // reaching an unknown node id, so we drop the allow-list and keep only the
+  // body-size + concurrency caps that stop an authenticated peer from
+  // exhausting memory. Relay stays enabled so the relay-fallback group is
+  // testable. `TEST_MAX_BODY_BYTES` is ≥ the largest fixture (body-size-5mb).
   const TEST_MAX_BODY_BYTES = 8 * 1024 * 1024;
   const TEST_MAX_INFLIGHT = 16;
   let testInflight = 0;
 
   async function handleTestingRequest(req: Request): Promise<Response> {
-    // Fail closed: reject callers that are neither self nor a known test peer.
-    const peerId = req.headers.get("Peer-Id");
-    if (!peerId || (peerId !== selfId && !testPeers.has(peerId))) {
-      return new Response("Forbidden: not a testing-mode peer\n", {
-        status: 403,
-      });
-    }
     // Reject oversized declared bodies before reading them.
     const declared = Number(req.headers.get("Content-Length") ?? "0");
     if (Number.isFinite(declared) && declared > TEST_MAX_BODY_BYTES) {
@@ -1281,9 +1286,17 @@ function detectPlatform(): TestPlatform {
             const goneId = testInstanceToNodeId.get(rec.instanceName);
             if (goneId) {
               testInstanceToNodeId.delete(rec.instanceName);
-              testPeers.delete(goneId);
-              if (selectedPeerId === goneId) refreshTarget();
-              refreshRunEnabled();
+              const live = testNodeIdToInstances.get(goneId);
+              live?.delete(rec.instanceName);
+              // Only retire the peer once its last live instance is gone: iOS
+              // conflict-renames its Bonjour instance, so a stale instance's
+              // expiry must not evict a peer still advertised under a new name.
+              if (!live || live.size === 0) {
+                testNodeIdToInstances.delete(goneId);
+                testPeers.delete(goneId);
+                if (selectedPeerId === goneId) refreshTarget();
+                refreshRunEnabled();
+              }
             }
             continue;
           }
@@ -1302,6 +1315,12 @@ function detectPlatform(): TestPlatform {
           });
           testPeers.set(peer.nodeId, entry);
           testInstanceToNodeId.set(rec.instanceName, peer.nodeId);
+          let live = testNodeIdToInstances.get(peer.nodeId);
+          if (!live) {
+            live = new Set();
+            testNodeIdToInstances.set(peer.nodeId, live);
+          }
+          live.add(rec.instanceName);
           refreshRunEnabled();
           if (isNew && autorunToggle.checked && !running) {
             selectedPeerId = peer.nodeId;
@@ -1321,6 +1340,7 @@ function detectPlatform(): TestPlatform {
     testAbort = null;
     testPeers.clear();
     testInstanceToNodeId.clear();
+    testNodeIdToInstances.clear();
     banner.classList.add("hidden");
     testTabBtn.classList.remove("testing-live");
     // F10: await the serve loop's shutdown contract (bounded) so a subsequent
