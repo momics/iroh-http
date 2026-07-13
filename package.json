@@ -16,6 +16,7 @@
     "build:node:all": "npm run build:all --workspace=packages/iroh-http-node",
     "build:tauri":  "npm run build --workspace=packages/iroh-http-tauri",
     "build:deno":   "cd packages/iroh-http-deno && deno task build",
+    "build:example": "npm run build:shared && npm run build:tauri && cd examples/tauri && npm ci --ignore-scripts && npm run build",
     "build:deno:all": "cd packages/iroh-http-deno && deno task build:all",
     "build": "npm run build:core && npm run build:shared && npm run build:node && npm run build:tauri && npm run build:deno",
     "build:all": "npm run build:core && npm run build:shared && npm run build:node:all && npm run build:tauri && npm run build:deno:all",

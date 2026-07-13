@@ -11,8 +11,8 @@
   },
   "dependencies": {
     "@tauri-apps/api": "^2",
-    "@momics/iroh-http-tauri": "^0.5.1",
-    "@momics/iroh-http-shared": "^0.5.1"
+    "@momics/iroh-http-tauri": "file:../../packages/iroh-http-tauri",
+    "@momics/iroh-http-shared": "file:../../packages/iroh-http-shared"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2",

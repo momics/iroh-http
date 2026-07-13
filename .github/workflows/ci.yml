@@ -124,6 +124,13 @@ jobs:
           npm run typecheck --workspace=packages/iroh-http-shared
           npm run typecheck --workspace=packages/iroh-http-tauri
 
+      # Clean example build (#350 F1): the Tauri example uses file: links to the
+      # local packages. A clean `tsc` build must resolve PR-only APIs against the
+      # freshly-built dist. This step is what catches the example importing
+      # exports that don't exist in the packages it depends on.
+      - name: Clean example build (examples/tauri)
+        run: npm run build:example
+
       # ── Security audit ────────────────────────────────────────────────────────
       - name: cargo deny (licenses, advisories, bans)
         uses: EmbarkStudios/cargo-deny-action@v2

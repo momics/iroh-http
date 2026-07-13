@@ -92,6 +92,14 @@ echo "  → build:deno"
 npm run build:deno --silent
 ok "deno"
 
+# Clean example build (#350 F1): examples/tauri uses file: links to the local
+# packages; a clean `tsc` build must resolve the PR APIs against their dist, not
+# a stale published version. This is the gate that would have caught the
+# example importing PR-only exports (asIrohPeer, discoveryInfo, TXT_KEY_ADDRESS…).
+echo "  → build:example"
+npm run build:example --silent
+ok "example (clean tsc + vite)"
+
 section "TypeScript"
 
 echo "  → typecheck"
