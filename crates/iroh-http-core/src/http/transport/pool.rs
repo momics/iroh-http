@@ -204,6 +204,13 @@ impl ConnectionPool {
     /// `Connection::stable_id` so the guarantee is absolute rather than
     /// ABA-probabilistic (a dropped connection's `stable_id` address can be
     /// reused by a fresh connection; `dial_seq` never repeats).
+    ///
+    /// F16: the compare-and-remove is a single atomic Moka `and_compute_with`
+    /// operation (see [`compare_and_remove`](Self::compare_and_remove)) rather
+    /// than a `get` followed by a separate `invalidate`. That closes a TOCTOU
+    /// window in which a concurrent task could replace the connection between
+    /// the two calls and have the delayed invalidate remove the fresh,
+    /// never-compared replacement.
     pub(crate) async fn evict_and_close(
         &self,
         node_id: PublicKey,
@@ -211,23 +218,18 @@ impl ConnectionPool {
         reason: &'static [u8],
         expected_dial_seq: Option<u64>,
     ) {
+        let Some(seq) = expected_dial_seq else {
+            // No identity captured (connect failed / timed out before dialing)
+            // — must not touch a possibly-healthy cached connection.
+            return;
+        };
         let key = PoolKey { node_id, alpn };
-        if let Some(pooled) = self.cache.get(&key).await {
-            if expected_dial_seq != Some(pooled.dial_seq) {
-                // Either no identity was captured, or a fresher replacement is
-                // now cached — leave the cached connection untouched.
-                tracing::debug!(
-                    peer = %pooled.remote_id_str,
-                    "iroh-http: pool evict skipped — cached connection is not the one that failed",
-                );
-                return;
-            }
+        if let Some(pooled) = self.compare_and_remove(key, seq).await {
             tracing::debug!(peer = %pooled.remote_id_str, "iroh-http: pool evict and close");
             self.emit(crate::events::TransportEvent::pool_evict(
                 pooled.remote_id_str.clone(),
             ));
             pooled.conn.close(0u32.into(), reason);
-            self.cache.invalidate(&key).await;
         }
     }
 
@@ -248,22 +250,19 @@ impl ConnectionPool {
     ///
     /// The `expected_dial_seq` scoping matches
     /// [`evict_and_close`](Self::evict_and_close): a mismatched id (a fresher
-    /// replacement) or `None` (no captured identity) is a no-op.
+    /// replacement) or `None` (no captured identity) is a no-op, and the
+    /// compare-and-remove is atomic (F16).
     pub(crate) async fn evict_only(
         &self,
         node_id: PublicKey,
         alpn: &'static [u8],
         expected_dial_seq: Option<u64>,
     ) {
+        let Some(seq) = expected_dial_seq else {
+            return;
+        };
         let key = PoolKey { node_id, alpn };
-        if let Some(pooled) = self.cache.get(&key).await {
-            if expected_dial_seq != Some(pooled.dial_seq) {
-                tracing::debug!(
-                    peer = %pooled.remote_id_str,
-                    "iroh-http: pool evict-only skipped — cached connection is not the one to drop",
-                );
-                return;
-            }
+        if let Some(pooled) = self.compare_and_remove(key, seq).await {
             tracing::debug!(
                 peer = %pooled.remote_id_str,
                 "iroh-http: pool evict-only (invalidate without close)",
@@ -271,7 +270,37 @@ impl ConnectionPool {
             self.emit(crate::events::TransportEvent::pool_evict(
                 pooled.remote_id_str.clone(),
             ));
-            self.cache.invalidate(&key).await;
+        }
+    }
+
+    /// Atomically remove the cached connection for `key` **iff** its
+    /// `dial_seq` matches `expected_dial_seq`, returning the removed connection
+    /// (or `None` if the key was absent or held a different connection).
+    ///
+    /// F16: the compare and the remove happen inside a single Moka per-key
+    /// `and_compute_with` closure, which runs under the entry lock, so no
+    /// concurrent task can slip a fresh replacement in between the two — the
+    /// exact TOCTOU that a `get` + later `invalidate` pair allows.
+    async fn compare_and_remove(
+        &self,
+        key: PoolKey,
+        expected_dial_seq: u64,
+    ) -> Option<Arc<PooledConnection>> {
+        use moka::ops::compute::{CompResult, Op};
+        let result = self
+            .cache
+            .entry(key)
+            .and_compute_with(|maybe_entry| {
+                let op = match maybe_entry {
+                    Some(ref entry) if entry.value().dial_seq == expected_dial_seq => Op::Remove,
+                    _ => Op::Nop,
+                };
+                std::future::ready(op)
+            })
+            .await;
+        match result {
+            CompResult::Removed(entry) => Some(entry.into_value()),
+            _ => None,
         }
     }
 
