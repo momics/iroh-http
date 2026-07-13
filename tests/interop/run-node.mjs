@@ -53,7 +53,9 @@ console.log(`  self: ${client.publicKey.toString()}\n`);
 // Resolve the peer's dialable direct addr so direct-dial has something to use.
 const peerInfo = await client.discoveryInfo().catch(() => null);
 const serverDiscovery = await server.discoveryInfo().catch(() => null);
-const peerAddrs = serverDiscovery?.directAddress ? [serverDiscovery.directAddress] : [];
+const peerAddrs = serverDiscovery?.directAddress
+  ? [serverDiscovery.directAddress]
+  : [];
 
 let groups = buildSuite({
   node: client,
@@ -66,6 +68,9 @@ let groups = buildSuite({
   handler: handleRequest,
   helpers: { TXT_KEY_ADDRESS: "address", TXT_KEY_RELAY: "relay" },
   isServing: true,
+  // Headless Node runner has no guaranteed mDNS stack — discovery cases that
+  // observe nothing skip cleanly rather than failing.
+  mdnsCapable: false,
 });
 
 if (filter) {
@@ -77,8 +82,14 @@ if (filter) {
 const report = await runSuite(groups, {
   onResult: ({ phase, result }) => {
     if (phase !== "result") return;
-    const icon = result.outcome === "pass" ? "✓" : result.outcome === "skip" ? "○" : "✗";
-    console.log(`  ${icon} [${result.group}] ${result.id} — ${result.detail ?? ""}`);
+    const icon = result.outcome === "pass"
+      ? "✓"
+      : result.outcome === "skip"
+      ? "○"
+      : "✗";
+    console.log(
+      `  ${icon} [${result.group}] ${result.id} — ${result.detail ?? ""}`,
+    );
   },
 });
 

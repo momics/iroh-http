@@ -83,7 +83,21 @@ function directAddrsOf(peer, isDialableSocketAddr) {
  * @returns {Array<{ id: string, name: string, tests: Array }>}
  */
 export function buildSuite(ctx) {
-  const { node, self, peer, cases, selfLoopbackCase, runCases, helpers = {}, isServing } = ctx;
+  const {
+    node,
+    self,
+    peer,
+    cases,
+    selfLoopbackCase,
+    runCases,
+    helpers = {},
+    isServing,
+  } = ctx;
+  // Whether the host runtime actually has a working mDNS/DNS-SD stack. On mobile
+  // and desktop Tauri this is true, so a discovery round-trip that observes
+  // nothing is a real regression (fail), not an environmental skip. Headless
+  // Node/Deno runners without mDNS pass `false` so those cases skip cleanly.
+  const mdnsCapable = ctx.mdnsCapable === true;
   const fetch = ctx.fetch ?? ((url, init) => node.fetch(url, init));
   const {
     TXT_KEY_ADDRESS = "address",
@@ -112,7 +126,9 @@ export function buildSuite(ctx) {
           ok: dialable || hasRelay,
           latencyMs,
           detail:
-            `directAddress=${di.directAddress ?? "null"} relayUrl=${di.relayUrl ?? "null"}` +
+            `directAddress=${di.directAddress ?? "null"} relayUrl=${
+              di.relayUrl ?? "null"
+            }` +
             (dialable ? "" : " (no routable direct addr — relay only)"),
         };
       },
@@ -124,7 +140,17 @@ export function buildSuite(ctx) {
       async run() {
         const t = now();
         const di = await node.discoveryInfo().catch(() => null);
-        const service = `iroh-http-suite-${Math.random().toString(36).slice(2, 8)}`;
+        // F9: iOS only permits Bonjour types declared in Info.ios.plist, so the
+        // suite must use the statically-declared `iroh-http-test` type — a random
+        // type is silently denied on iOS and the case degrades to a skip that
+        // hides real regressions. Isolation between concurrent advertisers comes
+        // from a unique *instance* name (allowed to be dynamic), not the type.
+        const service = "iroh-http-test";
+        // Keep the instance name within the 63-byte DNS-SD label limit: a short
+        // node-id prefix keeps it associable, the random suffix keeps it unique.
+        const instance = `${self.nodeId.slice(0, 12)}-s${
+          Math.random().toString(36).slice(2, 8)
+        }`;
         const ac = new AbortController();
         const txt = { pk: self.nodeId };
         if (di?.directAddress) txt[TXT_KEY_ADDRESS] = di.directAddress;
@@ -133,7 +159,7 @@ export function buildSuite(ctx) {
         node
           .advertise({
             serviceName: service,
-            instanceName: self.nodeId,
+            instanceName: instance,
             port: 1,
             protocol: "udp",
             txt,
@@ -146,12 +172,14 @@ export function buildSuite(ctx) {
         let addressTxt = null;
         const timer = setTimeout(() => ac.abort(), 5000);
         try {
-          for await (const rec of node.browse({
-            serviceName: service,
-            protocol: "udp",
-            signal: ac.signal,
-          })) {
-            if (rec.txt?.pk !== self.nodeId) continue;
+          for await (
+            const rec of node.browse({
+              serviceName: service,
+              protocol: "udp",
+              signal: ac.signal,
+            })
+          ) {
+            if (rec.instanceName !== instance) continue;
             if (rec.isActive) sawActive = true;
             addressTxt = rec.txt?.[TXT_KEY_ADDRESS] ?? addressTxt;
             seenSelf = true;
@@ -166,12 +194,16 @@ export function buildSuite(ctx) {
 
         const latencyMs = round(now() - t);
         if (!seenSelf) {
+          // On an mDNS-capable host (mobile/desktop) not observing our own
+          // advertisement is a real failure — e.g. missing plist declaration or
+          // a discovery regression. Only headless runtimes without mDNS skip.
           return {
             ok: false,
-            skip: true,
+            skip: !mdnsCapable,
             latencyMs,
-            detail:
-              "self advertisement not observed within 5s — mDNS may be unavailable on this host/runtime",
+            detail: mdnsCapable
+              ? "self advertisement NOT observed within 5s on an mDNS-capable host — discovery regression or missing Bonjour declaration"
+              : "self advertisement not observed within 5s — mDNS unavailable on this host/runtime",
           };
         }
         const dialable = !!addressTxt &&
@@ -195,18 +227,24 @@ export function buildSuite(ctx) {
       name: "re-advertise re-emits the record (rebind, W2)",
       async run() {
         const t = now();
-        const service = `iroh-http-suite-rb-${Math.random().toString(36).slice(2, 8)}`;
-        const instance = self.nodeId;
+        // F9: use the declared `iroh-http-test` type; isolate this run via a
+        // unique instance name so concurrent advertisers don't cross-count.
+        const service = "iroh-http-test";
+        const instance = `${self.nodeId.slice(0, 12)}-r${
+          Math.random().toString(36).slice(2, 8)
+        }`;
         let emits = 0;
         const browseAc = new AbortController();
 
         const browsing = (async () => {
           try {
-            for await (const rec of node.browse({
-              serviceName: service,
-              protocol: "udp",
-              signal: browseAc.signal,
-            })) {
+            for await (
+              const rec of node.browse({
+                serviceName: service,
+                protocol: "udp",
+                signal: browseAc.signal,
+              })
+            ) {
               if (rec.instanceName === instance && rec.isActive) emits += 1;
             }
           } catch {
@@ -241,9 +279,11 @@ export function buildSuite(ctx) {
         if (emits === 0) {
           return {
             ok: false,
-            skip: true,
+            skip: !mdnsCapable,
             latencyMs,
-            detail: "no emits observed — mDNS unavailable on this host/runtime",
+            detail: mdnsCapable
+              ? "no emits observed on an mDNS-capable host — rebind re-emit regression"
+              : "no emits observed — mDNS unavailable on this host/runtime",
           };
         }
         return {
@@ -251,7 +291,9 @@ export function buildSuite(ctx) {
           latencyMs,
           detail:
             `observed ${emits} emit(s) across two advertisement generations` +
-            (emits >= 2 ? " (re-emit ✓)" : " (expected ≥2 — possible W2 regression)"),
+            (emits >= 2
+              ? " (re-emit ✓)"
+              : " (expected ≥2 — possible W2 regression)"),
         };
       },
     },
@@ -265,14 +307,20 @@ export function buildSuite(ctx) {
       name: "fetch reaches peer over direct ip:port (transport = DIRECT)",
       async run() {
         if (!peer) {
-          return { ok: false, skip: true, latencyMs: 0, detail: "no peer selected" };
+          return {
+            ok: false,
+            skip: true,
+            latencyMs: 0,
+            detail: "no peer selected",
+          };
         }
         if (!peerDirect.length) {
           return {
             ok: false,
             skip: true,
             latencyMs: 0,
-            detail: "peer advertised no dialable ip:port (relay-only) — see relay-fallback",
+            detail:
+              "peer advertised no dialable ip:port (relay-only) — see relay-fallback",
           };
         }
         const t = now();
@@ -295,7 +343,21 @@ export function buildSuite(ctx) {
         const latencyMs = round(now() - t);
         const transport = await detectTransport(node, peer.nodeId);
         const fetchOk = status != null && status < 500;
-        const ok = fetchOk && transport !== "relay";
+        // F19: only a measured DIRECT transport proves direct dial. An "unknown"
+        // transport (peerStats unavailable) must NOT be counted as a direct pass —
+        // it is inconclusive, so skip rather than falsely green.
+        if (fetchOk && transport === "unknown") {
+          return {
+            ok: false,
+            skip: true,
+            latencyMs,
+            transport,
+            detail: `HTTP ${status} via ${
+              peerDirect[0]
+            } — transport undetermined (peerStats unavailable); cannot confirm direct`,
+          };
+        }
+        const ok = fetchOk && transport === "direct";
         return {
           ok,
           latencyMs,
@@ -304,9 +366,7 @@ export function buildSuite(ctx) {
             `HTTP ${status} via ${peerDirect[0]} — transport=${transport}` +
             (transport === "relay"
               ? " (reached over RELAY, not direct ✗)"
-              : transport === "unknown"
-                ? " (transport undetermined — fetch succeeded, see limitation note)"
-                : ""),
+              : ""),
         };
       },
     },
@@ -320,13 +380,20 @@ export function buildSuite(ctx) {
       name: "fetch succeeds with only a relay available",
       async run() {
         if (!peer) {
-          return { ok: false, skip: true, latencyMs: 0, detail: "no peer selected" };
+          return {
+            ok: false,
+            skip: true,
+            latencyMs: 0,
+            detail: "no peer selected",
+          };
         }
         const t = now();
         let status = null;
         try {
           // Omit directAddrs so the stack must fall back to relay routing.
-          const res = await fetch(`httpi://${peer.nodeId}/hello`, { method: "GET" });
+          const res = await fetch(`httpi://${peer.nodeId}/hello`, {
+            method: "GET",
+          });
           status = res.status;
           await res.arrayBuffer();
         } catch (e) {
@@ -339,11 +406,32 @@ export function buildSuite(ctx) {
         }
         const latencyMs = round(now() - t);
         const transport = await detectTransport(node, peer.nodeId);
+        const fetchOk = status != null && status < 500;
+        // F8: this case only proves relay fallback if the measured transport is
+        // actually "relay". Because a prior direct-dial in the same run may have
+        // warmed a pooled direct connection that this fetch reuses, omitting
+        // directAddrs does NOT guarantee relay routing. A direct/unknown result
+        // is therefore inconclusive — skip rather than falsely pass a relay
+        // claim. (A truly relay-only client — fresh node, direct discovery
+        // disabled — is tracked as a follow-up; the single shared harness node
+        // cannot isolate it.)
+        if (fetchOk && transport !== "relay") {
+          return {
+            ok: false,
+            skip: true,
+            latencyMs,
+            transport,
+            detail:
+              `HTTP ${status} — transport=${transport}; relay not exercised ` +
+              "(reused/available direct path — cannot confirm relay fallback in a shared-node harness)",
+          };
+        }
         return {
-          ok: status != null && status < 500,
+          ok: fetchOk && transport === "relay",
           latencyMs,
           transport,
-          detail: `HTTP ${status} — transport=${transport}`,
+          detail: `HTTP ${status} — transport=${transport}` +
+            (transport === "relay" ? " (relay ✓)" : ""),
         };
       },
     },
@@ -355,10 +443,17 @@ export function buildSuite(ctx) {
     return {
       id: `http-compliance-${tc.id}`,
       group: "http-compliance",
-      name: `${tc.id}${tc.description ? ` — ${tc.description}` : ""} (${targetLabel})`,
+      name: `${tc.id}${
+        tc.description ? ` — ${tc.description}` : ""
+      } (${targetLabel})`,
       async run() {
         if (!againstSelf && !peer) {
-          return { ok: false, skip: true, latencyMs: 0, detail: "no peer selected" };
+          return {
+            ok: false,
+            skip: true,
+            latencyMs: 0,
+            detail: "no peer selected",
+          };
         }
         const serverId = againstSelf ? self.nodeId : peer.nodeId;
         const t = now();
@@ -367,16 +462,24 @@ export function buildSuite(ctx) {
           await runCases({
             fetch: (url, init) => fetch(url, init),
             serverId,
-            directAddrs: againstSelf || !peerDirect.length ? undefined : peerDirect,
+            directAddrs: againstSelf || !peerDirect.length
+              ? undefined
+              : peerDirect,
             cases: [tc],
             onCaseResult: (r) => {
               caseResult = r;
             },
           });
         } catch (e) {
-          return { ok: false, latencyMs: round(now() - t), detail: `run error: ${e}` };
+          return {
+            ok: false,
+            latencyMs: round(now() - t),
+            detail: `run error: ${e}`,
+          };
         }
-        const latencyMs = caseResult ? round(caseResult.latencyMs) : round(now() - t);
+        const latencyMs = caseResult
+          ? round(caseResult.latencyMs)
+          : round(now() - t);
         return {
           ok: !!caseResult && caseResult.ok,
           latencyMs,
@@ -414,23 +517,48 @@ export function buildSuite(ctx) {
           };
         }
         if (!ctx.handler) {
-          return { ok: false, skip: true, latencyMs: 0, detail: "no handler provided" };
+          return {
+            ok: false,
+            skip: true,
+            latencyMs: 0,
+            detail: "no handler provided",
+          };
         }
         const t = now();
         const ac = new AbortController();
         let reachable = false;
         let refused = false;
+        let handle = null;
         try {
-          node.serve({ signal: ac.signal }, ctx.handler);
-          const res = await fetch(`httpi://${self.nodeId}/hello`, { method: "GET" });
+          handle = node.serve({ signal: ac.signal }, ctx.handler);
+          const res = await fetch(`httpi://${self.nodeId}/hello`, {
+            method: "GET",
+          });
           reachable = res.status < 500;
           await res.arrayBuffer();
         } catch (e) {
           ac.abort();
-          return { ok: false, latencyMs: round(now() - t), detail: `serve/reach failed: ${e}` };
+          return {
+            ok: false,
+            latencyMs: round(now() - t),
+            detail: `serve/reach failed: ${e}`,
+          };
         }
+        // F20: deterministically await the serve loop's own shutdown contract
+        // (ServeHandle.finished) instead of sleeping a fixed 300ms and hoping the
+        // loop has drained. Bound the wait so a stuck stop can't hang the suite.
         ac.abort();
-        await new Promise((r) => setTimeout(r, 300));
+        try {
+          const finished = handle?.finished ?? Promise.resolve();
+          await Promise.race([
+            finished,
+            new Promise((_r, reject) =>
+              setTimeout(() => reject(new Error("serve stop timed out")), 5000)
+            ),
+          ]);
+        } catch {
+          /* fall through: probe reachability regardless */
+        }
         try {
           await fetch(`httpi://${self.nodeId}/hello`, { method: "GET" });
         } catch {
@@ -440,7 +568,8 @@ export function buildSuite(ctx) {
         return {
           ok: reachable && refused,
           latencyMs,
-          detail: `reachable-while-serving=${reachable} refused-after-stop=${refused}`,
+          detail:
+            `reachable-while-serving=${reachable} refused-after-stop=${refused}`,
         };
       },
     },
@@ -461,31 +590,61 @@ export function buildSuite(ctx) {
  *
  * @returns {Promise<{ groups: Array, results: Array, summary: object }>}
  */
-export async function runSuite(groups, { onResult, log } = {}) {
+export async function runSuite(
+  groups,
+  { onResult, log, deadlineMs = 20000 } = {},
+) {
   let pass = 0;
   let fail = 0;
   let skip = 0;
   let direct = 0;
   let relay = 0;
+  let transportTotal = 0;
   const flat = [];
 
   for (const group of groups) {
     for (const test of group.tests) {
       onResult?.({ phase: "start", group: group.id, test });
       let res;
+      const startedAt = now();
       try {
-        res = await test.run();
+        // F20: bound every case so a hung fetch/browse can't stall the suite.
+        res = await Promise.race([
+          test.run(),
+          new Promise((_r, reject) =>
+            setTimeout(
+              () => reject(new Error(`case exceeded ${deadlineMs}ms deadline`)),
+              deadlineMs,
+            )
+          ),
+        ]);
       } catch (e) {
-        res = { ok: false, latencyMs: 0, detail: `threw: ${e}` };
+        res = {
+          ok: false,
+          latencyMs: round(now() - startedAt),
+          detail: `threw: ${e}`,
+        };
       }
       const outcome = res.skip ? "skip" : res.ok ? "pass" : "fail";
       if (outcome === "pass") pass += 1;
       else if (outcome === "fail") fail += 1;
       else skip += 1;
-      if (res.transport === "direct") direct += 1;
-      else if (res.transport === "relay") relay += 1;
+      // F27: only tests that actually measured a transport contribute to the
+      // transport rollup — compliance/serve-stop/discovery cases carry no
+      // transport and must not inflate the "unknown" bucket.
+      if (typeof res.transport === "string") {
+        transportTotal += 1;
+        if (res.transport === "direct") direct += 1;
+        else if (res.transport === "relay") relay += 1;
+      }
 
-      const record = { id: test.id, group: group.id, name: test.name, outcome, ...res };
+      const record = {
+        id: test.id,
+        group: group.id,
+        name: test.name,
+        outcome,
+        ...res,
+      };
       flat.push(record);
 
       const fields = {
@@ -512,7 +671,7 @@ export async function runSuite(groups, { onResult, log } = {}) {
       pass,
       fail,
       skip,
-      transport: { direct, relay, unknown: flat.length - direct - relay },
+      transport: { direct, relay, unknown: transportTotal - direct - relay },
     },
   };
 }

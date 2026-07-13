@@ -1418,6 +1418,9 @@ function detectPlatform(): TestPlatform {
       handler: handleComplianceRequest,
       helpers: { TXT_KEY_ADDRESS, TXT_KEY_RELAY, isDialableSocketAddr },
       isServing: testAbort !== null,
+      // Tauri (mobile + desktop) has a working DNS-SD stack, so a discovery
+      // round-trip that observes nothing is a real regression, not a skip.
+      mdnsCapable: true,
     });
 
     renderSkeleton(groups);
