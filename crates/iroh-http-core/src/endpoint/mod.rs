@@ -92,7 +92,25 @@ impl IrohEndpoint {
     /// Register the locally-running serve service so a self-request
     /// (`fetch()` to this node's own id) can be dispatched in-process.
     /// Called when `serve()` starts; see ADR-015.
+    ///
+    /// F7: this is the first observable step of a serve cycle, so it bumps the
+    /// serve-cycle generation and installs the service under the `serve_handle`
+    /// lock. That serializes cycle-start with `stop_serve` / `set_serve_handle`:
+    /// a `stop_serve` racing between here and `set_serve_handle` can then no
+    /// longer clear this cycle's service while shutting only the *previous*
+    /// handle — it observes this cycle's generation and the new handle is shut
+    /// down when it registers, rather than being left running without a router.
     pub(crate) fn set_local_service(&self, svc: &crate::ffi::dispatcher::IrohHttpService) {
+        let _serve_guard = self
+            .inner
+            .session
+            .serve_handle
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        self.inner
+            .session
+            .serve_started_gen
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         *self
             .inner
             .ffi

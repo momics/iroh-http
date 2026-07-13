@@ -938,3 +938,72 @@ async fn serve_loop_serves_one_exchange_per_bistream() {
         "a second request on the same bi-stream must not be dispatched (keep-alive off)",
     );
 }
+
+/// F7 (deterministic): a `stop_serve()` that races a serve restart must stop the
+/// NEW cycle, not merely the stale previously-registered handle. The existing
+/// stress test cannot reliably interleave inside the synchronous
+/// `set_local_service → set_serve_handle` section, so this drives the primitives
+/// in the exact failing order on one task:
+///
+///  1. cycle A is registered,
+///  2. cycle B starts — `ffi_serve` installs B's local service and bumps the
+///     serve generation and spawns B's accept loop, but B's handle is NOT yet
+///     registered (A is still the stored handle),
+///  3. `stop_serve()` fires (sees A registered, records the stop generation),
+///  4. B registers via `set_serve_handle`.
+///
+/// Generation-scoped, the stop is honoured against B's generation, so B is shut
+/// down at registration and the endpoint ends fully stopped. Before the fix the
+/// stop targeted only the stale A and B kept running with its router cleared
+/// (partially live), so `wait_serve_stop` — armed with B's done signal — hung.
+///
+/// Runs on a multi-thread runtime (as the FFI adapters do) so B's spawned accept
+/// loop is actually polled and parked on `accept()` before the stop, matching
+/// the production scheduler rather than a current-thread test quirk.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stop_between_restart_steps_stops_the_new_cycle() {
+    let (server_ep, _client_ep) = common::make_pair().await;
+
+    // Cycle A: fully registered.
+    serve_router(&server_ep);
+
+    // Cycle B: ffi_serve installs B's local service, bumps the generation and
+    // spawns B's accept loop — but set_serve_handle(B) has NOT run yet.
+    let handler_ep = server_ep.clone();
+    let handle_b = ffi_serve(
+        server_ep.clone(),
+        ServeOptions::default(),
+        move |payload: RequestPayload| {
+            let ep = handler_ep.clone();
+            tokio::spawn(async move {
+                respond(ep.handles(), payload.req_handle, 200, vec![]).unwrap();
+                ep.handles().finish_body(payload.res_body_handle).unwrap();
+            });
+        },
+    );
+
+    let mut done_b = handle_b.subscribe_done();
+
+    // Let B's accept loop reach its select and park on `accept()` — the state a
+    // real serve cycle is in between start and handle registration.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Stop fires while A is the registered handle and B is mid-start.
+    server_ep.stop_serve();
+
+    // B registers. The generation-scoped stop shuts it down here.
+    server_ep.set_serve_handle(handle_b);
+
+    // B must be shut down by the generation-scoped stop: its done signal fires.
+    // Before the fix the stop targeted only the stale A, so B kept running and
+    // this timed out.
+    tokio::time::timeout(Duration::from_secs(5), done_b.wait_for(|v| *v))
+        .await
+        .expect("the racing stop must stop the new cycle B (F7), not leave it running")
+        .expect("B's done watch channel must not be dropped");
+
+    // And the endpoint's own stop wait resolves — no serve cycle is left live.
+    tokio::time::timeout(Duration::from_secs(5), server_ep.wait_serve_stop())
+        .await
+        .expect("wait_serve_stop must resolve once the new cycle is stopped");
+}

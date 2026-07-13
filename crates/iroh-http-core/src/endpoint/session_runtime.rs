@@ -5,7 +5,7 @@
 //! SessionRuntime intentionally stays here alongside IrohEndpoint (tight
 //! lifecycle coupling; no further move is planned).
 
-use std::sync::atomic::{AtomicBool, AtomicUsize};
+use std::sync::atomic::{AtomicU64, AtomicUsize};
 use std::sync::Mutex;
 
 use dashmap::DashMap;
@@ -21,11 +21,20 @@ use super::stats::PathInfo;
 pub(in crate::endpoint) struct SessionRuntime {
     /// Active serve handle, if `serve()` has been called.
     pub(in crate::endpoint) serve_handle: Mutex<Option<ServeHandle>>,
-    /// Set to `true` when `stop_serve()` is called before the serve handle is
-    /// registered. `set_serve_handle` checks this and immediately shuts down
-    /// the new handle if the flag is set — prevents a race when JS calls
-    /// `signal.abort()` before the napi async `rawServe` resolves.
-    pub(in crate::endpoint) serve_stopped_early: AtomicBool,
+    /// Monotonic generation of the serve cycle currently starting. Bumped by
+    /// `set_local_service` (the first observable step of a `serve()` cycle),
+    /// under the `serve_handle` lock. `set_serve_handle` reads it as the
+    /// generation of the handle it is registering.
+    pub(in crate::endpoint) serve_started_gen: AtomicU64,
+    /// Highest serve generation for which a `stop_serve()` has been requested.
+    /// Set by `stop_serve` under the `serve_handle` lock. `set_serve_handle`
+    /// shuts down its new handle when `serve_stopped_gen >= serve_started_gen`,
+    /// so a stop that races a restart — targeting either the not-yet-registered
+    /// new handle or the stale old one — is honoured against the correct
+    /// generation instead of being lost (F7). This generalizes the old
+    /// early-stop boolean: it covers both the pre-registration stop and the
+    /// restart-with-concurrent-stop race.
+    pub(in crate::endpoint) serve_stopped_gen: AtomicU64,
     /// Done-signal receiver from the active serve task. Stored separately
     /// so `wait_serve_stop()` can await without holding the `serve_handle` lock.
     pub(in crate::endpoint) serve_done_rx: Mutex<Option<watch::Receiver<bool>>>,

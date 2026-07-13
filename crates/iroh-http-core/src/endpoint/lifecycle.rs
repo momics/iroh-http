@@ -64,23 +64,20 @@ impl IrohEndpoint {
         // "half-live serve answers a blanket 200 instead of the routed status"
         // symptom). Shut the previous loop down so only the new one accepts.
         //
-        // F2: take the previous handle, install the done signal, observe/clear
-        // the early-stop flag, and store the new handle all under ONE
-        // continuous hold of the `serve_handle` lock. Every step is
-        // non-blocking (no await), so the critical section stays short.
+        // Take the previous handle, install the done signal, evaluate the stop
+        // generation, and store the new handle all under ONE continuous hold of
+        // the `serve_handle` lock. Every step is non-blocking (no await), so the
+        // critical section stays short.
         //
-        // Releasing the lock between `take()` and the final store previously
-        // left `serve_handle == None` for a window in which a concurrent
-        // `stop_serve()` (an independent Tauri command fired by JS abort/close
-        // at any time) would take its None branch and set
-        // `serve_stopped_early = true`. But this method had already read
-        // `was_stopped = false`, so the new loop was never shut down — the stop
-        // was lost and the loop ran forever; worse, the now-stuck flag would
-        // spuriously shut down the NEXT serve. `stop_serve()` sets the flag
-        // only while holding `serve_handle`, so holding it here forces a racing
-        // `stop_serve()` to either (a) run first and be observed via the flag
-        // swap below, or (b) block until the new handle is stored and then shut
-        // *it* down. Either way the stop is honoured exactly once.
+        // F7: register the new handle under the same `serve_handle` lock that
+        // `set_local_service` bumped `serve_started_gen` under and that
+        // `stop_serve` records `serve_stopped_gen` under. `my_gen` is this
+        // cycle's generation; if a `stop_serve` has been requested for this
+        // generation or a later one (`serve_stopped_gen >= my_gen`), shut the
+        // new handle down. This subsumes the old early-stop boolean and also
+        // closes the restart-with-concurrent-stop race: a stop that targeted
+        // the stale previous handle still stops this cycle because it recorded a
+        // generation >= `my_gen`.
         let mut guard = self
             .inner
             .session
@@ -99,15 +96,17 @@ impl IrohEndpoint {
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = Some(handle.subscribe_done());
 
-        // Clear the early-stop flag and check if it was set. Serialized with
-        // `stop_serve()`'s flag-set via the `serve_handle` lock we hold, so this
-        // read-and-clear can never miss a concurrent stop.
-        let was_stopped = self
+        let my_gen = self
             .inner
             .session
-            .serve_stopped_early
-            .swap(false, std::sync::atomic::Ordering::AcqRel);
-        if was_stopped {
+            .serve_started_gen
+            .load(std::sync::atomic::Ordering::SeqCst);
+        let stopped_gen = self
+            .inner
+            .session
+            .serve_stopped_gen
+            .load(std::sync::atomic::Ordering::SeqCst);
+        if stopped_gen > 0 && stopped_gen >= my_gen {
             handle.shutdown();
         }
 
@@ -116,22 +115,31 @@ impl IrohEndpoint {
 
     /// Signal the serve loop to stop accepting new connections.
     pub fn stop_serve(&self) {
-        self.clear_local_service();
+        // F7: clear the local service, record the stop generation, and shut the
+        // registered handle (if any) under ONE hold of the `serve_handle` lock —
+        // the same lock `set_local_service` and `set_serve_handle` take. This
+        // serializes the stop with a concurrent restart so its side effects
+        // (service clear + generation record) cannot straddle the new cycle's
+        // start. `serve_stopped_gen` is raised to the current `serve_started_gen`
+        // so a not-yet-registered new handle is shut down when it arrives.
         let guard = self
             .inner
             .session
             .serve_handle
             .lock()
             .unwrap_or_else(|e| e.into_inner());
+        self.clear_local_service();
+        let g = self
+            .inner
+            .session
+            .serve_started_gen
+            .load(std::sync::atomic::Ordering::SeqCst);
+        self.inner
+            .session
+            .serve_stopped_gen
+            .fetch_max(g, std::sync::atomic::Ordering::SeqCst);
         if let Some(h) = guard.as_ref() {
             h.shutdown();
-        } else {
-            // Handle not registered yet — set a flag so that
-            // `set_serve_handle` will shut down as soon as it arrives.
-            self.inner
-                .session
-                .serve_stopped_early
-                .store(true, std::sync::atomic::Ordering::Release);
         }
     }
 
