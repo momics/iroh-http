@@ -621,6 +621,20 @@ select:focus {
   align-items: center;
 }
 
+.suite-collector {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.suite-collector input {
+  flex: 1 1 20rem;
+  min-width: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.8rem;
+}
+
 .toggle-inline {
   display: inline-flex;
   align-items: center;

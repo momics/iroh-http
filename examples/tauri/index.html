@@ -383,6 +383,25 @@
                 <span>Auto-run on new peer</span>
               </label>
               <button id="suite-copy-json-btn" class="btn-secondary">Copy JSON</button>
+              <button id="suite-submit-btn" class="btn-secondary" disabled>
+                Submit results
+              </button>
+              <label class="toggle-inline">
+                <input id="suite-autosubmit-toggle" type="checkbox" />
+                <span>Auto-submit</span>
+              </label>
+            </div>
+            <div class="suite-collector">
+              <input
+                id="suite-collector-id"
+                type="text"
+                inputmode="verbatim"
+                autocomplete="off"
+                autocapitalize="off"
+                spellcheck="false"
+                placeholder="Collector node id (optionally id|addr,addr)"
+              />
+              <span id="suite-collector-status" class="hint"></span>
             </div>
             <p id="suite-target" class="hint"></p>
           </div>

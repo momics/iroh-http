@@ -1111,6 +1111,18 @@ function detectPlatform(): TestPlatform {
   const copyJsonBtn = document.querySelector<HTMLButtonElement>(
     "#suite-copy-json-btn",
   )!;
+  const submitBtn = document.querySelector<HTMLButtonElement>(
+    "#suite-submit-btn",
+  )!;
+  const autosubmitToggle = document.querySelector<HTMLInputElement>(
+    "#suite-autosubmit-toggle",
+  )!;
+  const collectorIdInput = document.querySelector<HTMLInputElement>(
+    "#suite-collector-id",
+  )!;
+  const collectorStatus = document.querySelector<HTMLElement>(
+    "#suite-collector-status",
+  )!;
   const targetLabel = document.querySelector<HTMLElement>("#suite-target")!;
   const summaryBar = document.querySelector<HTMLElement>("#suite-summary")!;
   const sumPass = document.querySelector<HTMLElement>("#suite-sum-pass")!;
@@ -1207,6 +1219,7 @@ function detectPlatform(): TestPlatform {
     // F21: batch runs target only active testing-mode peers, not the global
     // registry (which includes manual/session/generic peers).
     runAllBtn.disabled = running || testPeers.size === 0;
+    refreshSubmitEnabled();
   }
 
   // ── Testing mode ───────────────────────────────────────────────────────────
@@ -1513,6 +1526,100 @@ function detectPlatform(): TestPlatform {
   // deno-lint-ignore no-explicit-any
   const reports: any[] = [];
 
+  // ── Collector submit ───────────────────────────────────────────────────────
+  // Post the run's JSON report to a standalone iroh-http collector node so
+  // device results land on disk automatically instead of being copied by hand.
+  // The collector id is remembered across launches. It may carry optional
+  // direct-address hints as `id|ip:port,ip:port` to help a peer whose only
+  // discovery path would otherwise be the relay.
+  const COLLECTOR_STORAGE = "iroh-http-collector-id";
+  // deno-lint-ignore no-explicit-any
+  let lastPayload: any = null;
+
+  const storedCollector = (() => {
+    try {
+      return localStorage.getItem(COLLECTOR_STORAGE) ?? "";
+    } catch {
+      return "";
+    }
+  })();
+  if (storedCollector) collectorIdInput.value = storedCollector;
+
+  function parseCollectorTarget(
+    raw: string,
+  ): { nodeId: string; addrs: string[] } | null {
+    const trimmed = raw.trim();
+    if (!trimmed) return null;
+    const [idPart, addrPart] = trimmed.split("|");
+    const nodeId = idPart.trim();
+    if (!nodeId) return null;
+    const addrs = (addrPart ?? "")
+      .split(",")
+      .map((a) => a.trim())
+      .filter((a) => a.length > 0);
+    return { nodeId, addrs };
+  }
+
+  function refreshSubmitEnabled(): void {
+    const hasTarget = parseCollectorTarget(collectorIdInput.value) !== null;
+    submitBtn.disabled = running || !hasTarget || lastPayload === null;
+  }
+
+  async function submitToCollector(auto = false): Promise<void> {
+    const target = parseCollectorTarget(collectorIdInput.value);
+    if (!target || lastPayload === null) return;
+    try {
+      localStorage.setItem(COLLECTOR_STORAGE, collectorIdInput.value.trim());
+    } catch {
+      // Non-fatal: persistence is a convenience only.
+    }
+    setStatus(collectorStatus, auto ? "Auto-submitting…" : "Submitting…", "");
+    try {
+      const res = await node.fetch(`httpi://${target.nodeId}/results`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        directAddrs: target.addrs.length ? target.addrs : undefined,
+        body: JSON.stringify(lastPayload),
+      });
+      if (res.ok) {
+        // deno-lint-ignore no-explicit-any
+        let saved: any = null;
+        try {
+          saved = await res.json();
+        } catch {
+          saved = null;
+        }
+        const n = Array.isArray(saved?.saved) ? saved.saved.length : "?";
+        setStatus(collectorStatus, `Submitted ✓ (${n} saved)`, "ok");
+      } else {
+        setStatus(
+          collectorStatus,
+          `Collector responded ${res.status}`,
+          "error",
+        );
+      }
+    } catch (e) {
+      setStatus(collectorStatus, `Submit failed: ${e}`, "error");
+    }
+  }
+
+  collectorIdInput.addEventListener("input", () => {
+    try {
+      localStorage.setItem(COLLECTOR_STORAGE, collectorIdInput.value.trim());
+    } catch {
+      // ignore
+    }
+    refreshSubmitEnabled();
+  });
+  submitBtn.addEventListener("click", () => void submitToCollector(false));
+
+  // deno-lint-ignore no-explicit-any
+  function setLastPayload(payload: any): void {
+    lastPayload = payload;
+    refreshSubmitEnabled();
+    if (autosubmitToggle.checked) void submitToCollector(true);
+  }
+
   // deno-lint-ignore no-explicit-any
   async function runAgainst(peer: RegistryPeer | null): Promise<any> {
     const startedAt = new Date().toISOString();
@@ -1583,6 +1690,7 @@ function detectPlatform(): TestPlatform {
       reports.length = 0;
       reports.push(report);
       jsonLog.textContent = JSON.stringify(report, null, 2);
+      setLastPayload(report);
     } catch (e) {
       setStatus(modeStatus, `Run error: ${e}`, "error");
     } finally {
@@ -1614,6 +1722,10 @@ function detectPlatform(): TestPlatform {
         null,
         2,
       );
+      setLastPayload({
+        schema: "iroh-http-interop/2-batch",
+        reports: [...reports],
+      });
     } catch (e) {
       setStatus(modeStatus, `Run error: ${e}`, "error");
     } finally {
