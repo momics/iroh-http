@@ -339,17 +339,30 @@ pub fn parse_direct_addrs(
 /// Reconcile a node's derived direct-address ports against its real bound
 /// sockets.
 ///
-/// Some platforms (notably iOS) enumerate a local interface address with the
-/// port stripped to 0, even though the QUIC socket is bound to a real port.
-/// Advertising such an address makes the node undialable: peers reject the
-/// port-less address at parse time (`invalid socket address syntax`, #346).
+/// Some platforms (notably iOS) enumerate a *local* interface address with the
+/// port replaced by a non-dialable placeholder — `0` (unspecified) or `1` —
+/// even though the QUIC socket is bound to a real port. Advertising such an
+/// address makes the node undialable: peers reject the port-less address at
+/// parse time (`invalid socket address syntax`, #346), and a `:1` is dialed as
+/// literal TCP-mux port 1 which never answers QUIC (#350 F5).
 ///
-/// For each candidate whose port is 0, substitute a port taken from
+/// For each candidate whose port is a placeholder, substitute a port taken from
 /// `bound_sockets` — preferring a bound socket of the same IP family (v4↔v4,
 /// v6↔v6), falling back to the first bound socket. A candidate that still has
 /// no usable port (no bound socket to borrow from) is dropped with a warning
-/// rather than advertised as a useless `:0`. Candidates with a non-zero port
-/// are returned unchanged.
+/// rather than advertised as a useless placeholder.
+///
+/// Candidates with a real (non-placeholder) port are returned **unchanged**.
+/// This is deliberate and is why we do *not* treat "any port not present among
+/// the bound sockets" as a placeholder: `EndpointAddr` also carries reflexive
+/// QAD addresses whose global `ip:port` is discovered via relay probing and by
+/// design differs from the local bound port. Rewriting those to a bound port
+/// would corrupt the node's NAT-traversal candidates. Only ports `0`/`1` — which
+/// are never real QUIC ephemeral ports — are treated as placeholders.
+pub(crate) fn is_placeholder_port(port: u16) -> bool {
+    port == 0 || port == 1
+}
+
 pub(crate) fn reconcile_direct_addr_ports(
     candidates: &[std::net::SocketAddr],
     bound_sockets: &[std::net::SocketAddr],
@@ -357,14 +370,18 @@ pub(crate) fn reconcile_direct_addr_ports(
     let borrow_port = |ipv6: bool| -> Option<u16> {
         bound_sockets
             .iter()
-            .find(|s| s.is_ipv6() == ipv6 && s.port() != 0)
-            .or_else(|| bound_sockets.iter().find(|s| s.port() != 0))
+            .find(|s| s.is_ipv6() == ipv6 && !is_placeholder_port(s.port()))
+            .or_else(|| {
+                bound_sockets
+                    .iter()
+                    .find(|s| !is_placeholder_port(s.port()))
+            })
             .map(|s| s.port())
     };
 
     let mut out = Vec::with_capacity(candidates.len());
     for &addr in candidates {
-        if addr.port() != 0 {
+        if !is_placeholder_port(addr.port()) {
             out.push(addr);
             continue;
         }
@@ -373,13 +390,13 @@ pub(crate) fn reconcile_direct_addr_ports(
                 let mut fixed = addr;
                 fixed.set_port(port);
                 tracing::warn!(
-                    "iroh-http: reconciled port-0 direct address {addr} to bound port {port} (#346)"
+                    "iroh-http: reconciled placeholder-port direct address {addr} to bound port {port} (#346/#350)"
                 );
                 out.push(fixed);
             }
             None => {
                 tracing::warn!(
-                    "iroh-http: dropping direct address {addr} with port 0 (no bound port to borrow) (#346)"
+                    "iroh-http: dropping direct address {addr} with placeholder port (no bound port to borrow) (#346/#350)"
                 );
             }
         }
@@ -427,6 +444,50 @@ mod direct_addr_tests {
         let bound = vec![sock("0.0.0.0:59234")];
         let out = reconcile_direct_addr_ports(&candidates, &bound);
         assert_eq!(out, vec![sock("10.0.0.5:4433")]);
+    }
+
+    // Regression: #350 F5 — iOS was observed enumerating a local address with
+    // port `1` (not just `0`). `reconcile_direct_addr_ports` only replaced `:0`,
+    // so `:1` leaked through and peers dialed literal TCP-mux port 1 → no QUIC.
+    #[test]
+    fn reconcile_substitutes_bound_port_for_port_one() {
+        let candidates = vec![sock("192.168.50.227:1")];
+        let bound = vec![sock("0.0.0.0:62546")];
+        let out = reconcile_direct_addr_ports(&candidates, &bound);
+        assert_eq!(out, vec![sock("192.168.50.227:62546")]);
+    }
+
+    #[test]
+    fn reconcile_drops_port_one_when_no_bound_port_available() {
+        let candidates = vec![sock("192.168.50.227:1")];
+        let bound: Vec<SocketAddr> = vec![];
+        let out = reconcile_direct_addr_ports(&candidates, &bound);
+        assert!(
+            out.is_empty(),
+            "a :1 placeholder with no bound port must be dropped, got {out:?}"
+        );
+    }
+
+    // Regression: #350 F5/F14 — a reflexive QAD address carries a real global
+    // port discovered via relay probing that intentionally differs from the
+    // local bound port. It must be preserved verbatim, never rewritten to the
+    // bound port (that would corrupt the node's NAT-traversal candidate).
+    #[test]
+    fn reconcile_preserves_reflexive_qad_port() {
+        // Local placeholder + reflexive global address, one bound socket.
+        let candidates = vec![sock("192.168.50.227:1"), sock("192.26.168.188:40349")];
+        let bound = vec![sock("0.0.0.0:62546")];
+        let out = reconcile_direct_addr_ports(&candidates, &bound);
+        assert_eq!(
+            out[0],
+            sock("192.168.50.227:62546"),
+            "local placeholder reconciled"
+        );
+        assert_eq!(
+            out[1],
+            sock("192.26.168.188:40349"),
+            "reflexive QAD global port must be preserved, not clobbered to the bound port"
+        );
     }
 
     #[test]

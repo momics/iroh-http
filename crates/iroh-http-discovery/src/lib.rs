@@ -222,22 +222,43 @@ pub async fn browse_peers(
 /// Select a dialable `ip:<port>` address to advertise from the endpoint's
 /// direct addresses.
 ///
+/// Selects a dialable `ip:port` to advertise in the `address` TXT.
+///
 /// Picks the first routable IP (skipping loopback, unspecified and link-local
-/// addresses) and pairs it with `bound_port` — the endpoint's real bound QUIC
-/// port — since the ports reported by `ip_addrs()` can be placeholders
-/// (`:0`/`:1`) rather than the socket the endpoint actually listens on (#346).
-/// Returns `None` when no routable address is available (e.g. loopback- or
-/// link-local-only), in which case no `address` TXT is published and peers fall
-/// back to relay/SRV.
+/// addresses) and pairs it with a **same-family** bound QUIC port. The ports
+/// reported by `ip_addrs()` can be placeholders (`:0`/`:1`) rather than the
+/// socket the endpoint actually listens on (#346), so the port must come from
+/// `bound_sockets`. Crucially the borrowed port must belong to a socket of the
+/// *same* address family as the chosen IP: a dual-stack node can bind IPv6 on
+/// one port and IPv4 on another, and pairing an IPv4 IP with the IPv6 socket's
+/// port publishes an undialable address (#350 F14). Returns `None` when no
+/// routable IP has a usable same-family bound port, in which case no `address`
+/// TXT is published and peers fall back to relay/SRV.
 ///
 /// Interface ranking (preferring the LAN subnet of the browsing peer over a
 /// VPN/egress NIC) is tracked separately in #348.
-fn select_advertise_address(ip_addrs: &[SocketAddr], bound_port: u16) -> Option<String> {
+fn select_advertise_address(
+    ip_addrs: &[SocketAddr],
+    bound_sockets: &[SocketAddr],
+) -> Option<String> {
     ip_addrs
         .iter()
         .map(SocketAddr::ip)
-        .find(is_routable_ip)
-        .map(|ip| SocketAddr::new(ip, bound_port).to_string())
+        .filter(is_routable_ip)
+        .find_map(|ip| {
+            let want_v6 = ip.is_ipv6();
+            bound_sockets
+                .iter()
+                .find(|s| s.is_ipv6() == want_v6 && !is_placeholder_port(s.port()))
+                .map(|s| SocketAddr::new(ip, s.port()).to_string())
+        })
+}
+
+/// Whether `port` is a non-dialable placeholder (`0` unspecified, or `1` — the
+/// value iOS was observed enumerating for a local address, never a real QUIC
+/// ephemeral port). Mirrors `is_placeholder_port` in `iroh-http-core`.
+fn is_placeholder_port(port: u16) -> bool {
+    port == 0 || port == 1
 }
 
 /// Whether `ip` is routable off-link: not loopback, unspecified, or link-local.
@@ -273,8 +294,8 @@ pub fn advertise_peer(
 ) -> Result<AdvertiseSession, DiscoveryError> {
     let instance = node_id_label(&ep.id());
 
-    let port = ep
-        .bound_sockets()
+    let bound_sockets: Vec<SocketAddr> = ep.bound_sockets();
+    let port = bound_sockets
         .first()
         .map(|s| s.port())
         .ok_or_else(|| DiscoveryError::Setup("endpoint has no bound socket".into()))?;
@@ -290,8 +311,9 @@ pub fn advertise_peer(
     // #350 review W1: publish a dialable `ip:<bound QUIC port>` so mobile
     // browsers — which read only the `address`/`relay` TXT and never resolve
     // this record's SRV/A — can direct-dial this node over the LAN instead of
-    // falling back to relay-only.
-    if let Some(address) = select_advertise_address(&socket_addrs, port) {
+    // falling back to relay-only. Pair the IP with a same-family bound port
+    // (#350 F14).
+    if let Some(address) = select_advertise_address(&socket_addrs, &bound_sockets) {
         txt.push((TXT_ADDRESS.to_string(), address));
     }
 
@@ -458,7 +480,8 @@ mod tests {
             "127.0.0.1:1".parse().unwrap(),
             "192.168.1.42:1".parse().unwrap(),
         ];
-        let addr = select_advertise_address(&ip_addrs, 59234)
+        let bound = vec!["0.0.0.0:59234".parse().unwrap()];
+        let addr = select_advertise_address(&ip_addrs, &bound)
             .expect("a routable address must be selected");
         assert_eq!(addr, "192.168.1.42:59234");
     }
@@ -470,13 +493,15 @@ mod tests {
             "0.0.0.0:5000".parse().unwrap(),
             "[::1]:5000".parse().unwrap(),
         ];
-        assert_eq!(select_advertise_address(&ip_addrs, 59234), None);
+        let bound = vec!["0.0.0.0:59234".parse().unwrap()];
+        assert_eq!(select_advertise_address(&ip_addrs, &bound), None);
     }
 
     #[test]
     fn select_advertise_address_brackets_ipv6() {
         let ip_addrs = vec!["[2001:db8::1]:1".parse().unwrap()];
-        let addr = select_advertise_address(&ip_addrs, 443).expect("address");
+        let bound = vec!["[::]:443".parse().unwrap()];
+        let addr = select_advertise_address(&ip_addrs, &bound).expect("address");
         assert_eq!(addr, "[2001:db8::1]:443");
     }
 
@@ -490,7 +515,8 @@ mod tests {
             "[fe80::1]:1".parse().unwrap(),
             "192.168.1.9:1".parse().unwrap(),
         ];
-        let addr = select_advertise_address(&ip_addrs, 443).expect("address");
+        let bound = vec!["0.0.0.0:443".parse().unwrap()];
+        let addr = select_advertise_address(&ip_addrs, &bound).expect("address");
         assert_eq!(addr, "192.168.1.9:443");
     }
 
@@ -500,6 +526,46 @@ mod tests {
             "169.254.10.1:1".parse().unwrap(),
             "[fe80::1]:1".parse().unwrap(),
         ];
-        assert_eq!(select_advertise_address(&ip_addrs, 443), None);
+        let bound = vec!["0.0.0.0:443".parse().unwrap()];
+        assert_eq!(select_advertise_address(&ip_addrs, &bound), None);
+    }
+
+    // Regression: #350 F14 — a dual-stack node can bind IPv6 on one port and
+    // IPv4 on another. The advertised IP must be paired with a bound port of
+    // the SAME family; pairing an IPv4 IP with the IPv6 socket's port publishes
+    // an undialable address.
+    #[test]
+    fn select_advertise_address_pairs_same_family_port() {
+        let ip_addrs = vec!["192.168.1.42:1".parse().unwrap()];
+        // IPv6 socket listed first, IPv4 second — must pick the IPv4 port.
+        let bound = vec![
+            "[::]:60000".parse().unwrap(),
+            "0.0.0.0:59234".parse().unwrap(),
+        ];
+        let addr = select_advertise_address(&ip_addrs, &bound).expect("address");
+        assert_eq!(addr, "192.168.1.42:59234");
+    }
+
+    // Regression: #350 F14 — when no same-family bound port exists for a
+    // routable IP, publish nothing rather than a cross-family (undialable)
+    // pairing.
+    #[test]
+    fn select_advertise_address_none_when_no_same_family_port() {
+        let ip_addrs = vec!["192.168.1.42:1".parse().unwrap()];
+        let bound = vec!["[::]:60000".parse().unwrap()];
+        assert_eq!(select_advertise_address(&ip_addrs, &bound), None);
+    }
+
+    // Regression: #350 F5/F14 — a placeholder bound port (0/1) must never be
+    // borrowed; fall through to a real same-family socket.
+    #[test]
+    fn select_advertise_address_skips_placeholder_bound_port() {
+        let ip_addrs = vec!["192.168.1.42:1".parse().unwrap()];
+        let bound = vec![
+            "0.0.0.0:1".parse().unwrap(),
+            "0.0.0.0:59234".parse().unwrap(),
+        ];
+        let addr = select_advertise_address(&ip_addrs, &bound).expect("address");
+        assert_eq!(addr, "192.168.1.42:59234");
     }
 }

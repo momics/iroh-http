@@ -329,7 +329,7 @@ fn select_dialable_direct(addrs: &[std::net::SocketAddr]) -> Option<String> {
     addrs
         .iter()
         .copied()
-        .find(|a| is_routable_ip(&a.ip()))
+        .find(|a| is_routable_ip(&a.ip()) && !super::bind::is_placeholder_port(a.port()))
         .map(|a| a.to_string())
 }
 
@@ -395,6 +395,26 @@ mod dialable_tests {
     #[test]
     fn none_when_only_non_routable() {
         let addrs: Vec<SocketAddr> = vec!["169.254.10.1:59234".parse().unwrap()];
+        assert_eq!(select_dialable_direct(&addrs), None);
+    }
+
+    // Regression: #350 F5 — a routable IP paired with a placeholder port must
+    // never be selected as dialable; prefer a following real address.
+    #[test]
+    fn skips_placeholder_port_selects_real() {
+        let addrs: Vec<SocketAddr> = vec![
+            "192.168.1.42:1".parse().unwrap(),
+            "10.0.0.5:59234".parse().unwrap(),
+        ];
+        assert_eq!(
+            select_dialable_direct(&addrs),
+            Some("10.0.0.5:59234".to_string())
+        );
+    }
+
+    #[test]
+    fn none_when_only_placeholder_port() {
+        let addrs: Vec<SocketAddr> = vec!["192.168.1.42:1".parse().unwrap()];
         assert_eq!(select_dialable_direct(&addrs), None);
     }
 

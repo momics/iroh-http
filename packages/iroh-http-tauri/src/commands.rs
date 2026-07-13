@@ -185,9 +185,7 @@ pub async fn create_endpoint<R: tauri::Runtime>(
         // now be stale, so drop them and let a fresh browse repopulate the
         // lookup instead of dialing dead paths.
         #[cfg(mobile)]
-        if let Some(lookup) =
-            app.try_state::<crate::mobile_address_lookup::MobileAddressLookup>()
-        {
+        if let Some(lookup) = app.try_state::<crate::mobile_address_lookup::MobileAddressLookup>() {
             lookup.clear();
         }
     }
@@ -1515,12 +1513,9 @@ pub fn advertise_peer<R: tauri::Runtime>(
 #[cfg(mobile)]
 fn primary_direct_addr(ep: &iroh_http_core::IrohEndpoint) -> Option<String> {
     let reconciled = ep.direct_socket_addrs();
-    let bound_port = ep
-        .bound_sockets()
-        .iter()
-        .map(|s| s.port())
-        .find(|p| *p != 0);
-    select_primary_direct_addr(&reconciled, bound_port, local_routable_ip()).map(|a| a.to_string())
+    let bound_sockets = ep.bound_sockets();
+    select_primary_direct_addr(&reconciled, &bound_sockets, local_routable_ip())
+        .map(|a| a.to_string())
 }
 
 /// Discover a routable local IP without enumerating interfaces.
@@ -1545,28 +1540,48 @@ fn local_routable_ip() -> Option<std::net::IpAddr> {
 /// Choose the primary direct address to advertise (#346), pure for testing.
 ///
 /// Picks a routable IP (a reconciled address that is not loopback/unspecified,
-/// else `fallback_ip`) and pairs it with the **real bound QUIC port**. iOS
-/// enumerates `ip_addrs()` with a placeholder port (`:1`) while the true port
-/// lives in `bound_sockets()`, so `bound_port` is preferred; the routable
+/// else `fallback_ip`) and pairs it with a **same-family, real bound QUIC
+/// port**. iOS enumerates `ip_addrs()` with a placeholder port (`:1`) while the
+/// true port lives in `bound_sockets()`, so a bound port is preferred; the
 /// reconciled address's own port is only a fallback when no bound port exists.
-/// Returns `None` when neither a routable IP nor a usable port can be found.
+/// The borrowed bound port must belong to a socket of the same address family
+/// as the chosen IP — a dual-stack node can bind IPv6 and IPv4 on different
+/// ports, and a cross-family pairing publishes an undialable address (#350
+/// F14). Placeholder ports (`0`/`1`) are never borrowed (#350 F5). Returns
+/// `None` when neither a routable IP nor a usable same-family port can be found.
 #[cfg(any(mobile, test))]
 fn select_primary_direct_addr(
     reconciled: &[std::net::SocketAddr],
-    bound_port: Option<u16>,
+    bound_sockets: &[std::net::SocketAddr],
     fallback_ip: Option<std::net::IpAddr>,
 ) -> Option<std::net::SocketAddr> {
-    let is_routable = |a: &std::net::SocketAddr| a.port() != 0 && is_routable_ip(&a.ip());
+    let is_routable = |a: &std::net::SocketAddr| is_routable_ip(&a.ip());
     let routable = reconciled.iter().copied().find(is_routable);
     let ip = routable
         .map(|a| a.ip())
         .or_else(|| fallback_ip.filter(is_routable_ip))?;
-    // Prefer the real bound QUIC port; the reconciled port (e.g. iOS `:1`) is
-    // only a last resort so a working advertisement is never dropped.
-    let port = bound_port
-        .filter(|p| *p != 0)
-        .or_else(|| routable.map(|a| a.port()))?;
+    // Prefer a same-family, non-placeholder bound QUIC port; the reconciled
+    // address's own (already same-family) port is a last resort so a working
+    // advertisement is never dropped.
+    let want_v6 = ip.is_ipv6();
+    let port = bound_sockets
+        .iter()
+        .find(|s| s.is_ipv6() == want_v6 && !is_placeholder_port(s.port()))
+        .map(|s| s.port())
+        .or_else(|| {
+            routable
+                .map(|a| a.port())
+                .filter(|p| !is_placeholder_port(*p))
+        })?;
     Some(std::net::SocketAddr::new(ip, port))
+}
+
+/// Whether `port` is a non-dialable placeholder (`0` unspecified, or `1` — the
+/// value iOS was observed enumerating for a local address, never a real QUIC
+/// ephemeral port). Mirrors `is_placeholder_port` in `iroh-http-core`.
+#[cfg(any(mobile, test))]
+fn is_placeholder_port(port: u16) -> bool {
+    port == 0 || port == 1
 }
 
 /// Whether `ip` is routable off-link: not loopback, unspecified, or link-local.
@@ -2111,10 +2126,24 @@ mod primary_direct_addr_tests {
         SocketAddr::new(IpAddr::V4(Ipv4Addr::new(a[0], a[1], a[2], a[3])), port)
     }
 
+    fn v6(seg: [u16; 8], port: u16) -> SocketAddr {
+        SocketAddr::new(
+            IpAddr::V6(std::net::Ipv6Addr::new(
+                seg[0], seg[1], seg[2], seg[3], seg[4], seg[5], seg[6], seg[7],
+            )),
+            port,
+        )
+    }
+
+    // A single unspecified IPv4 bound socket, the common single-stack case.
+    fn bound_v4(port: u16) -> Vec<SocketAddr> {
+        vec![v4([0, 0, 0, 0], port)]
+    }
+
     #[test]
     fn prefers_routable_reconciled_addr() {
         let reconciled = vec![v4([192, 168, 50, 227], 62546)];
-        let out = select_primary_direct_addr(&reconciled, Some(62546), None);
+        let out = select_primary_direct_addr(&reconciled, &bound_v4(62546), None);
         assert_eq!(out, Some(v4([192, 168, 50, 227], 62546)));
     }
 
@@ -2124,17 +2153,26 @@ mod primary_direct_addr_tests {
         // real QUIC port lives in `bound_sockets()`. The advertised address must
         // carry the real bound port, not the placeholder.
         let reconciled = vec![v4([192, 168, 50, 227], 1)];
-        let out = select_primary_direct_addr(&reconciled, Some(62546), None);
+        let out = select_primary_direct_addr(&reconciled, &bound_v4(62546), None);
         assert_eq!(out, Some(v4([192, 168, 50, 227], 62546)));
     }
 
     #[test]
     fn keeps_reconciled_port_when_no_bound_port_available() {
         // Non-regression: without a bound port to prefer, fall back to the
-        // routable reconciled addr's own port rather than dropping the address.
+        // routable reconciled addr's own (real) port rather than dropping it.
+        let reconciled = vec![v4([192, 168, 50, 227], 62546)];
+        let out = select_primary_direct_addr(&reconciled, &[], None);
+        assert_eq!(out, Some(v4([192, 168, 50, 227], 62546)));
+    }
+
+    #[test]
+    fn drops_placeholder_only_reconciled_without_bound_port() {
+        // #350 F5: a reconciled addr whose only port is a placeholder (:1) and
+        // no bound port to borrow must yield nothing, not a :1 advertisement.
         let reconciled = vec![v4([192, 168, 50, 227], 1)];
-        let out = select_primary_direct_addr(&reconciled, None, None);
-        assert_eq!(out, Some(v4([192, 168, 50, 227], 1)));
+        let out = select_primary_direct_addr(&reconciled, &[], None);
+        assert_eq!(out, None);
     }
 
     #[test]
@@ -2144,7 +2182,7 @@ mod primary_direct_addr_tests {
             v4([0, 0, 0, 0], 62546),
             v4([192, 168, 50, 227], 62546),
         ];
-        let out = select_primary_direct_addr(&reconciled, Some(62546), None);
+        let out = select_primary_direct_addr(&reconciled, &bound_v4(62546), None);
         assert_eq!(out, Some(v4([192, 168, 50, 227], 62546)));
     }
 
@@ -2154,7 +2192,7 @@ mod primary_direct_addr_tests {
         // socket is bound and a routable local IP is discoverable.
         let reconciled: Vec<SocketAddr> = vec![];
         let fallback = Some(IpAddr::V4(Ipv4Addr::new(192, 168, 50, 227)));
-        let out = select_primary_direct_addr(&reconciled, Some(62546), fallback);
+        let out = select_primary_direct_addr(&reconciled, &bound_v4(62546), fallback);
         assert_eq!(out, Some(v4([192, 168, 50, 227], 62546)));
     }
 
@@ -2162,10 +2200,7 @@ mod primary_direct_addr_tests {
     fn returns_none_without_a_bound_port() {
         let reconciled: Vec<SocketAddr> = vec![];
         let fallback = Some(IpAddr::V4(Ipv4Addr::new(192, 168, 50, 227)));
-        assert_eq!(
-            select_primary_direct_addr(&reconciled, None, fallback),
-            None
-        );
+        assert_eq!(select_primary_direct_addr(&reconciled, &[], fallback), None);
     }
 
     #[test]
@@ -2173,9 +2208,45 @@ mod primary_direct_addr_tests {
         let reconciled: Vec<SocketAddr> = vec![];
         let fallback = Some(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)));
         assert_eq!(
-            select_primary_direct_addr(&reconciled, Some(62546), fallback),
+            select_primary_direct_addr(&reconciled, &bound_v4(62546), fallback),
             None
         );
+    }
+
+    // Regression: #350 F14 — the fallback IP's bound port must be same-family.
+    // A dual-stack node with IPv6 listed first must not pair an IPv4 fallback IP
+    // with the IPv6 socket's port.
+    #[test]
+    fn pairs_fallback_ip_with_same_family_bound_port() {
+        let reconciled: Vec<SocketAddr> = vec![];
+        let fallback = Some(IpAddr::V4(Ipv4Addr::new(192, 168, 50, 227)));
+        let bound = vec![v6([0, 0, 0, 0, 0, 0, 0, 0], 60000), v4([0, 0, 0, 0], 62546)];
+        let out = select_primary_direct_addr(&reconciled, &bound, fallback);
+        assert_eq!(out, Some(v4([192, 168, 50, 227], 62546)));
+    }
+
+    // Regression: #350 F14 — no same-family bound port for the routable IP →
+    // publish nothing rather than a cross-family (undialable) pairing.
+    #[test]
+    fn returns_none_when_no_same_family_bound_port() {
+        let reconciled: Vec<SocketAddr> = vec![];
+        let fallback = Some(IpAddr::V4(Ipv4Addr::new(192, 168, 50, 227)));
+        let bound = vec![v6([0, 0, 0, 0, 0, 0, 0, 0], 60000)];
+        assert_eq!(
+            select_primary_direct_addr(&reconciled, &bound, fallback),
+            None
+        );
+    }
+
+    // Regression: #350 F5 — a placeholder bound port (:1) must be skipped in
+    // favour of a real same-family bound socket.
+    #[test]
+    fn skips_placeholder_bound_port() {
+        let reconciled: Vec<SocketAddr> = vec![];
+        let fallback = Some(IpAddr::V4(Ipv4Addr::new(192, 168, 50, 227)));
+        let bound = vec![v4([0, 0, 0, 0], 1), v4([0, 0, 0, 0], 62546)];
+        let out = select_primary_direct_addr(&reconciled, &bound, fallback);
+        assert_eq!(out, Some(v4([192, 168, 50, 227], 62546)));
     }
 
     #[test]
@@ -2184,13 +2255,13 @@ mod primary_direct_addr_tests {
         // (fe80::/10) is not routable off-link; advertising it as the dialable
         // address makes the direct dial fail. Prefer a real LAN address.
         let reconciled = vec![v4([169, 254, 1, 5], 62546), v4([192, 168, 50, 227], 62546)];
-        let out = select_primary_direct_addr(&reconciled, Some(62546), None);
+        let out = select_primary_direct_addr(&reconciled, &bound_v4(62546), None);
         assert_eq!(out, Some(v4([192, 168, 50, 227], 62546)));
 
         // A link-local-only fallback must not be synthesised into an address.
         let link_local_fallback = Some(IpAddr::V4(Ipv4Addr::new(169, 254, 1, 5)));
         assert_eq!(
-            select_primary_direct_addr(&[], Some(62546), link_local_fallback),
+            select_primary_direct_addr(&[], &bound_v4(62546), link_local_fallback),
             None
         );
     }
