@@ -51,7 +51,6 @@ client.serve({}, handleRequest);
 console.log(`  self: ${client.publicKey.toString()}\n`);
 
 // Resolve the peer's dialable direct addr so direct-dial has something to use.
-const peerInfo = await client.discoveryInfo().catch(() => null);
 const serverDiscovery = await server.discoveryInfo().catch(() => null);
 const peerAddrs = serverDiscovery?.directAddress
   ? [serverDiscovery.directAddress]
@@ -94,5 +93,4 @@ const report = await runSuite(groups, {
 });
 
 console.log("\n[iroh-http-interop]", JSON.stringify(report.summary));
-void peerInfo;
 process.exit(report.summary.fail > 0 ? 1 : 0);

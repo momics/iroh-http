@@ -128,5 +128,13 @@ echo "  → test:interop"
 npm run test:interop --silent
 ok "interop"
 
+echo "  → test:interop:unit"
+npm run test:interop:unit --silent
+ok "interop suite unit (suite.mjs accounting)"
+
+echo "  → test:interop:suite"
+npm run test:interop:suite --silent
+ok "interop suite headless (node + deno, #340)"
+
 echo ""
 echo -e "${GREEN}${BOLD}All checks passed.${NC} Ready to push."

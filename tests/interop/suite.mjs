@@ -607,16 +607,20 @@ export async function runSuite(
       onResult?.({ phase: "start", group: group.id, test });
       let res;
       const startedAt = now();
+      // F20: bound every case so a hung fetch/browse can't stall the suite.
+      // Track the deadline timer so it can be cleared the instant the case
+      // settles — otherwise a long default deadline keeps the event loop (and
+      // any headless test runner) alive well past the last result.
+      let deadlineTimer;
       try {
-        // F20: bound every case so a hung fetch/browse can't stall the suite.
         res = await Promise.race([
           test.run(),
-          new Promise((_r, reject) =>
-            setTimeout(
+          new Promise((_r, reject) => {
+            deadlineTimer = setTimeout(
               () => reject(new Error(`case exceeded ${deadlineMs}ms deadline`)),
               deadlineMs,
-            )
-          ),
+            );
+          }),
         ]);
       } catch (e) {
         res = {
@@ -624,6 +628,8 @@ export async function runSuite(
           latencyMs: round(now() - startedAt),
           detail: `threw: ${e}`,
         };
+      } finally {
+        clearTimeout(deadlineTimer);
       }
       const outcome = res.skip ? "skip" : res.ok ? "pass" : "fail";
       if (outcome === "pass") pass += 1;
