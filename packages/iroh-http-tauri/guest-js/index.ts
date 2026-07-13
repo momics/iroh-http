@@ -27,8 +27,8 @@ import {
 } from "@momics/iroh-http-shared/adapter";
 import type { RawSessionFns } from "@momics/iroh-http-shared/adapter";
 import type {
-  DnsSdProtocol,
   DiscoveryInfo,
+  DnsSdProtocol,
   EndpointStats,
   NodeAddrInfo,
   PathInfo,

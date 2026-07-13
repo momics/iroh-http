@@ -6,11 +6,7 @@
  * calls `onSelect` with the chosen peer so each tab can fill its own target
  * field. Framework-free DOM so it drops into the existing dev console cleanly.
  */
-import {
-  getPeers,
-  type RegistryPeer,
-  subscribe,
-} from "./peer-registry.js";
+import { getPeers, type RegistryPeer, subscribe } from "./peer-registry.js";
 
 export interface PeerPicker {
   /** Root element to insert into a tab. */

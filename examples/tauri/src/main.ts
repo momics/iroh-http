@@ -28,11 +28,7 @@ import { runCases as runComplianceCases } from "../../../tests/http-compliance/h
 import complianceCases from "../../../tests/http-compliance/cases.json";
 // @ts-ignore — .mjs from the shared interop suite (pure WHATWG).
 import { buildSuite, runSuite } from "../../../tests/interop/suite.mjs";
-import {
-  getPeers,
-  type RegistryPeer,
-  upsertPeer,
-} from "./peer-registry.js";
+import { getPeers, type RegistryPeer, upsertPeer } from "./peer-registry.js";
 import { createPeerPicker } from "./peer-picker.js";
 
 // ── Utilities ──────────────────────────────────────────────────────────────────
@@ -1355,7 +1351,9 @@ function detectPlatform(): TestPlatform {
       : outcome === "skip"
       ? "skip"
       : "run";
-    els.lat.textContent = result.latencyMs != null ? `${result.latencyMs}ms` : "";
+    els.lat.textContent = result.latencyMs != null
+      ? `${result.latencyMs}ms`
+      : "";
     if (result.transport) {
       els.badge.className = `badge badge-${result.transport}`;
       els.badge.textContent = result.transport;
