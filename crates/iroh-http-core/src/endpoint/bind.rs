@@ -142,7 +142,14 @@ impl IrohEndpoint {
             let mut added = 0usize;
             let mut rejected: Vec<&str> = Vec::new();
             for ns in &opts.discovery.dns_nameservers {
-                if let Ok(ip) = ns.parse::<std::net::IpAddr>() {
+                // An IPv6 link-local nameserver (legitimately advertised via
+                // RDNSS/RA) arrives with a zone/scope suffix, e.g.
+                // `fe80::1%wlan0`. Rust's `IpAddr` parser rejects the `%zone`,
+                // so strip it before parsing — otherwise an IPv6-only network
+                // whose only DNS servers are zone-scoped would trip the
+                // `added == 0` hard-fail below and brick node creation.
+                let candidate = ns.split('%').next().unwrap_or(ns.as_str());
+                if let Ok(ip) = candidate.parse::<std::net::IpAddr>() {
                     resolver = resolver.with_nameserver(
                         std::net::SocketAddr::new(ip, 53),
                         iroh::dns::DnsProtocol::Udp,
@@ -643,6 +650,30 @@ mod dns_nameserver_tests {
         let ep = match IrohEndpoint::bind(opts).await {
             Ok(ep) => ep,
             Err(e) => panic!("bind should succeed when at least one nameserver is valid: {e}"),
+        };
+        ep.close().await;
+    }
+
+    // Regression: an IPv6 link-local nameserver carries a zone/scope suffix
+    // (e.g. `fe80::1%wlan0`, as Android's RDNSS/RA can advertise). The zone must
+    // be stripped before parsing so a network whose *only* DNS servers are
+    // zone-scoped link-local addresses does not trip the all-invalid hard-fail
+    // and brick node creation.
+    #[tokio::test]
+    async fn bind_accepts_zone_scoped_ipv6_dns_nameserver() {
+        let discovery = {
+            let mut d = DiscoveryOptions::new(None, true);
+            d.dns_nameservers = vec!["fe80::1%wlan0".to_string()];
+            d
+        };
+        let opts = NodeOptions {
+            discovery,
+            ..Default::default()
+        };
+
+        let ep = match IrohEndpoint::bind(opts).await {
+            Ok(ep) => ep,
+            Err(e) => panic!("bind should accept a zone-scoped IPv6 nameserver: {e}"),
         };
         ep.close().await;
     }

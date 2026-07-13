@@ -148,7 +148,10 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
                 for (network in networks) {
                     val props = cm.getLinkProperties(network) ?: continue
                     for (addr in props.dnsServers) {
-                        val host = addr.hostAddress
+                        // Strip any IPv6 zone/scope suffix (e.g. `fe80::1%wlan0`)
+                        // so the Rust `IpAddr` parser in bind.rs accepts it —
+                        // matches formatSocketAddr's handling for socket addrs.
+                        val host = addr.hostAddress?.substringBefore('%')
                         if (!host.isNullOrEmpty()) servers.put(host)
                     }
                 }
