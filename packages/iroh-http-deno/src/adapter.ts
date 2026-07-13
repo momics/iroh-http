@@ -6,6 +6,7 @@
 
 import { dirname, fromFileUrl, resolve } from "@std/path";
 import type {
+  DiscoveryInfo,
   EndpointInfo,
   EndpointStats,
   NodeAddrInfo,
@@ -363,6 +364,7 @@ const METHOD_BUFS: Record<string, Uint8Array> = Object.fromEntries(
     "endpointStats",
     "nodeAddr",
     "homeRelay",
+    "discoveryInfo",
     "peerInfo",
     "startTransportEvents",
     "nextTransportEvent",
@@ -1061,6 +1063,12 @@ export const denoAddrFns = {
     });
     return res;
   },
+  discoveryInfo: async (handle: number) => {
+    const res = await call<DiscoveryInfo>("discoveryInfo", {
+      endpointHandle: handle,
+    });
+    return res;
+  },
   peerInfo: async (handle: number, nodeId: string) => {
     const res = await call<NodeAddrInfo | null>("peerInfo", {
       endpointHandle: handle,
@@ -1425,6 +1433,10 @@ export class DenoAdapter extends IrohAdapter {
 
   async homeRelay(handle: number): Promise<string | null> {
     return call<string | null>("homeRelay", { endpointHandle: handle });
+  }
+
+  override async discoveryInfo(handle: number): Promise<DiscoveryInfo> {
+    return call<DiscoveryInfo>("discoveryInfo", { endpointHandle: handle });
   }
 
   async peerInfo(handle: number, nodeId: string): Promise<NodeAddrInfo | null> {

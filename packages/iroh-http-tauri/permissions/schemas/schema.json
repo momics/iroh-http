@@ -487,6 +487,18 @@
           "markdownDescription": "Denies the create_fetch_token command without any pre-configured scope."
         },
         {
+          "description": "Enables the discovery_info command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-discovery-info",
+          "markdownDescription": "Enables the discovery_info command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the discovery_info command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-discovery-info",
+          "markdownDescription": "Denies the discovery_info command without any pre-configured scope."
+        },
+        {
           "description": "Enables the endpoint_stats command without any pre-configured scope.",
           "type": "string",
           "const": "allow-endpoint-stats",
@@ -907,10 +919,10 @@
           "markdownDescription": "Enables low-level key operations — generate keypairs, sign with a secret key, and verify public key signatures.\n#### This permission set includes:\n\n- `allow-generate-secret-key`\n- `allow-secret-key-sign`\n- `allow-public-key-verify`"
         },
         {
-          "description": "Node lifecycle and introspection. Covers createNode() and close(). Add iroh-http:fetch and/or iroh-http:serve for HTTP capability.\n#### This default permission set includes:\n\n- `allow-create-endpoint`\n- `allow-close-endpoint`\n- `allow-wait-endpoint-closed`\n- `allow-ping`\n- `allow-node-addr`\n- `allow-node-ticket`\n- `allow-home-relay`\n- `allow-peer-info`\n- `allow-peer-stats`\n- `allow-endpoint-stats`\n- `allow-start-transport-events`\n- `allow-next-path-change`\n- `allow-unsubscribe-path-changes`",
+          "description": "Node lifecycle and introspection. Covers createNode() and close(). Add iroh-http:fetch and/or iroh-http:serve for HTTP capability.\n#### This default permission set includes:\n\n- `allow-create-endpoint`\n- `allow-close-endpoint`\n- `allow-wait-endpoint-closed`\n- `allow-ping`\n- `allow-node-addr`\n- `allow-node-ticket`\n- `allow-home-relay`\n- `allow-discovery-info`\n- `allow-peer-info`\n- `allow-peer-stats`\n- `allow-endpoint-stats`\n- `allow-start-transport-events`\n- `allow-next-path-change`\n- `allow-unsubscribe-path-changes`",
           "type": "string",
           "const": "default",
-          "markdownDescription": "Node lifecycle and introspection. Covers createNode() and close(). Add iroh-http:fetch and/or iroh-http:serve for HTTP capability.\n#### This default permission set includes:\n\n- `allow-create-endpoint`\n- `allow-close-endpoint`\n- `allow-wait-endpoint-closed`\n- `allow-ping`\n- `allow-node-addr`\n- `allow-node-ticket`\n- `allow-home-relay`\n- `allow-peer-info`\n- `allow-peer-stats`\n- `allow-endpoint-stats`\n- `allow-start-transport-events`\n- `allow-next-path-change`\n- `allow-unsubscribe-path-changes`"
+          "markdownDescription": "Node lifecycle and introspection. Covers createNode() and close(). Add iroh-http:fetch and/or iroh-http:serve for HTTP capability.\n#### This default permission set includes:\n\n- `allow-create-endpoint`\n- `allow-close-endpoint`\n- `allow-wait-endpoint-closed`\n- `allow-ping`\n- `allow-node-addr`\n- `allow-node-ticket`\n- `allow-home-relay`\n- `allow-discovery-info`\n- `allow-peer-info`\n- `allow-peer-stats`\n- `allow-endpoint-stats`\n- `allow-start-transport-events`\n- `allow-next-path-change`\n- `allow-unsubscribe-path-changes`"
         },
         {
           "description": "Enables local-network service discovery over DNS-SD (RFC 6763) / mDNS. Covers both the iroh-http peer discovery specialization (advertisePeer / browsePeers) and the generic DNS-SD primitive (advertise / browse) for arbitrary local services — instance name, port, TXT records, and protocol.\n\n#### This permission set includes:\n\n- `allow-browse-peers`\n- `allow-browse-peers-close`\n- `allow-browse-peers-next`\n- `allow-advertise-peer`\n- `allow-advertise-peer-close`\n- `allow-advertise`\n- `allow-advertise-close`\n- `allow-browse`\n- `allow-browse-next`\n- `allow-browse-close`",

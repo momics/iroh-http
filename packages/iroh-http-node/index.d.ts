@@ -73,6 +73,15 @@ export declare function closeEndpoint(endpointHandle: number, force?: boolean | 
  */
 export declare function createEndpoint(options?: JsNodeOptions | undefined | null): Promise<JsEndpointInfo>
 
+/**
+ * Discovery info: node id + dialable direct `ip:port` address + relay URL.
+ *
+ * `directAddress` carries the real bound QUIC port (or null when only
+ * loopback/link-local addresses are available); safe to advertise for
+ * LAN direct-dial.
+ */
+export declare function discoveryInfo(endpointHandle: number): JsDiscoveryInfo
+
 /** Snapshot of current endpoint statistics (point-in-time). */
 export declare function endpointStats(endpointHandle: number): JsEndpointStats
 
@@ -136,6 +145,12 @@ export interface JsCloseInfo {
 export interface JsConnectionEvent {
   peerId: string
   connected: boolean
+}
+
+export interface JsDiscoveryInfo {
+  nodeId: string
+  directAddress?: string
+  relayUrl?: string
 }
 
 /** Info returned after a successful `createEndpoint` call. */

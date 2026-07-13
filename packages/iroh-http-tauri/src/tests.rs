@@ -132,6 +132,27 @@ mod command_tests {
     }
 
     #[tokio::test]
+    async fn test_discovery_info() {
+        let handle = make_test_endpoint().await;
+        let info = discovery_info(handle);
+        assert!(info.is_ok(), "discovery_info should succeed");
+        let info = info.unwrap();
+        assert!(
+            !info.node_id.is_empty(),
+            "discovery_info nodeId should be non-empty"
+        );
+        // directAddress/relayUrl may be null on a loopback-only test host; the
+        // command must still resolve without error.
+        close_endpoint(handle, None).await.ok();
+    }
+
+    #[tokio::test]
+    async fn test_discovery_info_invalid_handle() {
+        let err = discovery_info(99999);
+        assert!(err.is_err());
+    }
+
+    #[tokio::test]
     async fn test_endpoint_stats() {
         let handle = make_test_endpoint().await;
         let stats = endpoint_stats(handle);

@@ -115,6 +115,7 @@ impl<R: Runtime> PluginBuilder<R> {
                 commands::node_addr,
                 commands::node_ticket,
                 commands::home_relay,
+                commands::discovery_info,
                 commands::peer_info,
                 commands::peer_stats,
                 commands::endpoint_stats,

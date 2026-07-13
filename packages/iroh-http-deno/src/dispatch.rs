@@ -207,6 +207,7 @@ pub async fn dispatch(method: &str, payload: &[u8]) -> Value {
         sync  "nodeAddr"                => node_addr_dispatch,
         sync  "nodeTicket"              => node_ticket_dispatch,
         sync  "homeRelay"               => home_relay_dispatch,
+        sync  "discoveryInfo"           => discovery_info_dispatch,
         async "peerInfo"                => peer_info_dispatch,
         async "peerStats"               => peer_stats_dispatch,
         sync  "endpointStats"           => endpoint_stats_dispatch,
@@ -454,6 +455,24 @@ fn home_relay_dispatch(p: Value) -> Value {
             format!("node closed or not found (handle {handle})"),
         ),
         Some(ep) => ok(ep.home_relay()),
+    }
+}
+
+fn discovery_info_dispatch(p: Value) -> Value {
+    let handle = match p["endpointHandle"].as_u64() {
+        Some(h) => h,
+        None => return err("missing endpointHandle"),
+    };
+    match get_endpoint(handle) {
+        None => err_code(
+            "INVALID_HANDLE",
+            format!("node closed or not found (handle {handle})"),
+        ),
+        Some(ep) => ok(json!({
+            "nodeId": ep.node_id(),
+            "directAddress": ep.dialable_direct_address(),
+            "relayUrl": ep.home_relay(),
+        })),
     }
 }
 

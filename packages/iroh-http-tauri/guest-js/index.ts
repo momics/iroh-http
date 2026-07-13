@@ -28,6 +28,7 @@ import {
 import type { RawSessionFns } from "@momics/iroh-http-shared/adapter";
 import type {
   DnsSdProtocol,
+  DiscoveryInfo,
   EndpointStats,
   NodeAddrInfo,
   PathInfo,
@@ -369,6 +370,12 @@ class TauriAdapter extends IrohAdapter {
 
   async homeRelay(handle: number): Promise<string | null> {
     return invoke<string | null>(`${PLUGIN}|home_relay`, {
+      endpointHandle: Number(handle),
+    });
+  }
+
+  override async discoveryInfo(handle: number): Promise<DiscoveryInfo> {
+    return invoke<DiscoveryInfo>(`${PLUGIN}|discovery_info`, {
       endpointHandle: Number(handle),
     });
   }

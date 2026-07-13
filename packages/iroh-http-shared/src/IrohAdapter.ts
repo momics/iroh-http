@@ -58,6 +58,21 @@ export interface NodeAddrInfo {
   addrs: string[];
 }
 
+/**
+ * A node's discovery info: its id, its first dialable direct `ip:port` address
+ * (or `null` when only loopback/link-local addresses are available), and its
+ * home relay URL (or `null`).
+ *
+ * The `directAddress` carries the real bound QUIC port — unlike the placeholder
+ * ports (`:0`/`:1`) that raw address enumeration can report — so it can be
+ * advertised directly for LAN direct-dial instead of relay-only fallback.
+ */
+export interface DiscoveryInfo {
+  nodeId: string;
+  directAddress: string | null;
+  relayUrl: string | null;
+}
+
 export interface IrohFetchInit extends RequestInit {
   /**
    * Known direct QUIC addresses for the target peer in `"ip:port"` notation.
@@ -173,6 +188,19 @@ export abstract class IrohAdapter {
   abstract nodeAddr(endpointHandle: number): Promise<NodeAddrInfo>;
   abstract nodeTicket(endpointHandle: number): Promise<string>;
   abstract homeRelay(endpointHandle: number): Promise<string | null>;
+
+  /**
+   * Discovery info for this node: id, dialable direct address, and relay URL.
+   *
+   * The base implementation rejects; concrete adapters (node, deno, tauri)
+   * override it with a real FFI call. Kept non-abstract so adapters that predate
+   * this method — or lightweight test doubles — still type-check.
+   */
+  discoveryInfo(_endpointHandle: number): Promise<DiscoveryInfo> {
+    return Promise.reject(
+      new Error("discoveryInfo is not supported by this adapter"),
+    );
+  }
   abstract peerInfo(
     endpointHandle: number,
     nodeId: string,

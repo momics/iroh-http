@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-discovery-info"
+description = "Enables the discovery_info command without any pre-configured scope."
+commands.allow = ["discovery_info"]
+
+[[permission]]
+identifier = "deny-discovery-info"
+description = "Denies the discovery_info command without any pre-configured scope."
+commands.deny = ["discovery_info"]

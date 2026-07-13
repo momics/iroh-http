@@ -16,6 +16,7 @@ import {
 } from "./session.js";
 import {
   type CloseOptions,
+  type DiscoveryInfo,
   type EndpointInfo,
   type IrohAdapter,
   type IrohFetchInit,
@@ -552,6 +553,21 @@ export class IrohNode extends EventTarget {
    */
   async homeRelay(): Promise<string | null> {
     return this.#adapter.homeRelay(this.#endpointHandle);
+  }
+
+  /**
+   * Return this node's discovery info: its id, its first dialable direct
+   * `ip:port` address (or `null` when only loopback/link-local addresses are
+   * available), and its home relay URL (or `null`).
+   *
+   * Unlike {@link addr}, the `directAddress` here carries the node's real bound
+   * QUIC port, so it is safe to advertise for LAN direct-dial. Use this when
+   * publishing a peer's dialable address over a generic discovery channel.
+   *
+   * @returns The node's {@link DiscoveryInfo}.
+   */
+  async discoveryInfo(): Promise<DiscoveryInfo> {
+    return this.#adapter.discoveryInfo(this.#endpointHandle);
   }
 
   /**

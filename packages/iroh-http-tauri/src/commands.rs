@@ -258,6 +258,15 @@ pub struct NodeAddrPayload {
     pub addrs: Vec<String>,
 }
 
+/// Discovery info payload: node id + dialable direct address + relay URL.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscoveryInfoPayload {
+    pub node_id: String,
+    pub direct_address: Option<String>,
+    pub relay_url: Option<String>,
+}
+
 /// Full node address: node ID + relay URL(s) + direct socket addresses.
 #[command]
 pub fn node_addr(endpoint_handle: u64) -> Result<NodeAddrPayload, String> {
@@ -296,6 +305,32 @@ pub fn home_relay(endpoint_handle: u64) -> Result<Option<String>, String> {
         )
     })?;
     Ok(ep.home_relay())
+}
+
+/// Discovery info: node id + dialable direct `ip:port` address + relay URL.
+///
+/// `directAddress` carries the real bound QUIC port so it can be advertised for
+/// LAN direct-dial. Desktop resolves it from the core's `dialable_direct_address`
+/// (mirrors the discovery-crate helper); mobile reuses `primary_direct_addr`,
+/// which additionally falls back to the OS routing table when the iOS endpoint
+/// enumerates no usable direct address at advertise time (#346).
+#[command]
+pub fn discovery_info(endpoint_handle: u64) -> Result<DiscoveryInfoPayload, String> {
+    let ep = state::get_endpoint(endpoint_handle).ok_or_else(|| {
+        format_error_json(
+            "INVALID_HANDLE",
+            format!("invalid endpoint handle: {endpoint_handle}"),
+        )
+    })?;
+    #[cfg(not(mobile))]
+    let direct_address = ep.dialable_direct_address();
+    #[cfg(mobile)]
+    let direct_address = primary_direct_addr(&ep);
+    Ok(DiscoveryInfoPayload {
+        node_id: ep.node_id().to_string(),
+        direct_address,
+        relay_url: ep.home_relay(),
+    })
 }
 
 /// Known addresses for a remote peer, or null if unknown.

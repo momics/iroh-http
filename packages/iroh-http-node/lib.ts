@@ -17,6 +17,7 @@ import {
   createEndpoint,
   endpointStats as napiEndpointStats,
   homeRelay as napiHomeRelay,
+  discoveryInfo as napiDiscoveryInfo,
   jsAllocBodyWriter,
   jsAllocFetchToken,
   jsCancelInFlight,
@@ -53,6 +54,7 @@ import {
 
 import {
   classifyBindError,
+  type DiscoveryInfo,
   IrohNode,
   type IrohNodeWithSecret,
   type NodeAddrInfo,
@@ -330,6 +332,14 @@ class NodeAdapter extends IrohAdapter {
   }
   async homeRelay(handle: number): Promise<string | null> {
     return napiHomeRelay(handle) ?? null;
+  }
+  override async discoveryInfo(handle: number): Promise<DiscoveryInfo> {
+    const info = napiDiscoveryInfo(handle);
+    return {
+      nodeId: info.nodeId,
+      directAddress: info.directAddress ?? null,
+      relayUrl: info.relayUrl ?? null,
+    } satisfies DiscoveryInfo;
   }
   async peerInfo(handle: number, nodeId: string): Promise<NodeAddrInfo | null> {
     const info = await napiPeerInfo(handle, nodeId);

@@ -1,6 +1,7 @@
 export type {
   BidirectionalStream,
   CloseOptions,
+  DiscoveryInfo,
   EndpointInfo,
   FetchOptions,
   FfiDuplexStream,
