@@ -527,4 +527,49 @@ mod direct_addr_tests {
             .expect("well-formed address parses");
         assert_eq!(out, Some(vec![sock("192.168.50.227:59234")]));
     }
+
+    // #350 F13 — parity corpus shared with the TypeScript `isDialableSocketAddr`
+    // (mirrored in packages/iroh-http-tauri/guest-js/__tests__/discovery.test.ts).
+    // `parse_direct_addrs` (all-or-nothing) must accept exactly the strings the
+    // TS sanitiser accepts and reject exactly what it rejects, so a value that
+    // passes the sanitiser never poisons the dialer's direct-address list.
+    #[test]
+    fn parse_direct_addrs_matches_ts_dialable_corpus() {
+        let dialable = [
+            "1.2.3.4:443",
+            "192.168.50.227:59234",
+            "[2001:db8::1]:443",
+            "[::1]:8080",
+            "[::ffff:192.168.1.1]:443",
+            "0.0.0.0:1",
+            "255.255.255.255:65535",
+        ];
+        for s in dialable {
+            assert!(
+                parse_direct_addrs(&Some(vec![s.to_string()])).is_ok(),
+                "Rust must accept dialable {s:?} that the TS sanitiser accepts"
+            );
+        }
+
+        let undialable = [
+            "example.com:443",
+            "999.999.999.999:443",
+            "[not-ip]:443",
+            "1.2.3:443",
+            "1.2.3.4.5:443",
+            "01.2.3.4:443",
+            "1.2.3.4",
+            "1.2.3.4:0",
+            "2001:db8::1:443",
+            "[2001:db8::1]:0",
+            "[fe80::1",
+            "1.2.3.4:70000",
+        ];
+        for s in undialable {
+            assert!(
+                parse_direct_addrs(&Some(vec![s.to_string()])).is_err(),
+                "Rust must reject undialable {s:?} that the TS sanitiser rejects"
+            );
+        }
+    }
 }

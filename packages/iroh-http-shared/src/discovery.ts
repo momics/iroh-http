@@ -132,12 +132,66 @@ export const TXT_KEY_RELAY = "relay";
 export const TXT_KEY_ADDRESS = "address";
 
 /**
+ * Whether `s` is a literal IPv4 address (four decimal octets, each 0–255).
+ *
+ * Hostnames (`example.com`) and out-of-range octets (`999.999.999.999`) are
+ * rejected — the Rust dialer's `SocketAddr` parse accepts only IP literals, so
+ * anything else must not reach it (#350).
+ */
+function isIpv4Literal(h: string): boolean {
+  const octets = h.split(".");
+  if (octets.length !== 4) return false;
+  return octets.every((o) => {
+    if (!/^[0-9]{1,3}$/.test(o)) return false;
+    const n = Number(o);
+    // Reject non-canonical leading zeros ("01") to match Rust's strict parse.
+    if (o.length > 1 && o[0] === "0") return false;
+    return n <= 255;
+  });
+}
+
+/**
+ * Whether `h` is a literal IPv6 address (no zone id, matching what the Rust
+ * dialer accepts inside brackets).
+ *
+ * Handles `::` zero-compression (at most one) and a trailing embedded IPv4
+ * (`::ffff:192.168.1.1`). Rejects hostnames and malformed groups.
+ */
+function isIpv6Literal(h: string): boolean {
+  if (h.length === 0 || /[^0-9A-Fa-f:.]/.test(h)) return false;
+  const halves = h.split("::");
+  if (halves.length > 2) return false;
+  const compressed = halves.length === 2;
+  const head = halves[0] === "" ? [] : halves[0].split(":");
+  const tail = compressed && halves[1] !== "" ? halves[1].split(":") : [];
+  const groups = [...head, ...tail];
+  let count = 0;
+  for (let i = 0; i < groups.length; i++) {
+    const g = groups[i];
+    const isLast = i === groups.length - 1;
+    if (isLast && g.includes(".")) {
+      // A trailing embedded IPv4 occupies two 16-bit groups.
+      if (!isIpv4Literal(g)) return false;
+      count += 2;
+    } else {
+      if (!/^[0-9A-Fa-f]{1,4}$/.test(g)) return false;
+      count += 1;
+    }
+  }
+  // With compression the groups must be fewer than a full address (the `::`
+  // stands for at least one zero group); without it, exactly eight.
+  return compressed ? count <= 7 : count === 8;
+}
+
+/**
  * Whether `s` is a well-formed, dialable `ip:port` socket address.
  *
- * Rejects bare IPs (no port), an explicit `:0` port, and anything else that
- * cannot be dialed. A bare A-record host (`192.168.50.227`) or a `:0` address
- * would otherwise fail `parse_direct_addrs` at dial time and poison the whole
- * direct-address list (#346).
+ * Requires a literal IPv4 or bracketed IPv6 host and a valid port (1–65535).
+ * Bare IPs (no port), `:0`, hostnames (`example.com:443`), and invalid IP
+ * literals (`999.999.999.999:443`, `[not-ip]:443`) are rejected — the Rust
+ * dialer's `parse_direct_addrs` accepts only IP literals and drops the ENTIRE
+ * direct-address list (all-or-nothing) on the first bad entry, leaving the peer
+ * relay-only (#346, #350 F13).
  */
 export function isDialableSocketAddr(s: string): boolean {
   const idx = s.lastIndexOf(":");
@@ -151,13 +205,13 @@ export function isDialableSocketAddr(s: string): boolean {
   if (!/^[0-9]{1,5}$/.test(portStr)) return false;
   const port = Number(portStr);
   if (port < 1 || port > 65535) return false;
-  // Bracketed IPv6 (`[::1]:443`) or a host with no stray colon, bracket, or
-  // whitespace (IPv4 / hostname). A bare, unbracketed IPv6 has multiple colons
-  // and no brackets — reject it as ambiguous rather than mis-parse it.
+  // Bracketed IPv6 (`[::1]:443`) must contain a valid IPv6 literal; otherwise
+  // require a literal IPv4 — hostnames and malformed IPs are undialable.
   if (host.startsWith("[")) {
-    return host.endsWith("]") && host.length > 2 && !/[\s]/.test(host);
+    if (!host.endsWith("]") || host.length <= 2) return false;
+    return isIpv6Literal(host.slice(1, -1));
   }
-  return host.length > 0 && !/[:[\]\s]/.test(host);
+  return isIpv4Literal(host);
 }
 
 /**

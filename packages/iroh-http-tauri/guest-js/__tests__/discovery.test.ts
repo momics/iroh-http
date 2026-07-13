@@ -10,7 +10,7 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { asIrohPeer, type ServiceRecord } from "@momics/iroh-http-shared";
+import { asIrohPeer, isDialableSocketAddr, type ServiceRecord } from "@momics/iroh-http-shared";
 
 function record(partial: Partial<ServiceRecord>): ServiceRecord {
   return {
@@ -142,5 +142,40 @@ describe("asIrohPeer address handling (#346)", () => {
     );
     expect(peer?.addrs).toContain("1.2.3.4:443");
     expect(peer?.addrs).toContain("[2001:db8::1]:443");
+  });
+});
+
+// #350 F13 — isDialableSocketAddr must reject anything the Rust dialer's
+// SocketAddr parse rejects: hostnames and invalid IP literals, not just
+// bad separators/ports. This corpus is mirrored by a Rust parity test in
+// crates/iroh-http-core/src/endpoint/bind.rs so both sides agree.
+describe("isDialableSocketAddr strict IP-literal validation (#350 F13)", () => {
+  it.each([
+    "1.2.3.4:443",
+    "192.168.50.227:59234",
+    "[2001:db8::1]:443",
+    "[::1]:8080",
+    "[::ffff:192.168.1.1]:443",
+    "0.0.0.0:1",
+    "255.255.255.255:65535",
+  ])("accepts the dialable literal %j", (good) => {
+    expect(isDialableSocketAddr(good)).toBe(true);
+  });
+
+  it.each([
+    "example.com:443", // hostname, not an IP literal
+    "999.999.999.999:443", // octets out of range
+    "[not-ip]:443", // bracketed non-IPv6
+    "1.2.3:443", // too few octets
+    "1.2.3.4.5:443", // too many octets
+    "01.2.3.4:443", // non-canonical leading zero
+    "1.2.3.4", // no port
+    "1.2.3.4:0", // port 0
+    "2001:db8::1:443", // unbracketed IPv6 (ambiguous)
+    "[2001:db8::1]:0", // port 0
+    "[fe80::1", // unterminated bracket
+    "1.2.3.4:70000", // port out of range
+  ])("rejects the undialable value %j", (bad) => {
+    expect(isDialableSocketAddr(bad)).toBe(false);
   });
 });
