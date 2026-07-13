@@ -99,6 +99,11 @@ interface IrohNode {
   ticket(): Promise<string>;
   /** Get the home relay URL, or null if not connected. */
   homeRelay(): Promise<string | null>;
+  /**
+   * Get this node's own discovery information — its node ID plus the direct
+   * QUIC address(es) and relay URL a peer needs to dial it directly.
+   */
+  discoveryInfo(): Promise<DiscoveryInfo>;
   /** Get address info for a connected peer, or null. */
   peerInfo(peer: PublicKey | string): Promise<NodeAddrInfo | null>;
   /** Get connection statistics for a peer, or null. */
@@ -473,6 +478,13 @@ type RelayMode = "default" | "staging" | "disabled" | string | string[];
 interface NodeAddrInfo {
   id: string;       // Base32-encoded public key
   addrs: string[];   // Relay URLs and/or "host:port" strings
+}
+
+interface DiscoveryInfo {
+  nodeId: string;               // Base32-encoded public key
+  directAddress: string | null; // First direct "host:port" candidate (back-compat)
+  directAddresses: string[];    // All routable direct "host:port" candidates (#348)
+  relayUrl: string | null;      // Home relay URL, or null if not connected
 }
 
 interface PeerStats {

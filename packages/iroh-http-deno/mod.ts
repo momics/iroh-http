@@ -31,10 +31,12 @@ export {
   IROH_HTTP_SERVICE,
   PublicKey,
   SecretKey,
+  TXT_KEY_ADDRESS,
   TXT_KEY_PUBLIC_KEY,
   TXT_KEY_RELAY,
 } from "@momics/iroh-http-shared";
 export type {
+  DiscoveryInfo,
   DnsSdAdvertiseOptions,
   DnsSdBrowseOptions,
   DnsSdProtocol,
