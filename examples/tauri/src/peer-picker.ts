@@ -65,7 +65,14 @@ export function createPeerPicker(opts: PeerPickerOptions): PeerPicker {
       : current;
 
     list.replaceChildren();
-    empty.classList.toggle("hidden", current.length > 0);
+    // F28: the empty-state must reflect the FILTERED result count, not the raw
+    // peer count — otherwise a no-match search renders a blank panel with no
+    // "nothing matches" hint. Adapt the message to distinguish "no peers yet"
+    // from "no peers match the search".
+    empty.textContent = current.length === 0
+      ? "No peers discovered yet."
+      : "No peers match your search.";
+    empty.classList.toggle("hidden", filtered.length > 0);
 
     for (const peer of filtered) {
       const li = document.createElement("li");
