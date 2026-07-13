@@ -50,7 +50,17 @@ pub(crate) async fn serve_bistream(
     builder
         .timer(TokioTimer::new())
         .max_buf_size(effective_header_limit)
-        .max_headers(128);
+        .max_headers(128)
+        // F17: the protocol contract is one request/response exchange per QUIC
+        // bi-stream (the client opens a fresh `open_bi` per request, and the
+        // dispatcher finishes the send stream once the response body ends). Make
+        // that explicit at the hyper layer too by disabling HTTP/1 keep-alive:
+        // left on (hyper's default), a peer that kept an accepted stream open
+        // could submit a second request on it after a graceful stop began —
+        // `no_new_streams` gates only *new* bi-streams, not a second request on
+        // an existing one — running handler side effects inside the drain
+        // window. Off, hyper closes the connection after a single exchange.
+        .keep_alive(false);
     if let Some(timeout) = header_read_timeout {
         builder.header_read_timeout(timeout);
     }

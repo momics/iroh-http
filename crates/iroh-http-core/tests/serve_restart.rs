@@ -845,3 +845,96 @@ async fn fetch_is_bounded_by_configured_timeout() {
          bound connect + attempt + retry together, never run to 2× (#336)",
     );
 }
+
+/// F17: the serve loop must run exactly one request/response exchange per QUIC
+/// bi-stream. This is enforced at two layers — the ffi dispatcher finishes the
+/// send stream once the response body ends, and (F17) HTTP/1 keep-alive is
+/// disabled on the hyper builder so hyper cannot reuse an accepted stream for a
+/// second request. Left keep-alive on, a peer could keep an accepted stream
+/// open and submit a follow-up request after a graceful stop began, where
+/// `no_new_streams` gates only *new* bi-streams — running handler side effects
+/// inside the drain window. This test guards the contract against a regression
+/// of either layer.
+#[tokio::test]
+async fn serve_loop_serves_one_exchange_per_bistream() {
+    use iroh_http_core::ALPN;
+
+    let (server_ep, client_ep) = common::make_pair().await;
+    let mut addr = iroh::EndpointAddr::new(server_ep.raw().id());
+    for a in common::server_addrs(&server_ep) {
+        addr = addr.with_ip_addr(a);
+    }
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let handler_ep = server_ep.clone();
+    let calls_h = Arc::clone(&calls);
+    let handle = ffi_serve(
+        server_ep.clone(),
+        ServeOptions::default(),
+        move |payload: RequestPayload| {
+            calls_h.fetch_add(1, Ordering::SeqCst);
+            let ep = handler_ep.clone();
+            tokio::spawn(async move {
+                respond(ep.handles(), payload.req_handle, 200, vec![]).unwrap();
+                ep.handles().finish_body(payload.res_body_handle).unwrap();
+            });
+        },
+    );
+    server_ep.set_serve_handle(handle);
+
+    let conn = client_ep
+        .raw()
+        .connect(addr, ALPN)
+        .await
+        .expect("HTTP ALPN negotiates");
+    let (mut send, mut recv) = conn.open_bi().await.expect("open bistream");
+
+    // Request one; do NOT finish the send side — a keep-alive client keeps the
+    // stream open for a follow-up request.
+    send.write_all(b"GET /one HTTP/1.1\r\nHost: x\r\n\r\n")
+        .await
+        .expect("write request one");
+
+    // Read the complete first response (chunked terminator `0\r\n\r\n`).
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 1024];
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let n = tokio::time::timeout(Duration::from_secs(5), recv.read(&mut chunk))
+            .await
+            .expect("read did not hang")
+            .expect("read ok");
+        match n {
+            Some(0) | None => break, // stream closed by server
+            Some(n) => {
+                buf.extend_from_slice(&chunk[..n]);
+                if buf.windows(5).any(|w| w == b"0\r\n\r\n") {
+                    break;
+                }
+            }
+        }
+        if Instant::now() > deadline {
+            break;
+        }
+    }
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "first request should have been handled once",
+    );
+
+    // Now submit a second request on the same (keep-alive) stream. With
+    // keep-alive off the server has closed the connection, so this write and/or
+    // its dispatch never reaches the handler.
+    let _ = send
+        .write_all(b"GET /two HTTP/1.1\r\nHost: x\r\n\r\n")
+        .await;
+    let _ = send.finish();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "a second request on the same bi-stream must not be dispatched (keep-alive off)",
+    );
+}
