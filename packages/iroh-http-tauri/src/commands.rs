@@ -178,6 +178,13 @@ pub async fn create_endpoint<R: tauri::Runtime>(
         );
         old_ep.close_force().await;
 
+        // F11: a WebView reload / #336 foreground rebuild orphans every
+        // discovery session the previous JS context started — its close
+        // commands can no longer run, so a stale advertisement would keep
+        // publishing the now-dead QUIC port and browse listeners would
+        // accumulate. Retire them all; the new context restarts what it needs.
+        retire_orphaned_discovery_sessions::<R>(&app);
+
         // #336: the endpoint was rebuilt (foreground recovery / webview
         // reload). Addresses discovered before the previous endpoint died may
         // now be stale, so drop them and let a fresh browse repopulate the
@@ -1221,6 +1228,139 @@ fn advertise_slab() -> &'static Mutex<slab::Slab<iroh_http_discovery::AdvertiseS
     S.get_or_init(|| Mutex::new(slab::Slab::new()))
 }
 
+/// F11: identifies a live DNS-SD discovery session so it can be retired when the
+/// owning WebView context is orphaned (endpoint replacement / reload).
+#[cfg(any(mobile, feature = "discovery"))]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DiscoveryKind {
+    /// `browse_peers_start` — peer discovery.
+    BrowsePeers,
+    /// `advertise_peer_start` — advertise this node.
+    AdvertisePeer,
+    /// `advertise_start` — generic DNS-SD advertise.
+    GenericAdvertise,
+    /// `browse_start` — generic DNS-SD browse.
+    GenericBrowse,
+}
+
+/// F11: every discovery session started by the current WebView context.
+///
+/// A WebView reload or foreground endpoint rebuild (`replace_endpoint_for_node_id`)
+/// orphans the JavaScript that owns these handles, so its `*_close` commands can
+/// never run. Without retirement, a stale advertisement keeps publishing the
+/// dead QUIC port and browse listeners accumulate. Sessions register here on
+/// start, deregister on close, and are all retired on endpoint replacement.
+#[cfg(any(mobile, feature = "discovery"))]
+fn active_discovery_sessions() -> &'static Mutex<Vec<(DiscoveryKind, u64)>> {
+    static S: OnceLock<Mutex<Vec<(DiscoveryKind, u64)>>> = OnceLock::new();
+    S.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+#[cfg(any(mobile, feature = "discovery"))]
+fn track_discovery(kind: DiscoveryKind, handle: u64) {
+    active_discovery_sessions()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push((kind, handle));
+}
+
+#[cfg(any(mobile, feature = "discovery"))]
+fn untrack_discovery(kind: DiscoveryKind, handle: u64) {
+    active_discovery_sessions()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .retain(|&(k, h)| !(k == kind && h == handle));
+}
+
+/// F11: retire every discovery session orphaned by an endpoint replacement.
+///
+/// Called from `create_endpoint` when an existing endpoint for the same node id
+/// is replaced (WebView reload / #336 foreground rebuild). The previous JS
+/// context can no longer close its advertise/browse handles, so we retire them
+/// here — mirroring each `*_close` command — and the new context re-starts
+/// whatever it needs.
+#[cfg(all(feature = "discovery", not(mobile)))]
+fn retire_orphaned_discovery_sessions<R: tauri::Runtime>(_app: &tauri::AppHandle<R>) {
+    let drained: Vec<(DiscoveryKind, u64)> = std::mem::take(
+        &mut *active_discovery_sessions()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()),
+    );
+    for (kind, handle) in drained {
+        match kind {
+            DiscoveryKind::BrowsePeers => {
+                let mut slab = browse_slab().lock().unwrap_or_else(|e| e.into_inner());
+                if slab.contains(handle as usize) {
+                    slab.remove(handle as usize);
+                }
+            }
+            // Peer and generic advertise share `advertise_slab`; dropping the
+            // session stops the advertisement.
+            DiscoveryKind::AdvertisePeer | DiscoveryKind::GenericAdvertise => {
+                let mut slab = advertise_slab().lock().unwrap_or_else(|e| e.into_inner());
+                if slab.contains(handle as usize) {
+                    slab.remove(handle as usize);
+                }
+            }
+            DiscoveryKind::GenericBrowse => {
+                let mut slab = generic_browse_slab()
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                if slab.contains(handle as usize) {
+                    slab.remove(handle as usize);
+                }
+            }
+        }
+    }
+}
+
+#[cfg(mobile)]
+fn retire_orphaned_discovery_sessions<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
+    let drained: Vec<(DiscoveryKind, u64)> = std::mem::take(
+        &mut *active_discovery_sessions()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()),
+    );
+    let Some(state) = app.try_state::<crate::mobile_mdns::MobileMdns<R>>() else {
+        return;
+    };
+    for (kind, handle) in drained {
+        match kind {
+            DiscoveryKind::BrowsePeers => {
+                mobile_active_browses()
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(&handle);
+                let _ = state.browse_peers_stop(handle);
+                mobile_mdns_buffer()
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(&handle);
+            }
+            DiscoveryKind::AdvertisePeer => {
+                let _ = state.advertise_peer_stop(handle);
+            }
+            DiscoveryKind::GenericAdvertise => {
+                let _ = state.advertise_stop(handle);
+            }
+            DiscoveryKind::GenericBrowse => {
+                mobile_active_dns_sd_browses()
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(&handle);
+                let _ = state.browse_stop(handle);
+                mobile_dns_sd_buffer()
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(&handle);
+            }
+        }
+    }
+}
+
+#[cfg(all(not(feature = "discovery"), not(mobile)))]
+fn retire_orphaned_discovery_sessions<R: tauri::Runtime>(_app: &tauri::AppHandle<R>) {}
+
 /// Discovery event payload for the Tauri frontend.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1247,6 +1387,7 @@ pub async fn browse_peers(endpoint_handle: u64, service_name: String) -> Result<
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .insert(Arc::new(TokioMutex::new(session))) as u64;
+    track_discovery(DiscoveryKind::BrowsePeers, handle);
     Ok(handle)
 }
 
@@ -1276,6 +1417,7 @@ pub async fn browse_peers<R: tauri::Runtime>(
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .insert(browse_id);
+    track_discovery(DiscoveryKind::BrowsePeers, browse_id);
     Ok(browse_id)
 }
 
@@ -1404,6 +1546,7 @@ pub async fn browse_peers_next<R: tauri::Runtime>(
 pub fn browse_peers_close(browse_handle: u64) {
     #[cfg(feature = "discovery")]
     {
+        untrack_discovery(DiscoveryKind::BrowsePeers, browse_handle);
         let mut slab = browse_slab().lock().unwrap_or_else(|e| e.into_inner());
         if slab.contains(browse_handle as usize) {
             slab.remove(browse_handle as usize);
@@ -1418,6 +1561,7 @@ pub fn browse_peers_close<R: tauri::Runtime>(
     state: tauri::State<'_, crate::mobile_mdns::MobileMdns<R>>,
     browse_handle: u64,
 ) {
+    untrack_discovery(DiscoveryKind::BrowsePeers, browse_handle);
     // Retire the handle first so any in-flight `browse_peers_next` long-poll
     // observes the closure and returns `None` (stream finished).
     mobile_active_browses()
@@ -1455,6 +1599,7 @@ pub async fn advertise_peer(endpoint_handle: u64, service_name: String) -> Resul
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .insert(session) as u64;
+    track_discovery(DiscoveryKind::AdvertisePeer, handle);
     Ok(handle)
 }
 
@@ -1490,14 +1635,16 @@ pub fn advertise_peer<R: tauri::Runtime>(
     // (reconciled from `bound_sockets`), never port 0 — which is what made iOS
     // nodes undialable ("invalid socket address syntax" at the dialer).
     let address = primary_direct_addr(&ep);
-    state
+    let handle = state
         .advertise_peer_start(
             &service_name,
             &node_id,
             relay.as_deref(),
             address.as_deref(),
         )
-        .map_err(|e| format_error_json("REFUSED", e))
+        .map_err(|e| format_error_json("REFUSED", e))?;
+    track_discovery(DiscoveryKind::AdvertisePeer, handle);
+    Ok(handle)
 }
 
 /// Pick the primary direct address to advertise. See #346.
@@ -1605,6 +1752,7 @@ fn is_routable_ip(ip: &std::net::IpAddr) -> bool {
 pub fn advertise_peer_close(advertise_handle: u64) {
     #[cfg(feature = "discovery")]
     {
+        untrack_discovery(DiscoveryKind::AdvertisePeer, advertise_handle);
         let mut slab = advertise_slab().lock().unwrap_or_else(|e| e.into_inner());
         if slab.contains(advertise_handle as usize) {
             slab.remove(advertise_handle as usize);
@@ -1619,6 +1767,7 @@ pub fn advertise_peer_close<R: tauri::Runtime>(
     state: tauri::State<'_, crate::mobile_mdns::MobileMdns<R>>,
     advertise_handle: u64,
 ) {
+    untrack_discovery(DiscoveryKind::AdvertisePeer, advertise_handle);
     let _ = state.advertise_peer_stop(advertise_handle);
 }
 
@@ -1742,6 +1891,7 @@ pub async fn advertise(config: ServiceConfigPayload) -> Result<u64, String> {
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .insert(session) as u64;
+    track_discovery(DiscoveryKind::GenericAdvertise, handle);
     Ok(handle)
 }
 
@@ -1762,7 +1912,7 @@ pub fn advertise<R: tauri::Runtime>(
     config: ServiceConfigPayload,
 ) -> Result<u64, String> {
     let protocol = config.protocol.as_deref().unwrap_or("udp");
-    state
+    let handle = state
         .advertise_start(
             &config.service_name,
             &config.instance_name,
@@ -1771,7 +1921,9 @@ pub fn advertise<R: tauri::Runtime>(
             &config.addrs,
             &config.txt,
         )
-        .map_err(|e| format_error_json("REFUSED", e))
+        .map_err(|e| format_error_json("REFUSED", e))?;
+    track_discovery(DiscoveryKind::GenericAdvertise, handle);
+    Ok(handle)
 }
 
 /// Stop a generic DNS-SD advertisement.
@@ -1780,6 +1932,7 @@ pub fn advertise<R: tauri::Runtime>(
 pub fn advertise_close(advertise_handle: u64) {
     #[cfg(feature = "discovery")]
     {
+        untrack_discovery(DiscoveryKind::GenericAdvertise, advertise_handle);
         let mut slab = advertise_slab().lock().unwrap_or_else(|e| e.into_inner());
         if slab.contains(advertise_handle as usize) {
             slab.remove(advertise_handle as usize);
@@ -1794,6 +1947,7 @@ pub fn advertise_close<R: tauri::Runtime>(
     state: tauri::State<'_, crate::mobile_mdns::MobileMdns<R>>,
     advertise_handle: u64,
 ) {
+    untrack_discovery(DiscoveryKind::GenericAdvertise, advertise_handle);
     let _ = state.advertise_stop(advertise_handle);
 }
 
@@ -1812,6 +1966,7 @@ pub async fn browse(service_name: String, protocol: Option<String>) -> Result<u6
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .insert(Arc::new(TokioMutex::new(session))) as u64;
+    track_discovery(DiscoveryKind::GenericBrowse, handle);
     Ok(handle)
 }
 
@@ -1840,6 +1995,7 @@ pub fn browse<R: tauri::Runtime>(
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .insert(browse_id);
+    track_discovery(DiscoveryKind::GenericBrowse, browse_id);
     Ok(browse_id)
 }
 
@@ -1937,6 +2093,7 @@ pub async fn browse_next<R: tauri::Runtime>(
 pub fn browse_close(browse_handle: u64) {
     #[cfg(feature = "discovery")]
     {
+        untrack_discovery(DiscoveryKind::GenericBrowse, browse_handle);
         let mut slab = generic_browse_slab()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
@@ -1953,6 +2110,7 @@ pub fn browse_close<R: tauri::Runtime>(
     state: tauri::State<'_, crate::mobile_mdns::MobileMdns<R>>,
     browse_handle: u64,
 ) {
+    untrack_discovery(DiscoveryKind::GenericBrowse, browse_handle);
     // Retire the handle first so any in-flight `browse_next` long-poll
     // observes the closure and returns `None` (stream finished).
     mobile_active_dns_sd_browses()

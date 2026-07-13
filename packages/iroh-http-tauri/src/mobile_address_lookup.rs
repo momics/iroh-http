@@ -95,10 +95,7 @@ impl MobileAddressLookup {
     /// stale, so the map is cleared and repopulated from a fresh browse rather
     /// than letting the dialer try dead paths.
     pub fn clear(&self) {
-        self.map
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clear();
+        self.map.lock().unwrap_or_else(|e| e.into_inner()).clear();
     }
 
     /// Apply a mobile discovery event: `"discovered"` upserts, `"expired"`
@@ -285,7 +282,11 @@ mod tests {
 
         lookup.clear();
 
-        assert_eq!(lookup.len(), 0, "recovery must clear stale discovery entries");
+        assert_eq!(
+            lookup.len(),
+            0,
+            "recovery must clear stale discovery entries"
+        );
         assert!(
             lookup.resolve(endpoint_id(4)).is_none(),
             "cleared peer must no longer resolve"
