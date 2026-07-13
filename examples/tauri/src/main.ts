@@ -1133,6 +1133,9 @@ function detectPlatform(): TestPlatform {
   // Peers seen while testing mode is on — used for "Run all peers" and the
   // auto-run-on-new-peer trigger.
   const testPeers = new Map<string, RegistryPeer>();
+  // F21: instance-name → nodeId, so an expiry event (empty TXT, so `asIrohPeer`
+  // yields no pk) can still be mapped back to the peer it retires.
+  const testInstanceToNodeId = new Map<string, string>();
 
   // ── Peer picker (top bar) ──────────────────────────────────────────────────
   mountPeerPicker(
@@ -1160,7 +1163,9 @@ function detectPlatform(): TestPlatform {
 
   function refreshRunEnabled(): void {
     runBtn.disabled = running || selectedPeerId === null;
-    runAllBtn.disabled = running || getPeers().length === 0;
+    // F21: batch runs target only active testing-mode peers, not the global
+    // registry (which includes manual/session/generic peers).
+    runAllBtn.disabled = running || testPeers.size === 0;
   }
 
   // ── Testing mode ───────────────────────────────────────────────────────────
@@ -1178,7 +1183,10 @@ function detectPlatform(): TestPlatform {
     //     previous test server is still draining), we must NOT advertise a
     //     compliance target we cannot actually serve. Abort, reset, and return.
     try {
-      testServeHandle = node.serve({ signal: ac.signal }, handleComplianceRequest);
+      testServeHandle = node.serve(
+        { signal: ac.signal },
+        handleComplianceRequest,
+      );
     } catch (e) {
       ac.abort();
       testAbort = null;
@@ -1230,29 +1238,39 @@ function detectPlatform(): TestPlatform {
             signal: ac.signal,
           })
         ) {
+          // F21: handle expiry/inactive events BEFORE the `test=1` TXT filter.
+          // An expiry record carries empty TXT, so the marker check would skip
+          // it and the peer would never be retired. Map it back by instance name.
+          if (!rec.isActive) {
+            const goneId = testInstanceToNodeId.get(rec.instanceName);
+            if (goneId) {
+              testInstanceToNodeId.delete(rec.instanceName);
+              testPeers.delete(goneId);
+              if (selectedPeerId === goneId) refreshTarget();
+              refreshRunEnabled();
+            }
+            continue;
+          }
+
+          // Active records must carry the testing-mode marker to count.
           if (rec.txt[TEST_TXT_KEY] !== "1") continue;
           const peer = asIrohPeer(rec);
           if (!peer || peer.nodeId === selfId) continue;
 
-          if (rec.isActive) {
-            const isNew = !testPeers.has(peer.nodeId);
-            const entry = upsertPeer({
-              nodeId: peer.nodeId,
-              source: "test",
-              platform: rec.txt.platform,
-              addrs: peer.addrs,
-            });
-            testPeers.set(peer.nodeId, entry);
-            refreshRunEnabled();
-            if (isNew && autorunToggle.checked && !running) {
-              selectedPeerId = peer.nodeId;
-              refreshTarget();
-              void runAgainstSelected();
-            }
-          } else {
-            testPeers.delete(peer.nodeId);
-            if (selectedPeerId === peer.nodeId) refreshTarget();
-            refreshRunEnabled();
+          const isNew = !testPeers.has(peer.nodeId);
+          const entry = upsertPeer({
+            nodeId: peer.nodeId,
+            source: "test",
+            platform: rec.txt.platform,
+            addrs: peer.addrs,
+          });
+          testPeers.set(peer.nodeId, entry);
+          testInstanceToNodeId.set(rec.instanceName, peer.nodeId);
+          refreshRunEnabled();
+          if (isNew && autorunToggle.checked && !running) {
+            selectedPeerId = peer.nodeId;
+            refreshTarget();
+            void runAgainstSelected();
           }
         }
       } catch { /* aborted */ }
@@ -1266,6 +1284,7 @@ function detectPlatform(): TestPlatform {
     testAbort.abort();
     testAbort = null;
     testPeers.clear();
+    testInstanceToNodeId.clear();
     banner.classList.add("hidden");
     testTabBtn.classList.remove("testing-live");
     // F10: await the serve loop's shutdown contract (bounded) so a subsequent
@@ -1515,7 +1534,8 @@ function detectPlatform(): TestPlatform {
 
   runAllBtn.addEventListener("click", async () => {
     if (running) return;
-    const peers = getPeers();
+    // F21: only run against active testing-mode peers, not every registry peer.
+    const peers = [...testPeers.values()];
     if (!peers.length) return;
     running = true;
     reports.length = 0;
