@@ -89,6 +89,7 @@
                 autocomplete="off"
                 spellcheck="false"
               />
+              <div class="picker-mount" id="http-peer-picker"></div>
               <label for="path-input">Path</label>
               <input id="path-input" type="text" value="/hello" />
               <label for="method-select">Method</label>
@@ -141,6 +142,7 @@
             />
             <button id="files-use-self-btn" type="button">Use my node ID</button>
           </div>
+          <div class="picker-mount" id="files-peer-picker"></div>
           <p id="files-status" class="status"></p>
 
           <div class="columns">
@@ -192,6 +194,7 @@
             autocomplete="off"
             spellcheck="false"
           />
+          <div class="picker-mount" id="peer-peer-picker"></div>
           <div class="btn-row">
             <button id="peer-info-btn">Get address info</button>
             <button id="peer-stats-btn">Get connection stats</button>
@@ -261,6 +264,7 @@
             />
             <button id="session-connect-btn">Connect</button>
           </div>
+          <div class="picker-mount" id="session-peer-picker"></div>
           <p id="session-status" class="status"></p>
         </section>
 
@@ -333,8 +337,9 @@
           <p class="hint">
             Opt-in, LAN-scoped interop harness (#340). While on, this device
             serves the shared HTTP compliance suite <em>and</em> advertises a
-            <code>test=1</code> intent over DNS-SD so other test-mode devices can
-            discover it. Off by default; never ship enabled.
+            <code>test=1</code> intent over DNS-SD — including its dialable
+            <code>address</code> so peers can dial directly instead of over
+            relay. Off by default; never ship enabled.
           </p>
           <label class="toggle-row">
             <input id="test-mode-toggle" type="checkbox" />
@@ -348,116 +353,49 @@
         </section>
 
         <section class="card">
-          <h2>Discovered test peers</h2>
-          <p id="test-peers-empty" class="hint">
-            No test peers discovered yet. Enable testing mode on another device on
-            the same LAN.
+          <h2>Suite runner</h2>
+          <p class="hint">
+            Runs the structured interop suite (<code>discovery</code>,
+            <code>direct-dial</code>, <code>relay-fallback</code>,
+            <code>http-compliance</code>, <code>serve-stop</code>) against a peer
+            from the shared registry. Each row shows a status pill, latency, and
+            a transport badge; failures expand automatically.
           </p>
-          <ul id="test-peers-list" class="peer-list"></ul>
+          <div class="suite-toolbar">
+            <div id="test-peer-picker" class="picker-mount"></div>
+            <div class="suite-actions">
+              <button id="suite-run-btn" disabled>Run suite</button>
+              <button id="suite-run-all-btn" class="btn-secondary" disabled>
+                Run all peers
+              </button>
+              <label class="toggle-inline">
+                <input id="suite-autorun-toggle" type="checkbox" />
+                <span>Auto-run on new peer</span>
+              </label>
+              <button id="suite-copy-json-btn" class="btn-secondary">Copy JSON</button>
+            </div>
+            <p id="suite-target" class="hint"></p>
+          </div>
+
+          <div id="suite-summary" class="suite-summary hidden">
+            <span class="pill pill-pass" id="suite-sum-pass">0 pass</span>
+            <span class="pill pill-fail" id="suite-sum-fail">0 fail</span>
+            <span class="pill pill-skip" id="suite-sum-skip">0 skip</span>
+            <span class="suite-mix" id="suite-sum-mix"></span>
+          </div>
+
+          <div id="suite-groups" class="suite-groups"></div>
         </section>
 
         <section class="card">
-          <h2>Run compliance suite (one-way)</h2>
+          <h2>Structured JSON report</h2>
           <p class="hint">
-            Runs the full <code>cases.json</code> corpus against the selected peer
-            with this device as the client. Case&nbsp;0 is a self/loopback
-            baseline (ADR-015) to isolate transport from platform.
+            Emitted to the console (→ logcat/stdout) on every run as
+            <code>[iroh-http-interop]</code>, with a greppable
+            <code>IROH_INTEROP_CASE …</code> line per test. Copy it to attach to
+            a report.
           </p>
-          <div class="input-row">
-            <button id="test-run-btn" disabled>Run against selected peer</button>
-            <span id="test-run-summary" class="status"></span>
-          </div>
-          <div class="test-grid-wrap">
-            <table id="test-grid" class="test-grid">
-              <thead>
-                <tr>
-                  <th>#</th>
-                  <th>Case</th>
-                  <th>Result</th>
-                  <th>Latency</th>
-                  <th>Status</th>
-                  <th>Error</th>
-                </tr>
-              </thead>
-              <tbody id="test-grid-body"></tbody>
-            </table>
-          </div>
-        </section>
-
-        <section class="card">
-          <h2>Structured JSON log</h2>
-          <p class="hint">
-            Emitted to the console (→ logcat/stdout) on every run. Copy it to
-            attach to a report.
-          </p>
-          <div class="input-row">
-            <button id="test-copy-json-btn" class="btn-secondary">Copy JSON</button>
-          </div>
           <pre id="test-json-log" class="log"></pre>
-        </section>
-
-        <section class="card">
-          <h2>DNS-SD device checks (#334)</h2>
-          <p class="hint">
-            Dev-only affordances for the mobile-native discovery behaviours no CI
-            job can exercise. Each control emits greppable
-            <code>IROH_DNSSD_CHECK …</code> lines to the console (→
-            <code>adb logcat</code> / iOS device logs) and mirrors them below.
-            Inert until you press Start; force-stopped on page teardown. See the
-            <code>docs/internals/dns-sd-device-verification.md</code> runbook.
-          </p>
-        </section>
-
-        <section class="card">
-          <h3>browsePeers() isActive transitions <span class="hint">— criterion 2</span></h3>
-          <p class="hint">
-            Watches <code>node.browsePeers("iroh-http")</code>. Expect
-            <code>isActive=true</code> when a peer starts advertising and
-            <code>isActive=false</code> when it stops / expires.
-          </p>
-          <div class="input-row">
-            <button id="check-isactive-btn">Start isActive watch</button>
-            <span id="check-isactive-status" class="status"></span>
-          </div>
-          <pre id="check-isactive-log" class="log"></pre>
-        </section>
-
-        <section class="card">
-          <h3>Android resolve-queue burst <span class="hint">— criterion 3</span></h3>
-          <p class="hint">
-            <strong>Advertise</strong> fires N services at once from this device;
-            <strong>Browse</strong> on the Android device under test should reach
-            <code>resolved=N</code> with ZERO dropped records, validating the
-            serialized resolve queue.
-          </p>
-          <div class="input-row">
-            <label>Count
-              <input id="check-burst-count" type="number" min="1" max="50" value="5" />
-            </label>
-            <button id="check-burst-advertise-btn">Burst advertise</button>
-            <button id="check-burst-browse-btn" class="btn-secondary">Browse burst</button>
-            <span id="check-burst-status" class="status"></span>
-          </div>
-          <pre id="check-burst-log" class="log"></pre>
-        </section>
-
-        <section class="card">
-          <h3>iOS re-emit on TXT change <span class="hint">— criterion 4</span></h3>
-          <p class="hint">
-            <strong>Advertise mutable</strong> publishes one instance;
-            <strong>Mutate</strong> bumps its TXT <code>rev</code> (and port).
-            <strong>Browse</strong> on the iOS device under test must log a fresh
-            line with each new <code>rev</code> — if it stays pinned, iOS
-            suppressed the re-emit. (Port-only changes are invisible on iOS, so
-            the TXT bump is the real trigger.)
-          </p>
-          <div class="input-row">
-            <button id="check-mutate-advertise-btn">Advertise mutable</button>
-            <button id="check-mutate-btn" disabled>Mutate</button>
-            <button id="check-mutate-browse-btn" class="btn-secondary">Browse mutations</button>
-            <span id="check-mutate-status" class="status"></span>
-          </div>
-          <pre id="check-mutate-log" class="log"></pre>
         </section>
       </div>
     </main>
