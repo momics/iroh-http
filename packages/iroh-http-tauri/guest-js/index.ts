@@ -821,8 +821,10 @@ export {
 export {
   asIrohPeer,
   IROH_HTTP_SERVICE,
+  isDialableSocketAddr,
   PublicKey,
   SecretKey,
+  TXT_KEY_ADDRESS,
   TXT_KEY_PUBLIC_KEY,
   TXT_KEY_RELAY,
 } from "@momics/iroh-http-shared";
