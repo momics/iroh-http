@@ -101,6 +101,22 @@ impl IrohEndpoint {
         }
     }
 
+    /// The first routable dialable direct address as `ip:port`, or `None` when
+    /// only loopback / unspecified / link-local addresses are available.
+    ///
+    /// Ports are already reconciled against the real bound QUIC socket by
+    /// [`Self::direct_socket_addrs`], so the returned address carries the true
+    /// bound port rather than a platform placeholder such as iOS's `:0`/`:1`
+    /// (#346). Routability filtering mirrors `select_advertise_address` in
+    /// `iroh-http-discovery` (#350 W1): a link-local address is only valid on
+    /// its own segment, so advertising it as a dialable address makes a browsing
+    /// peer's direct dial fail. Generic `advertise` callers publish this value
+    /// in the `address` TXT so peers can direct-dial over the LAN instead of
+    /// falling back to relay-only.
+    pub fn dialable_direct_address(&self) -> Option<String> {
+        select_dialable_direct(&self.direct_socket_addrs())
+    }
+
     /// Home relay URL, or `None` if not connected to a relay.
     pub fn home_relay(&self) -> Option<String> {
         self.inner
@@ -297,5 +313,107 @@ impl IrohEndpoint {
     /// Stop watching path changes for a specific peer.
     pub fn unsubscribe_path_changes(&self, node_id_str: &str) {
         self.inner.session.path_subs.remove(node_id_str);
+    }
+}
+
+/// Pick the first routable `ip:port` from a set of already port-reconciled
+/// direct addresses, formatted for advertisement.
+///
+/// The input addresses come from [`IrohEndpoint::direct_socket_addrs`], so
+/// their ports are already the real bound QUIC port. This only applies the
+/// routability filter. Kept in sync with `select_advertise_address` in
+/// `iroh-http-discovery`; the two cannot share a single helper without
+/// introducing a cross-crate dependency (both crates depend on `iroh`, neither
+/// on the other).
+fn select_dialable_direct(addrs: &[std::net::SocketAddr]) -> Option<String> {
+    addrs
+        .iter()
+        .copied()
+        .find(|a| is_routable_ip(&a.ip()))
+        .map(|a| a.to_string())
+}
+
+/// Whether `ip` is routable off-link: not loopback, unspecified, or link-local.
+///
+/// A link-local address (IPv4 `169.254.0.0/16`, IPv6 `fe80::/10`) is only valid
+/// on its own segment, so advertising it as this node's dialable address makes a
+/// browsing peer's direct dial fail (#350). `Ipv6Addr::is_unicast_link_local` is
+/// still unstable, so the `fe80::/10` prefix is matched by hand. Mirrors the
+/// identical predicate in `iroh-http-discovery` and `iroh-http-tauri`.
+fn is_routable_ip(ip: &std::net::IpAddr) -> bool {
+    if ip.is_loopback() || ip.is_unspecified() {
+        return false;
+    }
+    match ip {
+        std::net::IpAddr::V4(v4) => !v4.is_link_local(),
+        std::net::IpAddr::V6(v6) => (v6.segments()[0] & 0xffc0) != 0xfe80,
+    }
+}
+
+#[cfg(test)]
+mod dialable_tests {
+    use super::{is_routable_ip, select_dialable_direct};
+    use std::net::SocketAddr;
+
+    #[test]
+    fn selects_first_routable_ip_with_reconciled_port() {
+        // A reconciled address already carries the real bound QUIC port; the
+        // selector just filters for routability and formats it.
+        let addrs: Vec<SocketAddr> = vec![
+            "127.0.0.1:59234".parse().unwrap(),
+            "192.168.1.42:59234".parse().unwrap(),
+        ];
+        assert_eq!(
+            select_dialable_direct(&addrs),
+            Some("192.168.1.42:59234".to_string())
+        );
+    }
+
+    #[test]
+    fn skips_loopback_and_unspecified() {
+        let addrs: Vec<SocketAddr> = vec![
+            "127.0.0.1:59234".parse().unwrap(),
+            "0.0.0.0:59234".parse().unwrap(),
+        ];
+        assert_eq!(select_dialable_direct(&addrs), None);
+    }
+
+    #[test]
+    fn skips_link_local() {
+        // A link-local address must not be advertised as dialable (#350);
+        // prefer the real LAN address that follows it.
+        let addrs: Vec<SocketAddr> = vec![
+            "169.254.10.1:59234".parse().unwrap(),
+            "10.0.0.5:59234".parse().unwrap(),
+        ];
+        assert_eq!(
+            select_dialable_direct(&addrs),
+            Some("10.0.0.5:59234".to_string())
+        );
+    }
+
+    #[test]
+    fn none_when_only_non_routable() {
+        let addrs: Vec<SocketAddr> = vec!["169.254.10.1:59234".parse().unwrap()];
+        assert_eq!(select_dialable_direct(&addrs), None);
+    }
+
+    #[test]
+    fn brackets_ipv6() {
+        let addrs: Vec<SocketAddr> = vec!["[2001:db8::1]:443".parse().unwrap()];
+        assert_eq!(
+            select_dialable_direct(&addrs),
+            Some("[2001:db8::1]:443".to_string())
+        );
+    }
+
+    #[test]
+    fn routable_ip_predicate() {
+        assert!(is_routable_ip(&"192.168.1.1".parse().unwrap()));
+        assert!(is_routable_ip(&"2001:db8::1".parse().unwrap()));
+        assert!(!is_routable_ip(&"127.0.0.1".parse().unwrap()));
+        assert!(!is_routable_ip(&"0.0.0.0".parse().unwrap()));
+        assert!(!is_routable_ip(&"169.254.1.1".parse().unwrap()));
+        assert!(!is_routable_ip(&"fe80::1".parse().unwrap()));
     }
 }
