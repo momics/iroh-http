@@ -10,7 +10,11 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { asIrohPeer, isDialableSocketAddr, type ServiceRecord } from "@momics/iroh-http-shared";
+import {
+  asIrohPeer,
+  isDialableSocketAddr,
+  type ServiceRecord,
+} from "@momics/iroh-http-shared";
 
 function record(partial: Partial<ServiceRecord>): ServiceRecord {
   return {
