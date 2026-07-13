@@ -294,16 +294,25 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
                         // #346: a direct `ip:port` address published by the
                         // advertiser lets this peer be dialed over the LAN. It
                         // already carries the real bound QUIC port.
+                        var hasAddressTxt = false
                         resolved.attributes["address"]?.let { b ->
                             val address = String(b)
-                            if (address.isNotEmpty()) addrs.put(address)
+                            if (address.isNotEmpty()) {
+                                addrs.put(address)
+                                hasAddressTxt = true
+                            }
                         }
-                        // #350 review W1: fall back to the resolved SRV host:port
-                        // (as browse_start does) so a desktop advertiser — whose
-                        // real QUIC port rides in the SRV record, not an `address`
-                        // TXT — is still direct-dialable over the LAN.
+                        // #350 review W1/F12: the resolved SRV host:port is only
+                        // a FALLBACK for advertisers that publish no `address`
+                        // TXT (e.g. a desktop peer whose real QUIC port rides in
+                        // the SRV record). When an `address` TXT is present it
+                        // already carries the real bound QUIC port, so appending
+                        // SRV would inject a bogus second target — Android's own
+                        // advertiser uses SRV port 1 and iOS's NWListener port is
+                        // unrelated to QUIC. Also skip placeholder SRV ports
+                        // (<=1), which are never a real QUIC socket.
                         val hostAddr = resolved.host?.hostAddress
-                        if (!hostAddr.isNullOrEmpty() && resolved.port > 0) {
+                        if (!hasAddressTxt && !hostAddr.isNullOrEmpty() && resolved.port > 1) {
                             addrs.put(formatSocketAddr(hostAddr, resolved.port))
                         }
                         resolved.attributes["relay"]?.let { b ->
@@ -499,21 +508,31 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
                         // list, so pair it with the SRV port. Advertisers whose
                         // SRV port is not the QUIC port (iOS) additionally publish
                         // a dialable `address` TXT that the consumer prefers.
-                        if (!hostAddr.isNullOrEmpty() && resolved.port > 0) {
+                        // #350 F12: a placeholder SRV port (<=1, e.g. Android's
+                        // own advertiser publishes port 1) is never a real QUIC
+                        // socket, so never surface `host:1`; the consumer relies
+                        // on the `address` TXT for those advertisers.
+                        if (!hostAddr.isNullOrEmpty() && resolved.port > 1) {
                             addrs.put(formatSocketAddr(hostAddr, resolved.port))
                         }
 
                         // #350 review W2: re-emit only when the record actually
                         // changed. A stable signature over the sorted TXT and the
                         // resolved addrs lets a rebind/re-advertise surface again.
+                        // #350 F29: length-prefix every field (netstring style)
+                        // so the snapshot is injective — a delimiter-joined form
+                        // lets TXT {a:"b;c=d"} and {a:"b",c:"d"} collide and
+                        // suppresses a real update.
+                        fun StringBuilder.field(s: String) {
+                            append(s.length).append(':').append(s)
+                        }
                         val signature = buildString {
                             resolved.attributes?.toSortedMap()?.forEach { (k, v) ->
-                                append(k).append('=')
-                                append(if (v != null) String(v) else "")
-                                append(';')
+                                field(k)
+                                field(if (v != null) String(v) else "")
                             }
                             append('|')
-                            for (i in 0 until addrs.length()) append(addrs.getString(i)).append(',')
+                            for (i in 0 until addrs.length()) field(addrs.getString(i))
                         }
                         if (session.knownInstances.put(name, signature) == signature) return
 
