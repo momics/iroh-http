@@ -1125,6 +1125,9 @@ function detectPlatform(): TestPlatform {
   selfIdEl.title = selfId;
 
   let testAbort: AbortController | null = null;
+  // F10: retain the testing-mode serve handle so stop can await its shutdown
+  // contract (ServeHandle.finished) instead of racing the next transition.
+  let testServeHandle: { finished?: Promise<void> } | null = null;
   let running = false;
   let selectedPeerId: string | null = null;
   // Peers seen while testing mode is on — used for "Run all peers" and the
@@ -1171,10 +1174,25 @@ function detectPlatform(): TestPlatform {
     setStatus(modeStatus, "Serving compliance handler + advertising…", "ok");
 
     // (a) Serve the shared compliance handler so remote peers can run cases here.
+    //     F10: if serve() rejects (e.g. the Server tab is already bound, or a
+    //     previous test server is still draining), we must NOT advertise a
+    //     compliance target we cannot actually serve. Abort, reset, and return.
     try {
-      node.serve({ signal: ac.signal }, handleComplianceRequest);
+      testServeHandle = node.serve({ signal: ac.signal }, handleComplianceRequest);
     } catch (e) {
-      setStatus(modeStatus, `serve failed: ${e}`, "error");
+      ac.abort();
+      testAbort = null;
+      testServeHandle = null;
+      banner.classList.add("hidden");
+      testTabBtn.classList.remove("testing-live");
+      toggle.checked = false;
+      setStatus(
+        modeStatus,
+        `serve failed — testing mode not started: ${e}`,
+        "error",
+      );
+      refreshRunEnabled();
+      return;
     }
 
     // (b) Advertise our testing intent over generic DNS-SD alongside our pk.
@@ -1243,20 +1261,34 @@ function detectPlatform(): TestPlatform {
     refreshRunEnabled();
   }
 
-  function stopTestingMode(): void {
+  async function stopTestingMode(): Promise<void> {
     if (!testAbort) return;
     testAbort.abort();
     testAbort = null;
     testPeers.clear();
     banner.classList.add("hidden");
     testTabBtn.classList.remove("testing-live");
+    // F10: await the serve loop's shutdown contract (bounded) so a subsequent
+    // start doesn't race a still-draining server on the same endpoint.
+    const handle = testServeHandle;
+    testServeHandle = null;
+    if (handle?.finished) {
+      try {
+        await Promise.race([
+          handle.finished,
+          new Promise((r) => setTimeout(r, 5000)),
+        ]);
+      } catch {
+        /* stop errors are non-fatal for the UI */
+      }
+    }
     setStatus(modeStatus, "Testing mode off.");
     refreshRunEnabled();
   }
 
   toggle.addEventListener("change", () => {
     if (toggle.checked) void startTestingMode();
-    else stopTestingMode();
+    else void stopTestingMode();
   });
 
   // Force testing mode off on teardown — it must never outlive the page.
