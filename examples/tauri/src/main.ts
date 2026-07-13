@@ -1137,6 +1137,42 @@ function detectPlatform(): TestPlatform {
   // yields no pk) can still be mapped back to the peer it retires.
   const testInstanceToNodeId = new Map<string, string>();
 
+  // F24: testing mode serves the compliance handler on the app's real,
+  // relay-reachable node — `test=1` is only an mDNS marker, not authorization.
+  // Guard the served fixtures: only the local node (self-loopback baseline) and
+  // peers we actually discovered advertising testing mode may drive them, and
+  // bound body size + concurrency so an allow-listed peer still can't exhaust
+  // memory. Relay stays enabled so the relay-fallback suite group is testable.
+  // ≥ the largest compliance fixture (body-size-5mb) plus headroom.
+  const TEST_MAX_BODY_BYTES = 8 * 1024 * 1024;
+  const TEST_MAX_INFLIGHT = 16;
+  let testInflight = 0;
+
+  async function handleTestingRequest(req: Request): Promise<Response> {
+    // Fail closed: reject callers that are neither self nor a known test peer.
+    const peerId = req.headers.get("Peer-Id");
+    if (!peerId || (peerId !== selfId && !testPeers.has(peerId))) {
+      return new Response("Forbidden: not a testing-mode peer\n", {
+        status: 403,
+      });
+    }
+    // Reject oversized declared bodies before reading them.
+    const declared = Number(req.headers.get("Content-Length") ?? "0");
+    if (Number.isFinite(declared) && declared > TEST_MAX_BODY_BYTES) {
+      return new Response("Payload too large\n", { status: 413 });
+    }
+    // Cap concurrent in-flight fixtures.
+    if (testInflight >= TEST_MAX_INFLIGHT) {
+      return new Response("Too many requests\n", { status: 429 });
+    }
+    testInflight += 1;
+    try {
+      return await handleComplianceRequest(req);
+    } finally {
+      testInflight -= 1;
+    }
+  }
+
   // ── Peer picker (top bar) ──────────────────────────────────────────────────
   mountPeerPicker(
     "test-peer-picker",
@@ -1185,7 +1221,7 @@ function detectPlatform(): TestPlatform {
     try {
       testServeHandle = node.serve(
         { signal: ac.signal },
-        handleComplianceRequest,
+        handleTestingRequest,
       );
     } catch (e) {
       ac.abort();

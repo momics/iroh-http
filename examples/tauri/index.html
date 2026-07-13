@@ -327,19 +327,29 @@
       <!-- ── Test (cross-device interop harness) ─────────────────────────────── -->
       <div class="panel" data-panel="test">
         <div id="test-mode-banner" class="test-banner hidden">
-          ⚠ TESTING MODE ON — this node serves the compliance handler to
-          <strong>any</strong> LAN peer advertising <code>test=1</code>. Turn it
-          off when you're done.
+          ⚠ TESTING MODE ON — this node serves the compliance handler on your
+          <strong>real, relay-reachable</strong> Iroh identity. Requests are
+          limited to your own node and peers you've discovered advertising
+          <code>test=1</code>, but that node ID is public. Turn it off when
+          you're done.
         </div>
 
         <section class="card">
           <h2>Testing mode</h2>
           <p class="hint">
-            Opt-in, LAN-scoped interop harness (#340). While on, this device
-            serves the shared HTTP compliance suite <em>and</em> advertises a
+            Opt-in interop harness (#340). While on, this device serves the
+            shared HTTP compliance suite <em>and</em> advertises a
             <code>test=1</code> intent over DNS-SD — including its dialable
             <code>address</code> so peers can dial directly instead of over
             relay. Off by default; never ship enabled.
+          </p>
+          <p class="hint">
+            <strong>Exposure:</strong> the handler runs on your persisted node
+            identity, which is reachable through public relays — not just the
+            LAN. As a guard it rejects any caller that isn't this node or a
+            discovered <code>test=1</code> peer (HTTP 403), caps request bodies
+            (8&nbsp;MiB) and limits concurrent fixtures. It is a test affordance,
+            not an authenticated service.
           </p>
           <label class="toggle-row">
             <input id="test-mode-toggle" type="checkbox" />
