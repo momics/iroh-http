@@ -646,8 +646,7 @@ function installLifecycleListener(
 ): (() => void) | undefined {
   if (typeof document === "undefined") return;
   const isMobile = /android|iphone|ipad/i.test(navigator.userAgent);
-  const enabled = isMobile || options.auto === true;
-  if (!enabled) return;
+  if (!reconnectEnabled(options.auto, isMobile)) return;
 
   // The probe checks real transport liveness (the native `ping` command now
   // returns whether the QUIC transport is usable, not merely that the handle
@@ -659,6 +658,23 @@ function installLifecycleListener(
     enabled: true,
     maxRetries: options.maxRetries ?? 3,
   });
+}
+
+/**
+ * Whether the foreground reconnect listener should be installed.
+ *
+ * An explicit `auto: false` always disables it — including on mobile, where the
+ * listener was previously force-enabled and could permanently close a node
+ * whose reconnect the caller had deliberately disabled (#350 F3). Otherwise it
+ * is enabled when the caller opts in (`auto: true`) or implicitly on mobile,
+ * where a suspended socket must be recovered on foreground.
+ */
+export function reconnectEnabled(
+  auto: boolean | undefined,
+  isMobile: boolean,
+): boolean {
+  if (auto === false) return false;
+  return auto === true || isMobile;
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────
@@ -779,7 +795,22 @@ export async function createNode(options?: NodeOptions): Promise<IrohNode> {
       Number(info.endpointHandle),
       reconnect,
       () => {
-        node.close().catch(() => {});
+        // #350 F3: a foreground probe found the transport dead. If the app
+        // supplied a recovery callback, hand off so it can recreate the node
+        // (e.g. `createNode({ key })` with the same identity) instead of the
+        // node being silently, permanently closed. Without a callback, close
+        // the node so its `closed` promise resolves and the app can react,
+        // rather than leaving a half-dead handle in place.
+        if (reconnect.onReconnectNeeded) {
+          try {
+            reconnect.onReconnectNeeded();
+          } catch {
+            // A throwing recovery callback must not crash the foreground
+            // handler; the app owns its own error handling here.
+          }
+        } else {
+          node.close().catch(() => {});
+        }
       },
     );
     if (unsubscribe) {

@@ -151,6 +151,30 @@ describe("sendChunk IPC", () => {
   });
 });
 
+// ── reconnectEnabled gating (#350 F3) ───────────────────────────────────────
+
+describe("reconnectEnabled", () => {
+  it("honors an explicit auto:false even on mobile", async () => {
+    const { reconnectEnabled } = await import("../index.ts");
+    // The destructive #350 F3 bug: mobile force-enabled the listener and could
+    // permanently close a node whose reconnect the caller had disabled.
+    expect(reconnectEnabled(false, true)).toBe(false);
+    expect(reconnectEnabled(false, false)).toBe(false);
+  });
+
+  it("enables implicitly on mobile when unset", async () => {
+    const { reconnectEnabled } = await import("../index.ts");
+    expect(reconnectEnabled(undefined, true)).toBe(true);
+    expect(reconnectEnabled(undefined, false)).toBe(false);
+  });
+
+  it("enables on explicit auto:true regardless of platform", async () => {
+    const { reconnectEnabled } = await import("../index.ts");
+    expect(reconnectEnabled(true, false)).toBe(true);
+    expect(reconnectEnabled(true, true)).toBe(true);
+  });
+});
+
 // ── createNode IPC ──────────────────────────────────────────────────────────
 
 describe("createNode IPC", () => {
