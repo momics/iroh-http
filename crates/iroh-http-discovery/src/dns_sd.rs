@@ -24,7 +24,10 @@ use std::{
 use futures::FutureExt;
 use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
 
-use crate::{engine::service_type, DiscoveryError};
+use crate::{
+    engine::{service_type, BoxFuture, BrowseHandle, RawEvent, TransportError},
+    DiscoveryError,
+};
 
 pub use crate::engine::{BrowseConfig, Protocol, ServiceConfig, ServiceRecord};
 
@@ -136,16 +139,11 @@ fn record_from_resolved(rs: &mdns_sd::ResolvedService) -> Option<ServiceRecord> 
     })
 }
 
-fn record_from_removed(service_type: String, fullname: &str) -> Option<ServiceRecord> {
+fn raw_event_from_removed(service_type: String, fullname: &str) -> Option<RawEvent> {
     let instance_name = instance_from_fullname(fullname, &service_type)?;
-    Some(ServiceRecord {
-        is_active: false,
+    Some(RawEvent::Remove {
         service_type,
         instance_name,
-        host: None,
-        port: 0,
-        addrs: Vec::new(),
-        txt: Vec::new(),
     })
 }
 
@@ -381,82 +379,66 @@ fn advertise_inner(
 
 // ── Browse ───────────────────────────────────────────────────────────────────
 
-struct BrowseShared {
-    rx: tokio::sync::Mutex<tokio::sync::mpsc::Receiver<ServiceRecord>>,
-    daemon: Option<ServiceDaemon>,
+struct MdnsBrowse {
+    receiver: mdns_sd::Receiver<ServiceEvent>,
+    daemon: ServiceDaemon,
     service_type: String,
-    pump: Mutex<Option<tokio::task::AbortHandle>>,
     closed: AtomicBool,
-    closed_notify: tokio::sync::Notify,
-    close_callbacks: Mutex<Vec<Box<dyn FnOnce() + Send>>>,
 }
 
-impl BrowseShared {
-    fn stop_daemon(&self) {
-        if let Some(daemon) = &self.daemon {
-            let _ = retry_daemon_command(|| daemon.stop_browse(&self.service_type));
-            let _ = retry_daemon_command(|| daemon.shutdown());
-        }
+impl BrowseHandle for MdnsBrowse {
+    fn next(&self) -> BoxFuture<'_, Result<Option<RawEvent>, TransportError>> {
+        Box::pin(async move {
+            if self.closed.load(Ordering::Acquire) {
+                return Ok(None);
+            }
+            loop {
+                let event = match self.receiver.recv_async().await {
+                    Ok(event) => event,
+                    Err(_) => return Ok(None),
+                };
+                if self.closed.load(Ordering::Acquire) {
+                    return Ok(None);
+                }
+                let event = match event {
+                    ServiceEvent::ServiceResolved(resolved) => {
+                        record_from_resolved(&resolved).map(RawEvent::Upsert)
+                    }
+                    ServiceEvent::ServiceRemoved(service_type, fullname) => {
+                        raw_event_from_removed(service_type, &fullname)
+                    }
+                    _ => None,
+                };
+                if event.is_some() {
+                    return Ok(event);
+                }
+            }
+        })
     }
 
-    fn run_close_callbacks(&self) {
-        let callbacks = std::mem::take(
-            &mut *self
-                .close_callbacks
-                .lock()
-                .unwrap_or_else(|error| error.into_inner()),
-        );
-        for callback in callbacks {
-            callback();
-        }
-    }
-
-    fn install_pump(&self, pump: tokio::task::AbortHandle) {
-        let mut slot = self.pump.lock().unwrap_or_else(|error| error.into_inner());
-        if self.closed.load(Ordering::Acquire) {
-            pump.abort();
-        } else {
-            *slot = Some(pump);
-        }
-    }
-
-    fn finish_from_pump(&self) {
+    fn request_close(&self) {
         if self.closed.swap(true, Ordering::AcqRel) {
             return;
         }
-        self.stop_daemon();
-        self.closed_notify.notify_waiters();
-        self.run_close_callbacks();
-        self.pump
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .take();
+        if let Err(error) = retry_daemon_command(|| self.daemon.stop_browse(&self.service_type)) {
+            tracing::debug!(%error, "iroh-http-discovery: could not enqueue DNS-SD browse stop");
+        }
+        if let Err(error) = retry_daemon_command(|| self.daemon.shutdown()) {
+            tracing::debug!(%error, "iroh-http-discovery: could not enqueue DNS-SD daemon shutdown");
+        }
     }
 
-    fn close(&self) {
-        if self.closed.swap(true, Ordering::AcqRel) {
-            return;
-        }
-        self.stop_daemon();
-        self.closed_notify.notify_waiters();
-        self.run_close_callbacks();
-        if let Some(pump) = self
-            .pump
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .take()
-        {
-            pump.abort();
-        }
+    fn closed(&self) -> BoxFuture<'_, Result<(), TransportError>> {
+        Box::pin(futures::future::ready(Ok(())))
     }
 }
 
 /// An active browse session that yields [`ServiceRecord`]s.
 ///
 /// Drop or call [`Self::close`] to stop receiving records, stop the underlying
-/// DNS-SD browse, shut its daemon down, and stop the record pump.
+/// DNS-SD browse, and shut its daemon down.
 pub struct BrowseSession {
-    shared: Arc<BrowseShared>,
+    inner: Arc<crate::engine::BrowseSession>,
 }
 
 impl BrowseSession {
@@ -465,56 +447,26 @@ impl BrowseSession {
     /// This takes `&self`, so a session can be placed directly in an [`Arc`]
     /// and polled without an external asynchronous mutex.
     pub async fn next_record(&self) -> Option<ServiceRecord> {
-        let closed = self.shared.closed_notify.notified();
-        tokio::pin!(closed);
-        closed.as_mut().enable();
-        if self.shared.closed.load(Ordering::Acquire) {
-            return None;
-        }
-        let record = {
-            let mut rx = self.shared.rx.lock().await;
-            if self.shared.closed.load(Ordering::Acquire) {
+        match self.inner.next().await {
+            Ok(Some(event)) => Some(event.into()),
+            Ok(None) => None,
+            Err(error) => {
+                tracing::debug!(%error, "iroh-http-discovery: DNS-SD browse failed");
                 None
-            } else {
-                tokio::select! {
-                    record = rx.recv() => record,
-                    _ = &mut closed => None,
-                }
             }
-        };
-        if self.shared.closed.load(Ordering::Acquire) {
-            None
-        } else {
-            record
         }
     }
 
     /// Synchronously stop this browse session.
     ///
-    /// Closing is idempotent and aborts the record pump, which drops the sole
-    /// channel sender and wakes any pending [`Self::next_record`] call.
+    /// Closing is idempotent and asks the transport to wake any pending
+    /// [`Self::next_record`] call.
     pub fn close(&self) {
-        self.shared.close();
+        self.inner.close();
     }
 
     pub(crate) fn on_close(&self, callback: impl FnOnce() + Send + 'static) {
-        let mut callbacks = self
-            .shared
-            .close_callbacks
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        if self.shared.closed.load(Ordering::Acquire) {
-            drop(callbacks);
-            callback();
-        } else {
-            callbacks.push(Box::new(callback));
-        }
-    }
-}
-
-impl Drop for BrowseSession {
-    fn drop(&mut self) {
-        self.close();
+        self.inner.on_close(callback);
     }
 }
 
@@ -533,64 +485,53 @@ pub fn browse(config: BrowseConfig) -> Result<BrowseSession, DiscoveryError> {
         }
     };
 
-    let (tx, rx) = tokio::sync::mpsc::channel(64);
-    let shared = Arc::new(BrowseShared {
-        rx: tokio::sync::Mutex::new(rx),
-        daemon: Some(daemon),
-        service_type,
-        pump: Mutex::new(None),
-        closed: AtomicBool::new(false),
-        closed_notify: tokio::sync::Notify::new(),
-        close_callbacks: Mutex::new(Vec::new()),
-    });
-    let weak = Arc::downgrade(&shared);
-    let pump = tokio::spawn(async move {
-        while let Ok(event) = receiver.recv_async().await {
-            let record = match event {
-                ServiceEvent::ServiceResolved(rs) => record_from_resolved(&rs),
-                ServiceEvent::ServiceRemoved(ty, fullname) => record_from_removed(ty, &fullname),
-                _ => None,
-            };
-            if let Some(record) = record {
-                if tx.send(record).await.is_err() {
-                    break;
-                }
-            }
-        }
-        if let Some(shared) = weak.upgrade() {
-            shared.finish_from_pump();
-        }
-    });
-    shared.install_pump(pump.abort_handle());
-    drop(pump);
+    Ok(BrowseSession {
+        inner: Arc::new(crate::engine::BrowseSession::new(MdnsBrowse {
+            receiver,
+            daemon,
+            service_type,
+            closed: AtomicBool::new(false),
+        })),
+    })
+}
 
-    Ok(BrowseSession { shared })
+#[cfg(test)]
+struct ControlledBrowse {
+    close: tokio::sync::Semaphore,
+}
+
+#[cfg(test)]
+impl BrowseHandle for ControlledBrowse {
+    fn next(&self) -> BoxFuture<'_, Result<Option<RawEvent>, TransportError>> {
+        Box::pin(async move {
+            let _ = self.close.acquire().await;
+            Ok(None)
+        })
+    }
+
+    fn request_close(&self) {
+        self.close.add_permits(1);
+    }
+
+    fn closed(&self) -> BoxFuture<'_, Result<(), TransportError>> {
+        Box::pin(futures::future::ready(Ok(())))
+    }
 }
 
 #[cfg(test)]
 pub(crate) fn controlled_test_browse() -> (BrowseSession, futures::channel::oneshot::Sender<()>) {
-    let (tx, rx) = tokio::sync::mpsc::channel(1);
     let (finish_tx, finish_rx) = futures::channel::oneshot::channel();
-    let shared = Arc::new(BrowseShared {
-        rx: tokio::sync::Mutex::new(rx),
-        daemon: None,
-        service_type: "_test._udp.local.".to_string(),
-        pump: Mutex::new(None),
-        closed: AtomicBool::new(false),
-        closed_notify: tokio::sync::Notify::new(),
-        close_callbacks: Mutex::new(Vec::new()),
-    });
-    let weak = Arc::downgrade(&shared);
-    let pump = tokio::spawn(async move {
+    let inner = Arc::new(crate::engine::BrowseSession::new(ControlledBrowse {
+        close: tokio::sync::Semaphore::new(0),
+    }));
+    let weak = Arc::downgrade(&inner);
+    tokio::spawn(async move {
         let _ = finish_rx.await;
-        drop(tx);
-        if let Some(shared) = weak.upgrade() {
-            shared.finish_from_pump();
+        if let Some(inner) = weak.upgrade() {
+            inner.close();
         }
     });
-    shared.install_pump(pump.abort_handle());
-    drop(pump);
-    (BrowseSession { shared }, finish_tx)
+    (BrowseSession { inner }, finish_tx)
 }
 
 // ── Unit tests ────────────────────────────────────────────────────────────────
@@ -661,11 +602,12 @@ mod tests {
 
     #[test]
     fn removed_record_has_no_addresses_or_txt() {
-        let rec = record_from_removed(
+        let rec: ServiceRecord = raw_event_from_removed(
             "_my-app._udp.local.".to_string(),
             "inst._my-app._udp.local.",
         )
-        .expect("valid instance");
+        .expect("valid instance")
+        .into();
         assert!(!rec.is_active);
         assert_eq!(rec.instance_name, "inst");
         assert!(rec.addrs.is_empty());
