@@ -843,10 +843,11 @@ pub fn home_relay(endpoint_handle: u32) -> napi::Result<Option<String>> {
 
 /// Discovery info: node id + dialable direct `ip:port` address + relay URL.
 ///
-/// `directAddress` carries the real bound QUIC port (or null when only
-/// loopback/link-local addresses are available); safe to advertise for
-/// LAN direct-dial. `directAddresses` carries *all* routable candidates so an
-/// advertiser can publish them and let the dialer race the paths (#348).
+/// `directAddress` carries the candidate's authoritative real port (or null
+/// when only loopback/link-local addresses are available); only `:0`/`:1`
+/// placeholders borrow a same-family bound port. `directAddresses` carries
+/// *all* routable candidates so an advertiser can publish them and let the
+/// dialer race the paths (#348/#350).
 #[napi]
 pub fn discovery_info(endpoint_handle: u32) -> napi::Result<JsDiscoveryInfo> {
     let ep = get_endpoint(endpoint_handle)?;

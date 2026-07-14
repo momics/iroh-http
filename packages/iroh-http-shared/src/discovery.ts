@@ -232,9 +232,9 @@ export function isRelayUrl(s: string): boolean {
  * Reads the peer's public key from the `pk` TXT property, falling back to the
  * instance label. Returns `null` when neither yields a node id.
  *
- * Addresses are sanitised for the dialer (#346): the dialable `address` TXT
- * entry (which carries the real bound QUIC port) is surfaced first, then any
- * well-formed `ip:port` socket addresses from the resolved set. Bare,
+ * Addresses are sanitised for the dialer (#346): the complete dialable
+ * `address` TXT candidate (which carries its authoritative port) is surfaced
+ * first, then any well-formed `ip:port` socket addresses from the resolved set. Bare,
  * port-less hosts (an iOS A-record resolves to a portless IP) and `:0`
  * addresses are dropped so they can never fail `parse_direct_addrs` and poison
  * the whole list.

@@ -382,6 +382,32 @@ mod command_tests {
     }
 }
 
+/// Platform dependency contracts that cannot be exercised by the host test
+/// target but are required by the plugin's declared mobile minimum versions.
+mod platform_dependency_contract {
+    #[test]
+    fn android_api21_does_not_link_if_addrs_getifaddrs() {
+        let manifest: toml::Value = include_str!("../Cargo.toml")
+            .parse()
+            .expect("Tauri plugin Cargo.toml must parse");
+        let targets = manifest
+            .get("target")
+            .and_then(toml::Value::as_table)
+            .expect("Cargo.toml must contain target dependencies");
+
+        for (selector, config) in targets {
+            let dependencies = config.get("dependencies").and_then(toml::Value::as_table);
+            if selector.contains("target_os = \"android\"")
+                && dependencies.is_some_and(|deps| deps.contains_key("if-addrs"))
+            {
+                panic!(
+                    "Android minSdk 21–23 cannot link if-addrs 0.15: it calls getifaddrs, which Android introduced in API 24 ({selector})"
+                );
+            }
+        }
+    }
+}
+
 /// FFI string-parity contract tests for the mobile discovery boundary.
 ///
 /// The mobile mDNS/DNS-SD commands cross a Rust ↔ Swift/Kotlin boundary that is

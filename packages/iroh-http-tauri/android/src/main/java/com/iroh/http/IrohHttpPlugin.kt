@@ -16,6 +16,9 @@ import app.tauri.plugin.JSObject
 import app.tauri.plugin.Plugin
 import org.json.JSONArray
 import org.json.JSONObject
+import java.net.InetAddress
+import java.net.Inet6Address
+import java.net.NetworkInterface
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
 
@@ -40,8 +43,9 @@ class AdvertiseStartArgs {
     lateinit var pk: String
     var relay: String? = null
 
-    // #346: primary direct `ip:port` address to publish so browsing peers can
-    // dial this node over the LAN. Carries the real bound QUIC port (never 0).
+    // #346/#350: complete direct `ip:port` candidate to publish so browsing
+    // peers can dial this node over the LAN. Its real local/reflexive port is
+    // authoritative; platform placeholders have already been repaired.
     var address: String? = null
 }
 
@@ -116,6 +120,63 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
     private fun nsd(): NsdManager? =
         activity.getSystemService(Context.NSD_SERVICE) as? NsdManager
 
+    /**
+     * Format a DNS server for Rust without losing an IPv6 routing scope.
+     *
+     * Android 21–29 can return a link-local Inet6Address with scopeId=0 even
+     * though LinkProperties still identifies the owning interface. In that
+     * case the caller supplies the interface's numeric index. Returning an
+     * unscoped fe80:: address would configure a resolver that cannot route any
+     * query, so the missing-scope case fails explicitly.
+     */
+    private fun dnsServerLiteral(address: InetAddress, interfaceIndex: Int?): String {
+        val host = address.hostAddress?.substringBefore('%')
+            ?: throw IllegalArgumentException("DNS server has no numeric address")
+        if (address !is Inet6Address) return host
+
+        val addressScope = address.scopeId.takeIf { it > 0 }
+        val scope = addressScope ?: interfaceIndex?.takeIf { it > 0 }
+        if (address.isLinkLocalAddress) {
+            requireNotNull(scope) {
+                "link-local DNS server $host has no resolvable interface scope"
+            }
+            return "$host%$scope"
+        }
+        return addressScope?.let { "$host%$it" } ?: host
+    }
+
+    /** Return a dialable interface IP literal, excluding addresses Rust rejects. */
+    private fun interfaceAddressLiteral(address: InetAddress): String? {
+        if (
+            address.isAnyLocalAddress ||
+            address.isLoopbackAddress ||
+            address.isLinkLocalAddress ||
+            address.isMulticastAddress
+        ) {
+            return null
+        }
+        return address.hostAddress?.substringBefore('%')
+    }
+
+    /** Add addresses only while their owning interface is operational. */
+    private fun addOperationalInterfaceAddresses(
+        output: MutableSet<String>,
+        networkInterface: NetworkInterface,
+        addresses: Iterable<InetAddress>
+    ) {
+        try {
+            if (!networkInterface.isUp || networkInterface.isLoopback) return
+            for (address in addresses) {
+                interfaceAddressLiteral(address)?.let(output::add)
+            }
+        } catch (e: Throwable) {
+            Log.w(
+                "iroh-http-network",
+                "could not inspect interface ${networkInterface.name}: ${e.message}"
+            )
+        }
+    }
+
     // ── DNS ───────────────────────────────────────────────────────────────────
 
     /**
@@ -125,11 +186,14 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
      * no `/etc/resolv.conf`; servers live in `LinkProperties`, reachable only
      * via JNI/`ndk_context`). The Rust side calls this at endpoint creation and
      * configures iroh's resolver with the returned servers so relay, pkarr, and
-     * DNS-discovery lookups resolve instead of timing out.
+     * DNS-discovery lookups resolve instead of timing out. Android must return
+     * at least one usable server: resolving an empty list would make Rust take
+     * the same unavailable default-resolver path this bridge exists to avoid.
      */
     @Command
     fun get_dns_servers(invoke: Invoke) {
         val servers = JSONArray()
+        val rejected = mutableListOf<String>()
         try {
             val cm = activity.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
             if (cm != null) {
@@ -144,26 +208,115 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
                         // API 21/22 fallback: allNetworks (added in API 21).
                         @Suppress("DEPRECATION")
                         cm.allNetworks.toList()
-                    }
+                }
                 for (network in networks) {
                     val props = cm.getLinkProperties(network) ?: continue
+                    val interfaceIndex = try {
+                        props.interfaceName
+                            ?.let { NetworkInterface.getByName(it) }
+                            ?.index
+                            ?.takeIf { it > 0 }
+                    } catch (e: Throwable) {
+                        Log.w(
+                            "iroh-http-dns",
+                            "could not resolve interface index for ${props.interfaceName}: ${e.message}"
+                        )
+                        null
+                    }
                     for (addr in props.dnsServers) {
-                        // Strip any IPv6 zone/scope suffix (e.g. `fe80::1%wlan0`)
-                        // so the Rust `IpAddr` parser in bind.rs accepts it —
-                        // matches formatSocketAddr's handling for socket addrs.
-                        val host = addr.hostAddress?.substringBefore('%')
-                        if (!host.isNullOrEmpty()) servers.put(host)
+                        try {
+                            servers.put(dnsServerLiteral(addr, interfaceIndex))
+                        } catch (e: IllegalArgumentException) {
+                            rejected.add(e.message ?: "unusable DNS server $addr")
+                        }
                     }
                 }
             }
         } catch (e: Throwable) {
-            // Catch Throwable (not just Exception) so a linkage/verification
-            // Error on an unexpected OS version degrades to the default
-            // resolver instead of crashing the app (#350 F2).
-            Log.e("iroh-http-dns", "get_dns_servers failed: ${e.message}")
+            // Catch linkage/verification errors as well as ordinary failures,
+            // but surface them: silently returning [] would select iroh's
+            // known-broken Android default-resolver path.
+            val message = "get_dns_servers failed: ${e.message}"
+            if (servers.length() == 0) {
+                Log.e("iroh-http-dns", message)
+                return invoke.reject(message)
+            }
+            Log.w("iroh-http-dns", "$message; continuing with collected servers")
+        }
+        if (servers.length() == 0) {
+            val details = if (rejected.isEmpty()) {
+                "Android reported no DNS servers for any active network"
+            } else {
+                "all platform DNS servers were unusable: ${rejected.joinToString("; ")}"
+            }
+            return invoke.reject(details)
+        }
+        if (rejected.isNotEmpty()) {
+            Log.w(
+                "iroh-http-dns",
+                "ignoring unusable DNS server(s): ${rejected.joinToString("; ")}"
+            )
         }
         val ret = JSObject()
         ret.put("servers", servers)
+        invoke.resolve(ret)
+    }
+
+    /**
+     * Return every usable address on an operational Android interface.
+     *
+     * `if-addrs` 0.15 cannot be linked on this plugin's minSdk 21–23 because
+     * Android introduced libc `getifaddrs` only in API 24. Both APIs below are
+     * available on API 21: LinkProperties supplies active-network addresses,
+     * while NetworkInterface enumeration also retains physical LAN interfaces
+     * hidden behind a VPN/default network.
+     */
+    @Command
+    fun get_interface_addresses(invoke: Invoke) {
+        val addresses = linkedSetOf<String>()
+
+        try {
+            val cm = activity.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+            if (cm != null) {
+                @Suppress("DEPRECATION")
+                for (network in cm.allNetworks) {
+                    val props = cm.getLinkProperties(network) ?: continue
+                    val interfaceName = props.interfaceName ?: continue
+                    val networkInterface = try {
+                        NetworkInterface.getByName(interfaceName)
+                    } catch (e: Throwable) {
+                        Log.w(
+                            "iroh-http-network",
+                            "could not resolve interface $interfaceName: ${e.message}"
+                        )
+                        null
+                    } ?: continue
+                    addOperationalInterfaceAddresses(
+                        addresses,
+                        networkInterface,
+                        props.linkAddresses.map { it.address }
+                    )
+                }
+            }
+        } catch (e: Throwable) {
+            Log.w("iroh-http-network", "LinkProperties inventory failed: ${e.message}")
+        }
+
+        try {
+            val interfaces = NetworkInterface.getNetworkInterfaces()
+            while (interfaces != null && interfaces.hasMoreElements()) {
+                val networkInterface = interfaces.nextElement()
+                val inetAddresses = mutableListOf<InetAddress>()
+                val values = networkInterface.inetAddresses
+                while (values.hasMoreElements()) inetAddresses.add(values.nextElement())
+                addOperationalInterfaceAddresses(addresses, networkInterface, inetAddresses)
+            }
+        } catch (e: Throwable) {
+            Log.w("iroh-http-network", "NetworkInterface inventory failed: ${e.message}")
+        }
+
+        val ret = JSObject()
+        ret.put("addresses", JSONArray(addresses.toList()))
         invoke.resolve(ret)
     }
 
@@ -296,7 +449,7 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
                         val addrs = JSONArray()
                         // #346: a direct `ip:port` address published by the
                         // advertiser lets this peer be dialed over the LAN. It
-                        // already carries the real bound QUIC port.
+                        // already carries the candidate's authoritative port.
                         var hasAddressTxt = false
                         resolved.attributes["address"]?.let { b ->
                             val address = String(b)
@@ -309,7 +462,7 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
                         // a FALLBACK for advertisers that publish no `address`
                         // TXT (e.g. a desktop peer whose real QUIC port rides in
                         // the SRV record). When an `address` TXT is present it
-                        // already carries the real bound QUIC port, so appending
+                        // already carries its authoritative port, so appending
                         // SRV would inject a bogus second target — Android's own
                         // advertiser uses SRV port 1 and iOS's NWListener port is
                         // unrelated to QUIC. Also skip placeholder SRV ports
@@ -417,8 +570,8 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
             args.relay?.let { setAttribute("relay", it) }
             // #346: publish the node's direct `ip:port` so peers can dial it
             // over the LAN. The SRV port above is a placeholder (connections use
-            // node-id, not the SRV port), so the reconciled address — carrying
-            // the real bound QUIC port — travels in this `address` TXT instead.
+            // node-id, not the SRV port), so the complete dialable candidate
+            // travels in this `address` TXT instead.
             args.address?.let { setAttribute("address", it) }
         }
 

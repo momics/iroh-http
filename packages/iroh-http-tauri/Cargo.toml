@@ -52,6 +52,13 @@ tracing = "0.1"
 # version already in the tree so no second copy is linked.
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 
+# iOS direct-address fallback: enumerate every active interface instead of
+# assuming a default IPv4/IPv6 route exists. Android cannot use if-addrs 0.15:
+# its getifaddrs call requires API 24 while this plugin supports API 21. Android
+# inventory therefore comes from the API-21-safe native mobile bridge.
+[target.'cfg(target_os = "ios")'.dependencies]
+if-addrs = "0.15"
+
 # Desktop only: mDNS via Rust mdns-sd. On mobile (iOS/Android) mDNS is handled
 # by the native platform layer (NWBrowser / NsdManager) via the mobile bridge.
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]

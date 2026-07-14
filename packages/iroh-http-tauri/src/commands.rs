@@ -58,6 +58,15 @@ pub struct EndpointInfoPayload {
     pub node_id: String,
 }
 
+/// Whether endpoint creation needs the mobile platform DNS bridge.
+///
+/// DNS discovery can be disabled while relay or proxy hostnames still need
+/// resolution, so only the stronger fully-offline mode skips the native query.
+#[cfg(any(mobile, test))]
+fn should_query_mobile_dns(opts: &NodeOptions) -> bool {
+    !opts.networking.disabled
+}
+
 /// Bind an Iroh endpoint and return a handle + identity info.
 #[command]
 pub async fn create_endpoint<R: tauri::Runtime>(
@@ -137,13 +146,18 @@ pub async fn create_endpoint<R: tauri::Runtime>(
     // (Android has no `/etc/resolv.conf` and needs a JNI-initialised
     // `ndk_context`), so relay/pkarr/DNS-discovery lookups time out. Query the
     // platform's active nameservers natively and hand them to the endpoint.
-    // Best-effort: on failure or an empty result we fall back to iroh's default
-    // resolver (which works on iOS/desktop).
+    // An empty result falls back to iroh's default resolver (works on iOS).
+    // A native error is fatal: on Android the default path is exactly the
+    // unavailable resolver this bridge exists to replace, and silently taking
+    // it would create a node whose DNS requests only time out.
     #[cfg(mobile)]
     let opts = {
         let mut opts = opts;
-        if let Some(mdns) = app.try_state::<crate::mobile_mdns::MobileMdns<R>>() {
-            if let Ok(servers) = mdns.get_dns_servers() {
+        if should_query_mobile_dns(&opts) {
+            if let Some(mdns) = app.try_state::<crate::mobile_mdns::MobileMdns<R>>() {
+                let servers = mdns.get_dns_servers().map_err(|e| {
+                    format_error_json("REFUSED", format!("failed to query platform DNS: {e}"))
+                })?;
                 if !servers.is_empty() {
                     opts.discovery.dns_nameservers = servers;
                 }
@@ -313,12 +327,15 @@ pub fn home_relay(endpoint_handle: u64) -> Result<Option<String>, String> {
 
 /// Discovery info: node id + dialable direct `ip:port` address + relay URL.
 ///
-/// `directAddress` carries the real bound QUIC port so it can be advertised for
-/// LAN direct-dial. Desktop resolves it from the core's `dialable_direct_address`
-/// (mirrors the discovery-crate helper); mobile reuses `primary_direct_addr`,
-/// which additionally falls back to the OS routing table when the iOS endpoint
-/// enumerates no usable direct address at advertise time (#346).
+/// `directAddress` carries the candidate's authoritative dialable port. A real
+/// local or reflexive QAD port is preserved verbatim; only a platform
+/// placeholder (`:0`/`:1`) borrows a same-family bound QUIC port. Desktop
+/// resolves it from the core's `dialable_direct_address` (mirrors the
+/// discovery-crate helper); mobile reuses `primary_direct_addr`, which also
+/// falls back to the active OS interface inventory when the endpoint enumerates
+/// no usable direct address at advertise time (#346).
 #[command]
+#[cfg(not(mobile))]
 pub fn discovery_info(endpoint_handle: u64) -> Result<DiscoveryInfoPayload, String> {
     let ep = state::get_endpoint(endpoint_handle).ok_or_else(|| {
         format_error_json(
@@ -326,14 +343,31 @@ pub fn discovery_info(endpoint_handle: u64) -> Result<DiscoveryInfoPayload, Stri
             format!("invalid endpoint handle: {endpoint_handle}"),
         )
     })?;
-    #[cfg(not(mobile))]
     let direct_address = ep.dialable_direct_address();
-    #[cfg(not(mobile))]
     let direct_addresses = ep.dialable_direct_addresses();
-    #[cfg(mobile)]
-    let direct_address = primary_direct_addr(&ep);
-    #[cfg(mobile)]
-    let direct_addresses = primary_direct_addrs(&ep);
+    Ok(DiscoveryInfoPayload {
+        node_id: ep.node_id().to_string(),
+        direct_address,
+        direct_addresses,
+        relay_url: ep.home_relay(),
+    })
+}
+
+#[command]
+#[cfg(mobile)]
+pub fn discovery_info<R: tauri::Runtime>(
+    _app: tauri::AppHandle<R>,
+    state: tauri::State<'_, crate::mobile_mdns::MobileMdns<R>>,
+    endpoint_handle: u64,
+) -> Result<DiscoveryInfoPayload, String> {
+    let ep = state::get_endpoint(endpoint_handle).ok_or_else(|| {
+        format_error_json(
+            "INVALID_HANDLE",
+            format!("invalid endpoint handle: {endpoint_handle}"),
+        )
+    })?;
+    let direct_addresses = primary_direct_addrs(&ep, mobile_routable_ips(&state));
+    let direct_address = direct_addresses.first().cloned();
     Ok(DiscoveryInfoPayload {
         node_id: ep.node_id().to_string(),
         direct_address,
@@ -1636,11 +1670,11 @@ pub fn advertise_peer<R: tauri::Runtime>(
     })?;
     let node_id = ep.node_id().to_string();
     let relay = ep.home_relay();
-    // #346: publish a primary direct `ip:port` address so browsing peers can
-    // dial this node over the LAN. The address carries the real bound QUIC port
-    // (reconciled from `bound_sockets`), never port 0 — which is what made iOS
-    // nodes undialable ("invalid socket address syntax" at the dialer).
-    let address = primary_direct_addr(&ep);
+    // #346: publish a primary direct `ip:port` candidate so browsing peers can
+    // dial this node over the LAN. A real local or reflexive port is
+    // authoritative; only a `:0`/`:1` placeholder borrows a same-family bound
+    // port. No placeholder reaches the dialer.
+    let address = primary_direct_addr(&ep, mobile_routable_ips(&state));
     let handle = state
         .advertise_peer_start(
             &service_name,
@@ -1659,112 +1693,160 @@ pub fn advertise_peer<R: tauri::Runtime>(
 /// port and is neither loopback nor unspecified). When the endpoint enumerates
 /// no such address — the iOS failure mode, where `ip_addrs()` yields nothing
 /// usable at advertise time even though the QUIC socket is bound — it falls
-/// back to combining a routable local IP (discovered from the OS routing table)
-/// with the real bound QUIC port.
+/// back to combining a routable IP from the active interface inventory with a
+/// same-family bound QUIC port.
 #[cfg(mobile)]
-fn primary_direct_addr(ep: &iroh_http_core::IrohEndpoint) -> Option<String> {
+fn primary_direct_addr(
+    ep: &iroh_http_core::IrohEndpoint,
+    fallback_ips: impl IntoIterator<Item = std::net::IpAddr>,
+) -> Option<String> {
     let reconciled = ep.direct_socket_addrs();
     let bound_sockets = ep.bound_sockets();
-    select_primary_direct_addr(&reconciled, &bound_sockets, local_routable_ip())
-        .map(|a| a.to_string())
+    select_primary_direct_addr(&reconciled, &bound_sockets, fallback_ips).map(|a| a.to_string())
 }
 
 /// All routable direct addresses to advertise on mobile (#348).
 ///
-/// The plural of [`primary_direct_addr`]: every routable reconciled address is
-/// paired with a real same-family bound QUIC port and kept, so a device on both
-/// a VPN `10.x` interface and the real LAN advertises both and the dialing peer
-/// can reach it over the LAN instead of only the first-enumerated interface.
+/// The plural of [`primary_direct_addr`]: every routable real-port candidate is
+/// kept verbatim, while only `:0`/`:1` placeholders borrow a same-family bound
+/// port. A device on both a VPN `10.x` interface and the real LAN therefore
+/// advertises both so the dialing peer can race the usable paths.
 #[cfg(mobile)]
-fn primary_direct_addrs(ep: &iroh_http_core::IrohEndpoint) -> Vec<String> {
+fn primary_direct_addrs(
+    ep: &iroh_http_core::IrohEndpoint,
+    fallback_ips: impl IntoIterator<Item = std::net::IpAddr>,
+) -> Vec<String> {
     let reconciled = ep.direct_socket_addrs();
     let bound_sockets = ep.bound_sockets();
-    select_primary_direct_addrs(&reconciled, &bound_sockets, local_routable_ip())
+    select_primary_direct_addrs(&reconciled, &bound_sockets, fallback_ips)
         .into_iter()
         .map(|a| a.to_string())
         .collect()
 }
 
-/// Discover a routable local IP without enumerating interfaces.
+/// Discover every routable IP on an operational mobile interface.
 ///
-/// A `connect`ed UDP socket sends no packets but makes the kernel select the
-/// source address it would route from to reach the target, i.e. the primary
-/// egress interface's LAN IP. The target is a TEST-NET-1 (RFC 5737) address —
-/// reserved, never actually contacted — chosen only to force default-route
-/// source selection. Returns `None` on hosts with no usable route.
-#[cfg(mobile)]
-fn local_routable_ip() -> Option<std::net::IpAddr> {
-    let sock = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
-    sock.connect("192.0.2.1:9").ok()?;
-    let ip = sock.local_addr().ok()?.ip();
-    if ip.is_loopback() || ip.is_unspecified() {
-        None
-    } else {
-        Some(ip)
+/// Interface inventory is required here: asking the kernel for a source address
+/// by connecting to an off-link documentation address only exercises a default
+/// route, and therefore misses IPv6 ULA/local-only LANs. Keeping all usable
+/// interface addresses also preserves the VPN + physical-LAN multi-path case.
+#[cfg(target_os = "ios")]
+fn mobile_routable_ips<R: tauri::Runtime>(
+    _state: &crate::mobile_mdns::MobileMdns<R>,
+) -> Vec<std::net::IpAddr> {
+    match if_addrs::get_if_addrs() {
+        Ok(interfaces) => select_routable_interface_ips(
+            interfaces
+                .into_iter()
+                .map(|interface| (interface.is_oper_up(), interface.ip())),
+        ),
+        Err(reason) => {
+            tracing::warn!(%reason, "iroh-http: failed to enumerate mobile interface addresses");
+            Vec::new()
+        }
     }
+}
+
+#[cfg(target_os = "android")]
+fn mobile_routable_ips<R: tauri::Runtime>(
+    state: &crate::mobile_mdns::MobileMdns<R>,
+) -> Vec<std::net::IpAddr> {
+    match state.get_interface_addresses() {
+        Ok(addresses) => parse_mobile_interface_ips(addresses),
+        Err(reason) => {
+            // Interface fallback supplements iroh's own candidates; failure to
+            // enumerate it must not prevent endpoint use or relay fallback.
+            tracing::warn!(%reason, "iroh-http: native Android interface inventory failed");
+            Vec::new()
+        }
+    }
+}
+
+/// Select usable IPs from a platform interface inventory.
+///
+/// The `(is_operational, ip)` boundary keeps platform collection separate from
+/// deterministic policy tests. Enumeration order is preserved and duplicates,
+/// loopback, unspecified, link-local, and inactive addresses are removed.
+#[cfg(any(mobile, test))]
+fn select_routable_interface_ips(
+    interfaces: impl IntoIterator<Item = (bool, std::net::IpAddr)>,
+) -> Vec<std::net::IpAddr> {
+    let mut out = Vec::new();
+    for (_, ip) in interfaces
+        .into_iter()
+        .filter(|(is_operational, _)| *is_operational)
+        .filter(|(_, ip)| is_routable_ip(ip))
+    {
+        if !out.contains(&ip) {
+            out.push(ip);
+        }
+    }
+    out
+}
+
+/// Parse native mobile interface literals and apply the same routability and
+/// deduplication policy as the iOS Rust-side interface inventory.
+#[cfg(any(mobile, test))]
+fn parse_mobile_interface_ips(
+    addresses: impl IntoIterator<Item = String>,
+) -> Vec<std::net::IpAddr> {
+    let parsed = addresses.into_iter().filter_map(|literal| match literal.parse() {
+        Ok(ip) => Some((true, ip)),
+        Err(reason) => {
+            tracing::warn!(%literal, %reason, "iroh-http: ignoring invalid native interface address");
+            None
+        }
+    });
+    select_routable_interface_ips(parsed)
 }
 
 /// Choose the primary direct address to advertise (#346), pure for testing.
 ///
-/// Picks a routable IP (a reconciled address that is not loopback/unspecified,
-/// else `fallback_ip`) and pairs it with a **same-family, real bound QUIC
-/// port**. iOS enumerates `ip_addrs()` with a placeholder port (`:1`) while the
-/// true port lives in `bound_sockets()`, so a bound port is preferred; the
-/// reconciled address's own port is only a fallback when no bound port exists.
-/// The borrowed bound port must belong to a socket of the same address family
-/// as the chosen IP — a dual-stack node can bind IPv6 and IPv4 on different
-/// ports, and a cross-family pairing publishes an undialable address (#350
-/// F14). Placeholder ports (`0`/`1`) are never borrowed (#350 F5). Returns
-/// `None` when neither a routable IP nor a usable same-family port can be found.
+/// Picks a routable reconciled address, else combines the fallback IPs with a
+/// **same-family, real bound QUIC port**. A reconciled candidate with a real
+/// port is authoritative and returned unchanged: reflexive QAD ports
+/// intentionally differ from the local listener. Only iOS's `:0`/`:1`
+/// placeholders borrow from `bound_sockets()`. The borrowed port must belong
+/// to the same address family; otherwise the endpoint is not listening at the
+/// synthesized address (#350 F14). Returns `None` when no candidate is usable.
 #[cfg(any(mobile, test))]
-fn select_primary_direct_addr(
+fn select_primary_direct_addr<I>(
     reconciled: &[std::net::SocketAddr],
     bound_sockets: &[std::net::SocketAddr],
-    fallback_ip: Option<std::net::IpAddr>,
-) -> Option<std::net::SocketAddr> {
-    let is_routable = |a: &std::net::SocketAddr| is_routable_ip(&a.ip());
-    let routable = reconciled.iter().copied().find(is_routable);
-    let ip = routable
-        .map(|a| a.ip())
-        .or_else(|| fallback_ip.filter(is_routable_ip))?;
-    // Prefer a same-family, non-placeholder bound QUIC port; the reconciled
-    // address's own (already same-family) port is a last resort so a working
-    // advertisement is never dropped.
-    let want_v6 = ip.is_ipv6();
-    let port = bound_sockets
-        .iter()
-        .find(|s| s.is_ipv6() == want_v6 && !is_placeholder_port(s.port()))
-        .map(|s| s.port())
-        .or_else(|| {
-            routable
-                .map(|a| a.port())
-                .filter(|p| !is_placeholder_port(*p))
-        })?;
-    Some(std::net::SocketAddr::new(ip, port))
+    fallback_ips: I,
+) -> Option<std::net::SocketAddr>
+where
+    I: IntoIterator<Item = std::net::IpAddr>,
+{
+    select_primary_direct_addrs(reconciled, bound_sockets, fallback_ips)
+        .into_iter()
+        .next()
 }
 
 /// All routable direct addresses (#348), pure for testing.
 ///
-/// The plural of [`select_primary_direct_addr`]: every routable reconciled IP is
-/// paired with a real same-family bound QUIC port (falling back to its own port
-/// when non-placeholder) and kept in enumeration order, deduplicated. When no
-/// reconciled address is routable, it synthesizes one from `fallback_ip` + the
-/// real bound port, mirroring the singular selector's iOS fallback. Unlike the
-/// singular selector, a routable IP whose port cannot be resolved is skipped
-/// rather than aborting the whole list, so one bad candidate never suppresses
-/// the others.
+/// The plural of [`select_primary_direct_addr`]: every routable real-port
+/// candidate is preserved verbatim, while only `:0`/`:1` placeholders borrow a
+/// same-family bound QUIC port. Results stay in enumeration order and are
+/// deduplicated. Every fallback interface IP is synthesized with a same-family
+/// bound port unless that exact candidate is already present; one IPv4 VPN
+/// candidate therefore cannot suppress a different IPv4 LAN candidate. One bad
+/// candidate never suppresses the others. This is the single policy
+/// implementation used by both the singular and plural advertisement APIs.
 #[cfg(any(mobile, test))]
-fn select_primary_direct_addrs(
+fn select_primary_direct_addrs<I>(
     reconciled: &[std::net::SocketAddr],
     bound_sockets: &[std::net::SocketAddr],
-    fallback_ip: Option<std::net::IpAddr>,
-) -> Vec<std::net::SocketAddr> {
-    let port_for = |want_v6: bool, own: u16| -> Option<u16> {
+    fallback_ips: I,
+) -> Vec<std::net::SocketAddr>
+where
+    I: IntoIterator<Item = std::net::IpAddr>,
+{
+    let bound_port_for = |want_v6: bool| -> Option<u16> {
         bound_sockets
             .iter()
             .find(|s| s.is_ipv6() == want_v6 && !is_placeholder_port(s.port()))
             .map(|s| s.port())
-            .or_else(|| (!is_placeholder_port(own)).then_some(own))
     };
     let mut out: Vec<std::net::SocketAddr> = Vec::new();
     for a in reconciled
@@ -1772,17 +1854,22 @@ fn select_primary_direct_addrs(
         .copied()
         .filter(|a| is_routable_ip(&a.ip()))
     {
-        if let Some(port) = port_for(a.ip().is_ipv6(), a.port()) {
-            let sa = std::net::SocketAddr::new(a.ip(), port);
+        let candidate = if is_placeholder_port(a.port()) {
+            bound_port_for(a.is_ipv6()).map(|port| std::net::SocketAddr::new(a.ip(), port))
+        } else {
+            Some(a)
+        };
+        if let Some(sa) = candidate {
             if !out.contains(&sa) {
                 out.push(sa);
             }
         }
     }
-    if out.is_empty() {
-        if let Some(ip) = fallback_ip.filter(is_routable_ip) {
-            if let Some(port) = port_for(ip.is_ipv6(), 0) {
-                out.push(std::net::SocketAddr::new(ip, port));
+    for ip in fallback_ips.into_iter().filter(is_routable_ip) {
+        if let Some(port) = bound_port_for(ip.is_ipv6()) {
+            let candidate = std::net::SocketAddr::new(ip, port);
+            if !out.contains(&candidate) {
+                out.push(candidate);
             }
         }
     }
@@ -2342,8 +2429,32 @@ pub fn unsubscribe_path_changes(endpoint_handle: u64, node_id: String) -> Result
 }
 
 #[cfg(test)]
+mod mobile_dns_policy_tests {
+    use super::should_query_mobile_dns;
+    use iroh_http_core::endpoint::{DiscoveryOptions, NodeOptions};
+
+    #[test]
+    fn offline_endpoints_skip_native_dns_but_online_endpoints_do_not() {
+        let mut offline = NodeOptions::default();
+        offline.networking.disabled = true;
+        assert!(!should_query_mobile_dns(&offline));
+
+        let online_without_discovery = NodeOptions {
+            discovery: DiscoveryOptions::new(None, false),
+            ..Default::default()
+        };
+        assert!(
+            should_query_mobile_dns(&online_without_discovery),
+            "online endpoints may still need DNS for relays or proxies"
+        );
+    }
+}
+
+#[cfg(test)]
 mod primary_direct_addr_tests {
-    use super::select_primary_direct_addr;
+    use super::{
+        parse_mobile_interface_ips, select_primary_direct_addr, select_routable_interface_ips,
+    };
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
     fn v4(a: [u8; 4], port: u16) -> SocketAddr {
@@ -2365,6 +2476,37 @@ mod primary_direct_addr_tests {
     }
 
     #[test]
+    fn interface_fallback_keeps_ula_without_a_default_ipv6_route() {
+        let ula = IpAddr::V6("fd12:3456:789a::7".parse().unwrap());
+        let lan = IpAddr::V4(Ipv4Addr::new(192, 168, 50, 227));
+        let inventory = [
+            (true, ula),
+            (true, lan),
+            (true, IpAddr::V6("fe80::7".parse().unwrap())),
+            (false, IpAddr::V6("2001:db8::9".parse().unwrap())),
+        ];
+
+        assert_eq!(select_routable_interface_ips(inventory), vec![ula, lan]);
+    }
+
+    #[test]
+    fn android_native_interface_literals_feed_plural_selector() {
+        let vpn = IpAddr::V4(Ipv4Addr::new(10, 12, 222, 17));
+        let lan = IpAddr::V4(Ipv4Addr::new(192, 168, 50, 227));
+        let ula = IpAddr::V6("fd12:3456:789a::7".parse().unwrap());
+        let literals = vec![
+            vpn.to_string(),
+            lan.to_string(),
+            ula.to_string(),
+            "fe80::7".to_string(),
+            "not-an-ip".to_string(),
+            lan.to_string(),
+        ];
+
+        assert_eq!(parse_mobile_interface_ips(literals), vec![vpn, lan, ula]);
+    }
+
+    #[test]
     fn prefers_routable_reconciled_addr() {
         let reconciled = vec![v4([192, 168, 50, 227], 62546)];
         let out = select_primary_direct_addr(&reconciled, &bound_v4(62546), None);
@@ -2379,6 +2521,16 @@ mod primary_direct_addr_tests {
         let reconciled = vec![v4([192, 168, 50, 227], 1)];
         let out = select_primary_direct_addr(&reconciled, &bound_v4(62546), None);
         assert_eq!(out, Some(v4([192, 168, 50, 227], 62546)));
+    }
+
+    #[test]
+    fn preserves_real_reflexive_port() {
+        // A QAD/reflexive candidate's public port is authoritative even when
+        // it differs from the local listener port.
+        let reconciled = vec![v4([192, 26, 168, 188], 40349)];
+        let out = select_primary_direct_addr(&reconciled, &bound_v4(62546), None);
+
+        assert_eq!(out, Some(v4([192, 26, 168, 188], 40349)));
     }
 
     #[test]
@@ -2397,6 +2549,22 @@ mod primary_direct_addr_tests {
         let reconciled = vec![v4([192, 168, 50, 227], 1)];
         let out = select_primary_direct_addr(&reconciled, &[], None);
         assert_eq!(out, None);
+    }
+
+    #[test]
+    fn skips_unrepairable_placeholder_and_keeps_later_real_candidate() {
+        // A bad first candidate must not suppress a later dialable one. Here
+        // the IPv6 placeholder has no IPv6 listener, while the IPv4 reflexive
+        // candidate is already complete and authoritative.
+        let reconciled = vec![
+            v6([0x2001, 0xdb8, 0, 0, 0, 0, 0, 7], 1),
+            v4([192, 26, 168, 188], 40349),
+        ];
+
+        assert_eq!(
+            select_primary_direct_addr(&reconciled, &bound_v4(62546), None),
+            Some(v4([192, 26, 168, 188], 40349))
+        );
     }
 
     #[test]
@@ -2500,7 +2668,81 @@ mod primary_direct_addr_tests {
         use super::select_primary_direct_addrs;
         let reconciled = vec![v4([10, 12, 222, 17], 56604), v4([192, 168, 50, 227], 56604)];
         let out = select_primary_direct_addrs(&reconciled, &bound_v4(56604), None);
-        assert_eq!(out, vec![v4([10, 12, 222, 17], 56604), v4([192, 168, 50, 227], 56604)]);
+        assert_eq!(
+            out,
+            vec![v4([10, 12, 222, 17], 56604), v4([192, 168, 50, 227], 56604)]
+        );
+    }
+
+    #[test]
+    fn plural_interface_fallback_adds_lan_beside_same_family_vpn() {
+        use super::select_primary_direct_addrs;
+        let vpn = IpAddr::V4(Ipv4Addr::new(10, 12, 222, 17));
+        let lan = IpAddr::V4(Ipv4Addr::new(192, 168, 50, 227));
+        let reconciled = vec![SocketAddr::new(vpn, 56604)];
+
+        assert_eq!(
+            select_primary_direct_addrs(&reconciled, &bound_v4(56604), [vpn, lan]),
+            vec![SocketAddr::new(vpn, 56604), SocketAddr::new(lan, 56604)]
+        );
+    }
+
+    #[test]
+    fn plural_interface_fallback_keeps_all_same_family_when_reconciled_is_empty() {
+        use super::select_primary_direct_addrs;
+        let vpn = IpAddr::V4(Ipv4Addr::new(10, 12, 222, 17));
+        let lan = IpAddr::V4(Ipv4Addr::new(192, 168, 50, 227));
+
+        assert_eq!(
+            select_primary_direct_addrs(&[], &bound_v4(56604), [vpn, lan]),
+            vec![SocketAddr::new(vpn, 56604), SocketAddr::new(lan, 56604)]
+        );
+    }
+
+    #[test]
+    fn plural_preserves_each_real_candidate_port() {
+        use super::select_primary_direct_addrs;
+        let reconciled = vec![
+            v4([192, 168, 50, 227], 62546),
+            v4([192, 26, 168, 188], 40349),
+        ];
+
+        assert_eq!(
+            select_primary_direct_addrs(&reconciled, &bound_v4(62546), None),
+            reconciled
+        );
+    }
+
+    #[test]
+    fn plural_adds_ipv6_interface_fallback_when_only_ipv4_was_enumerated() {
+        use super::select_primary_direct_addrs;
+        let reconciled = vec![v4([192, 168, 50, 227], 62546)];
+        let fallback_v6 = IpAddr::V6(std::net::Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 42));
+        let bound = vec![v4([0, 0, 0, 0], 62546), v6([0, 0, 0, 0, 0, 0, 0, 0], 60000)];
+
+        assert_eq!(
+            select_primary_direct_addrs(&reconciled, &bound, [fallback_v6]),
+            vec![
+                v4([192, 168, 50, 227], 62546),
+                SocketAddr::new(fallback_v6, 60000),
+            ]
+        );
+    }
+
+    #[test]
+    fn plural_adds_ipv4_interface_fallback_when_only_ipv6_was_enumerated() {
+        use super::select_primary_direct_addrs;
+        let reconciled = vec![v6([0x2001, 0xdb8, 0, 0, 0, 0, 0, 7], 60000)];
+        let fallback_v4 = IpAddr::V4(Ipv4Addr::new(192, 168, 50, 227));
+        let bound = vec![v6([0, 0, 0, 0, 0, 0, 0, 0], 60000), v4([0, 0, 0, 0], 62546)];
+
+        assert_eq!(
+            select_primary_direct_addrs(&reconciled, &bound, [fallback_v4]),
+            vec![
+                v6([0x2001, 0xdb8, 0, 0, 0, 0, 0, 7], 60000),
+                SocketAddr::new(fallback_v4, 62546),
+            ]
+        );
     }
 
     #[test]
@@ -2517,7 +2759,10 @@ mod primary_direct_addr_tests {
             v4([10, 12, 222, 17], 56604),
         ];
         let out = select_primary_direct_addrs(&reconciled, &bound_v4(56604), None);
-        assert_eq!(out, vec![v4([10, 12, 222, 17], 56604), v4([192, 168, 50, 227], 56604)]);
+        assert_eq!(
+            out,
+            vec![v4([10, 12, 222, 17], 56604), v4([192, 168, 50, 227], 56604)]
+        );
     }
 
     #[test]

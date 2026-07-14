@@ -93,8 +93,10 @@ pub const TXT_RELAY: &str = "relay";
 ///
 /// Advertisers whose SRV port is not the real QUIC port — notably the iOS
 /// native `NWListener`, whose UDP port is unrelated to the QUIC socket —
-/// publish the dialable `ip:<bound QUIC port>` here instead. Browsers surface
-/// it as a direct address so the peer can be dialed over the LAN. See #346.
+/// publish the complete dialable `ip:port` candidate here instead. Real local
+/// and reflexive candidate ports are authoritative; only `:0`/`:1` platform
+/// placeholders borrow a same-family bound port. Browsers surface the result as
+/// a direct address so the peer can be dialed over the LAN. See #346/#350.
 pub const TXT_ADDRESS: &str = "address";
 
 /// Encode an endpoint id as lowercase RFC 4648 base32 (no padding) — a 52-char
@@ -224,16 +226,14 @@ pub async fn browse_peers(
 ///
 /// Selects a dialable `ip:port` to advertise in the `address` TXT.
 ///
-/// Picks the first routable IP (skipping loopback, unspecified and link-local
-/// addresses) and pairs it with a **same-family** bound QUIC port. The ports
-/// reported by `ip_addrs()` can be placeholders (`:0`/`:1`) rather than the
-/// socket the endpoint actually listens on (#346), so the port must come from
-/// `bound_sockets`. Crucially the borrowed port must belong to a socket of the
-/// *same* address family as the chosen IP: a dual-stack node can bind IPv6 on
-/// one port and IPv4 on another, and pairing an IPv4 IP with the IPv6 socket's
-/// port publishes an undialable address (#350 F14). Returns `None` when no
-/// routable IP has a usable same-family bound port, in which case no `address`
-/// TXT is published and peers fall back to relay/SRV.
+/// Picks the first routable candidate (skipping loopback, unspecified and
+/// link-local addresses). Candidates with a real port are preserved verbatim:
+/// reflexive QAD ports intentionally differ from the local listener port.
+/// Only a placeholder (`:0`/`:1`) borrows a **same-family** bound QUIC port
+/// (#346). A dual-stack node can bind IPv6 and IPv4 on different ports, so a
+/// placeholder without a same-family listener is skipped (#350 F14). Returns
+/// `None` when no candidate is usable, in which case no `address` TXT is
+/// published and peers fall back to relay/SRV.
 ///
 /// Interface ranking (preferring the LAN subnet of the browsing peer over a
 /// VPN/egress NIC) is tracked separately in #348.
@@ -243,14 +243,16 @@ fn select_advertise_address(
 ) -> Option<String> {
     ip_addrs
         .iter()
-        .map(SocketAddr::ip)
-        .filter(is_routable_ip)
-        .find_map(|ip| {
-            let want_v6 = ip.is_ipv6();
+        .copied()
+        .filter(|addr| is_routable_ip(&addr.ip()))
+        .find_map(|addr| {
+            if !is_placeholder_port(addr.port()) {
+                return Some(addr.to_string());
+            }
             bound_sockets
                 .iter()
-                .find(|s| s.is_ipv6() == want_v6 && !is_placeholder_port(s.port()))
-                .map(|s| SocketAddr::new(ip, s.port()).to_string())
+                .find(|s| s.is_ipv6() == addr.is_ipv6() && !is_placeholder_port(s.port()))
+                .map(|s| SocketAddr::new(addr.ip(), s.port()).to_string())
         })
 }
 
@@ -308,11 +310,11 @@ pub fn advertise_peer(
     if let Some(relay) = node_addr.relay_urls().next() {
         txt.push((TXT_RELAY.to_string(), relay.to_string()));
     }
-    // #350 review W1: publish a dialable `ip:<bound QUIC port>` so mobile
+    // #350 review W1: publish a complete dialable `ip:port` candidate so mobile
     // browsers — which read only the `address`/`relay` TXT and never resolve
     // this record's SRV/A — can direct-dial this node over the LAN instead of
-    // falling back to relay-only. Pair the IP with a same-family bound port
-    // (#350 F14).
+    // falling back to relay-only. Preserve a real candidate port (including a
+    // reflexive QAD port); only placeholders borrow a same-family bound port.
     if let Some(address) = select_advertise_address(&socket_addrs, &bound_sockets) {
         txt.push((TXT_ADDRESS.to_string(), address));
     }
@@ -472,7 +474,7 @@ mod tests {
     #[test]
     fn select_advertise_address_pairs_routable_ip_with_bound_port() {
         // Regression: #350 review W1 — a desktop advertiser must publish a
-        // dialable `ip:<bound QUIC port>` in the `address` TXT so mobile
+        // complete dialable `ip:port` in the `address` TXT so mobile
         // browsers (iOS NWBrowser can't resolve SRV/A at all; Android
         // browse_peers reads only the `address`/`relay` attrs) can direct-dial
         // it over the LAN instead of falling back to relay-only.
@@ -484,6 +486,20 @@ mod tests {
         let addr = select_advertise_address(&ip_addrs, &bound)
             .expect("a routable address must be selected");
         assert_eq!(addr, "192.168.1.42:59234");
+    }
+
+    #[test]
+    fn select_advertise_address_preserves_real_reflexive_port() {
+        // A reflexive QAD candidate carries the public port observed by the
+        // relay probe. It intentionally differs from the local listener port
+        // and must be advertised verbatim.
+        let ip_addrs = vec!["192.26.168.188:40349".parse().unwrap()];
+        let bound = vec!["0.0.0.0:62546".parse().unwrap()];
+
+        assert_eq!(
+            select_advertise_address(&ip_addrs, &bound).as_deref(),
+            Some("192.26.168.188:40349")
+        );
     }
 
     #[test]

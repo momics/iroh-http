@@ -5153,6 +5153,7 @@ dependencies = [
  "base32",
  "base64 0.22.1",
  "bytes",
+ "if-addrs",
  "iroh",
  "iroh-http-adapter",
  "iroh-http-core",

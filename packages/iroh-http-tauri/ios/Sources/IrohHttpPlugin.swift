@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import Network
 import Tauri
@@ -578,6 +579,67 @@ class IrohHttpPlugin: Plugin {
             }
         }
         invoke.resolve()
+    }
+
+    /// Convert one POSIX interface address to a numeric IP literal. Conversion
+    /// failures are isolated to the current entry so one malformed sockaddr
+    /// cannot hide otherwise usable VPN/LAN candidates.
+    private func numericInterfaceAddress(_ address: UnsafePointer<sockaddr>) -> String? {
+        let family = Int32(address.pointee.sa_family)
+        guard family == AF_INET || family == AF_INET6 else { return nil }
+
+        var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+        let status = getnameinfo(
+            address,
+            socklen_t(address.pointee.sa_len),
+            &host,
+            socklen_t(host.count),
+            nil,
+            0,
+            NI_NUMERICHOST | NI_NUMERICSCOPE
+        )
+        guard status == 0 else { return nil }
+
+        // Interface inventory crosses to Rust as `IpAddr` strings. A scoped
+        // link-local value may include `%<index>`; retain the IP literal only.
+        // Rust performs the final routability filter and drops link-local IPs.
+        let rendered = String(cString: host)
+        let literal = String(rendered.split(separator: "%", maxSplits: 1)[0])
+        if family == AF_INET {
+            guard let ip = IPv4Address(literal), !ip.isLoopback else { return nil }
+        } else {
+            guard let ip = IPv6Address(literal), !ip.isLoopback else { return nil }
+        }
+        return literal
+    }
+
+    /// Enumerate operational non-loopback interface addresses for mobile
+    /// direct-address fallback. Rust applies the shared routability policy;
+    /// native code is responsible only for safe platform collection.
+    @objc public func get_interface_addresses(_ invoke: Invoke) throws {
+        var interfaces: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&interfaces) == 0 else {
+            invoke.reject("Failed to enumerate iOS interface addresses: \(String(cString: strerror(errno)))")
+            return
+        }
+        defer { freeifaddrs(interfaces) }
+
+        var addresses: Set<String> = []
+        var cursor = interfaces
+        while let interface = cursor {
+            defer { cursor = interface.pointee.ifa_next }
+            let flags = interface.pointee.ifa_flags
+            guard
+                flags & UInt32(IFF_UP) != 0,
+                flags & UInt32(IFF_RUNNING) != 0,
+                flags & UInt32(IFF_LOOPBACK) == 0,
+                let address = interface.pointee.ifa_addr,
+                let literal = numericInterfaceAddress(address)
+            else { continue }
+            addresses.insert(literal)
+        }
+
+        invoke.resolve(["addresses": addresses.sorted()])
     }
 
     /// Query the platform's active-network DNS nameservers.

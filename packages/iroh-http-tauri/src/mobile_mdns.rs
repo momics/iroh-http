@@ -72,7 +72,7 @@ struct AdvertiseStartPayload<'a> {
     relay: Option<&'a str>,
     /// Primary direct `ip:port` address, if known. Published as an `address`
     /// TXT entry so browsing peers can dial this node over the LAN. Carries the
-    /// real bound QUIC port (never port 0). See #346.
+    /// candidate's authoritative real port, never a placeholder. See #346/#350.
     #[serde(skip_serializing_if = "Option::is_none")]
     address: Option<&'a str>,
 }
@@ -100,6 +100,11 @@ struct AdvertiseStartResponse {
 #[derive(Deserialize)]
 struct DnsServersResponse {
     servers: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct InterfaceAddressesResponse {
+    addresses: Vec<String>,
 }
 
 /// A single discovery event from the native layer.
@@ -187,6 +192,19 @@ impl<R: Runtime> MobileMdns<R> {
             .run_mobile_plugin("get_dns_servers", ())
             .map_err(|e| e.to_string())?;
         Ok(resp.servers)
+    }
+
+    /// Query operational interface IPs from the native mobile layer.
+    ///
+    /// Android implements this with API-21-safe `ConnectivityManager`,
+    /// `LinkProperties`, and `NetworkInterface` calls. It cannot use Rust's
+    /// `if-addrs` because Android did not expose `getifaddrs` until API 24.
+    pub fn get_interface_addresses(&self) -> Result<Vec<String>, String> {
+        let resp: InterfaceAddressesResponse = self
+            .0
+            .run_mobile_plugin("get_interface_addresses", ())
+            .map_err(|e| e.to_string())?;
+        Ok(resp.addresses)
     }
 }
 
