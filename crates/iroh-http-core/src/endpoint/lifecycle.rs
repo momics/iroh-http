@@ -48,36 +48,11 @@ impl IrohEndpoint {
         let _ = rx.wait_for(|v| *v).await;
     }
 
-    /// Store a serve handle so that `close()` can drain it.
-    ///
-    /// If `stop_serve()` was called before this (the JS abort raced ahead of
-    /// the napi async setup), the handle is immediately shut down so the
-    /// serve loop drains without a second `stop_serve()` call.
-    pub fn set_serve_handle(&self, handle: crate::http::server::ServeHandle) {
-        // #336: an endpoint has at most one active serve loop. If serve() is
-        // restarted without an explicit stop_serve() first — e.g. the iOS
-        // foreground recovery path re-serves after the app returns to the
-        // foreground — the previously stored ServeHandle would just be dropped.
-        // ServeHandle has no Drop, so the old accept loop keeps running and
-        // competes with the new one for `ep.accept()`. Incoming requests then
-        // land on the stale loop's handler and get its old response (the
-        // "half-live serve answers a blanket 200 instead of the routed status"
-        // symptom). Shut the previous loop down so only the new one accepts.
-        //
-        // Take the previous handle, install the done signal, evaluate the stop
-        // generation, and store the new handle all under ONE continuous hold of
-        // the `serve_handle` lock. Every step is non-blocking (no await), so the
-        // critical section stays short.
-        //
-        // F7: register the new handle under the same `serve_handle` lock that
-        // `set_local_service` bumped `serve_started_gen` under and that
-        // `stop_serve` records `serve_stopped_gen` under. `my_gen` is this
-        // cycle's generation; if a `stop_serve` has been requested for this
-        // generation or a later one (`serve_stopped_gen >= my_gen`), shut the
-        // new handle down. This subsumes the old early-stop boolean and also
-        // closes the restart-with-concurrent-stop race: a stop that targeted
-        // the stale previous handle still stops this cycle because it recorded a
-        // generation >= `my_gen`.
+    /// Install a newly-created serve cycle in the endpoint's identity-scoped
+    /// slot. Called by the common pure-Rust server path before it spawns the
+    /// accept task, so lifecycle control never depends on an adapter handing
+    /// the handle back later.
+    pub(crate) fn register_serve_handle(&self, handle: crate::http::server::ServeHandle) {
         let mut guard = self
             .inner
             .session
@@ -85,9 +60,22 @@ impl IrohEndpoint {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
 
+        if guard
+            .as_ref()
+            .is_some_and(|current| current.is_same_cycle(&handle))
+        {
+            return;
+        }
+
         if let Some(prev) = guard.take() {
             prev.shutdown_and_close();
         }
+
+        // A pure-Rust service has no FFI self-dispatch target, while an FFI
+        // service installs its new weak target only after this token is active.
+        // Clearing here prevents a replacement cycle from briefly routing
+        // self-requests through the previous handler.
+        self.clear_local_service();
 
         *self
             .inner
@@ -95,33 +83,36 @@ impl IrohEndpoint {
             .serve_done_rx
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = Some(handle.subscribe_done());
-
-        let my_gen = self
-            .inner
-            .session
-            .serve_started_gen
-            .load(std::sync::atomic::Ordering::SeqCst);
-        let stopped_gen = self
-            .inner
-            .session
-            .serve_stopped_gen
-            .load(std::sync::atomic::Ordering::SeqCst);
-        if stopped_gen > 0 && stopped_gen >= my_gen {
-            handle.shutdown();
-        }
-
         *guard = Some(handle);
+    }
+
+    /// Confirm the serve handle returned to an adapter.
+    ///
+    /// The common server path already registered this token before returning.
+    /// A matching hand-off is therefore a no-op; a different token is a late
+    /// adapter hand-off for an already-replaced cycle and is shut down without
+    /// disturbing the current cycle.
+    pub fn set_serve_handle(&self, handle: crate::http::server::ServeHandle) {
+        let guard = self
+            .inner
+            .session
+            .serve_handle
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if guard
+            .as_ref()
+            .is_some_and(|current| current.is_same_cycle(&handle))
+        {
+            return;
+        }
+        handle.shutdown_and_close();
     }
 
     /// Signal the serve loop to stop accepting new connections.
     pub fn stop_serve(&self) {
-        // F7: clear the local service, record the stop generation, and shut the
-        // registered handle (if any) under ONE hold of the `serve_handle` lock —
-        // the same lock `set_local_service` and `set_serve_handle` take. This
-        // serializes the stop with a concurrent restart so its side effects
-        // (service clear + generation record) cannot straddle the new cycle's
-        // start. `serve_stopped_gen` is raised to the current `serve_started_gen`
-        // so a not-yet-registered new handle is shut down when it arrives.
+        // Identity-scoped: the lock selects one concrete cycle, and both the
+        // local service clear and shutdown apply to that same token. A later
+        // serve call creates a new token and is not poisoned by this stop.
         let guard = self
             .inner
             .session
@@ -129,16 +120,8 @@ impl IrohEndpoint {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         self.clear_local_service();
-        let g = self
-            .inner
-            .session
-            .serve_started_gen
-            .load(std::sync::atomic::Ordering::SeqCst);
-        self.inner
-            .session
-            .serve_stopped_gen
-            .fetch_max(g, std::sync::atomic::Ordering::SeqCst);
         if let Some(h) = guard.as_ref() {
+            self.inner.session.record_stopped_token(h.token());
             h.shutdown();
         }
     }

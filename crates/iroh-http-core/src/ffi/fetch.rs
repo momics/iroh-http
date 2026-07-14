@@ -249,6 +249,9 @@ where
 fn fetch_error_to_core(e: FetchError) -> CoreError {
     match e {
         FetchError::ConnectionFailed { detail, .. } => CoreError::connection_failed(detail),
+        FetchError::RequestBodyFailed { detail, .. } => {
+            CoreError::internal(format!("request body failed: {detail}"))
+        }
         FetchError::HeaderTooLarge { detail } => CoreError::header_too_large(detail),
         FetchError::BodyTooLarge => CoreError::body_too_large("response body too large"),
         FetchError::Timeout => CoreError::timeout("request timed out"),
