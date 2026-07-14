@@ -32,9 +32,13 @@ pub struct AdvertisementUpdate {
 
 /// An already-started platform advertisement.
 pub trait AdvertisementHandle: Send + Sync + 'static {
+    /// Apply mutable advertisement data. The engine never cancels this future.
     fn update(&self, update: AdvertisementUpdate) -> BoxFuture<'_, Result<(), TransportError>>;
+    /// Mark the handle closed immediately. If an update is in flight, native
+    /// stop must wait until its callback has been observed.
     fn request_close(&self);
-    /// Wait for native unregister/stop. Repeated calls must return the same outcome.
+    /// Wait for in-flight work and native unregister/stop. Repeated calls must
+    /// return the same outcome.
     fn closed(&self) -> BoxFuture<'_, Result<(), TransportError>>;
 }
 
