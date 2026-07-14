@@ -837,7 +837,7 @@ pub fn advertise_peer(
 
 // ── Unit tests ────────────────────────────────────────────────────────────────
 
-#[cfg(test)]
+#[cfg(all(test, feature = "mdns"))]
 mod tests {
     use super::*;
 
