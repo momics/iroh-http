@@ -36,6 +36,23 @@ afterEach(() => {
   clearMocks();
 });
 
+async function resolvesWithin(
+  promise: Promise<unknown>,
+  timeoutMs = 50,
+): Promise<boolean> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise.then(() => true),
+      new Promise<false>((resolve) => {
+        timeout = setTimeout(() => resolve(false), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeout !== undefined) clearTimeout(timeout);
+  }
+}
+
 // ── nextChunk prefix byte protocol ──────────────────────────────────────────
 
 describe("nextChunk prefix byte protocol", () => {
@@ -213,6 +230,181 @@ describe("createNode IPC", () => {
     expect(node.secretKey).toBeUndefined();
     expect(invokedCommands).toContain("plugin:iroh-http|create_endpoint");
     expect(invokedCommands).toContain("plugin:iroh-http|wait_endpoint_closed");
+  });
+});
+
+// ── foreground reconnect ownership ─────────────────────────────────────────
+
+describe("foreground reconnect ownership", () => {
+  beforeEach(() => {
+    mockWindows("main");
+  });
+
+  it("closes the unusable node when async recovery rejects", async () => {
+    const recoveryError = new Error("replacement failed");
+    let surfacedError: unknown;
+    mockIPC((cmd) => {
+      if (cmd === "plugin:iroh-http|create_endpoint") {
+        return {
+          endpointHandle: 1,
+          nodeId: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        };
+      }
+      if (cmd === "plugin:iroh-http|wait_endpoint_closed") {
+        return new Promise(() => {});
+      }
+      if (cmd === "plugin:iroh-http|ping") return false;
+      if (cmd === "plugin:iroh-http|close_endpoint") return null;
+    });
+
+    const { createNode } = await import("../index.ts");
+    const node = await createNode({
+      disableNetworking: true,
+      reconnect: {
+        auto: true,
+        maxRetries: 1,
+        onReconnectNeeded: async () => {
+          throw recoveryError;
+        },
+        onReconnectError: (error) => {
+          surfacedError = error;
+        },
+      },
+    });
+
+    document.dispatchEvent(new Event("visibilitychange"));
+
+    // Rejected recovery must not leave a half-dead node alive. `closed` is the
+    // public hand-off signal for callers that need to retry elsewhere.
+    expect(await resolvesWithin(node.closed)).toBe(true);
+    expect(surfacedError).toBe(recoveryError);
+  });
+
+  it("surfaces both a rejected recovery and a failed fail-safe close", async () => {
+    const recoveryError = new Error("replacement failed");
+    const closeError = new Error("native close failed");
+    const surfacedErrors: unknown[] = [];
+    let resolveBothErrors!: () => void;
+    const bothErrors = new Promise<void>((resolve) => {
+      resolveBothErrors = resolve;
+    });
+
+    mockIPC((cmd) => {
+      if (cmd === "plugin:iroh-http|create_endpoint") {
+        return {
+          endpointHandle: 1,
+          nodeId: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        };
+      }
+      if (cmd === "plugin:iroh-http|wait_endpoint_closed") {
+        return new Promise(() => {});
+      }
+      if (cmd === "plugin:iroh-http|ping") return false;
+      if (cmd === "plugin:iroh-http|close_endpoint") throw closeError;
+    });
+
+    const { createNode } = await import("../index.ts");
+    await createNode({
+      disableNetworking: true,
+      reconnect: {
+        auto: true,
+        maxRetries: 1,
+        onReconnectNeeded: async () => {
+          throw recoveryError;
+        },
+        onReconnectError: (error) => {
+          surfacedErrors.push(error);
+          if (surfacedErrors.length === 2) resolveBothErrors();
+        },
+      },
+    });
+
+    document.dispatchEvent(new Event("visibilitychange"));
+
+    expect(await resolvesWithin(bothErrors)).toBe(true);
+    expect(surfacedErrors).toEqual([recoveryError, closeError]);
+  });
+
+  it("starts only one successful async replacement across foreground events", async () => {
+    let resolveNativeClosed!: () => void;
+    const nativeClosed = new Promise<void>((resolve) => {
+      resolveNativeClosed = resolve;
+    });
+    mockIPC((cmd) => {
+      if (cmd === "plugin:iroh-http|create_endpoint") {
+        return {
+          endpointHandle: 1,
+          nodeId: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        };
+      }
+      if (cmd === "plugin:iroh-http|wait_endpoint_closed") return nativeClosed;
+      if (cmd === "plugin:iroh-http|ping") return false;
+      if (cmd === "plugin:iroh-http|close_endpoint") {
+        resolveNativeClosed();
+        return null;
+      }
+    });
+
+    let replacements = 0;
+    let resolveReplacementStarted!: () => void;
+    const replacementStarted = new Promise<void>((resolve) => {
+      resolveReplacementStarted = resolve;
+    });
+    let resolveReplacement!: () => void;
+    const replacement = new Promise<void>((resolve) => {
+      resolveReplacement = resolve;
+    });
+
+    const { createNode } = await import("../index.ts");
+    const node = await createNode({
+      disableNetworking: true,
+      reconnect: {
+        auto: true,
+        maxRetries: 1,
+        onReconnectNeeded: () => {
+          replacements += 1;
+          resolveReplacementStarted();
+          return replacement;
+        },
+      },
+    });
+
+    document.dispatchEvent(new Event("visibilitychange"));
+    expect(await resolvesWithin(replacementStarted)).toBe(true);
+
+    window.dispatchEvent(new PageTransitionEvent("pageshow"));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(replacements).toBe(1);
+
+    resolveReplacement();
+    await node.close();
+  });
+
+  it("preserves close options while releasing its foreground listener", async () => {
+    let closeForce: unknown;
+    mockIPC((cmd, args) => {
+      if (cmd === "plugin:iroh-http|create_endpoint") {
+        return {
+          endpointHandle: 1,
+          nodeId: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        };
+      }
+      if (cmd === "plugin:iroh-http|wait_endpoint_closed") return null;
+      if (cmd === "plugin:iroh-http|close_endpoint") {
+        closeForce = (args as { force?: unknown }).force;
+        return null;
+      }
+    });
+
+    const { createNode } = await import("../index.ts");
+    const node = await createNode({
+      disableNetworking: true,
+      reconnect: { auto: true },
+    });
+
+    await node.close({ force: true });
+
+    expect(closeForce).toBe(true);
   });
 });
 

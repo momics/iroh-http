@@ -791,33 +791,86 @@ export async function createNode(options?: NodeOptions): Promise<IrohNode> {
 
   const reconnect = options?.reconnect;
   if (reconnect) {
-    const unsubscribe = installLifecycleListener(
+    let unsubscribeLifecycle: (() => void) | undefined;
+    const releaseLifecycleListener = (): void => {
+      const release = unsubscribeLifecycle;
+      unsubscribeLifecycle = undefined;
+      release?.();
+    };
+    const reportReconnectError = (error: unknown): void => {
+      const onError = reconnect.onReconnectError;
+      if (!onError) {
+        console.error("[iroh-http-tauri] foreground reconnect error:", error);
+        return;
+      }
+      try {
+        // Although the public callback is synchronous, assimilating its return
+        // also prevents an accidentally-async reporter from creating another
+        // unhandled rejection while it is surfacing the original failure.
+        const reported = onError(error);
+        void Promise.resolve(reported).catch((reportingError) => {
+          console.error(
+            "[iroh-http-tauri] onReconnectError rejected:",
+            reportingError,
+            "Original reconnect error:",
+            error,
+          );
+        });
+      } catch (reportingError) {
+        console.error(
+          "[iroh-http-tauri] onReconnectError threw:",
+          reportingError,
+          "Original reconnect error:",
+          error,
+        );
+      }
+    };
+    const closeUnusableNode = async (): Promise<void> => {
+      try {
+        await node.close();
+      } catch (closeError) {
+        reportReconnectError(closeError);
+      }
+    };
+
+    unsubscribeLifecycle = installLifecycleListener(
       Number(info.endpointHandle),
       reconnect,
       () => {
+        // The old node owns this listener only until it hands recovery off.
+        // Release it first so foreground events cannot request two replacement
+        // nodes while the application's callback is still pending.
+        releaseLifecycleListener();
+
         // #350 F3: a foreground probe found the transport dead. If the app
         // supplied a recovery callback, hand off so it can recreate the node
         // (e.g. `createNode({ key })` with the same identity) instead of the
         // node being silently, permanently closed. Without a callback, close
         // the node so its `closed` promise resolves and the app can react,
         // rather than leaving a half-dead handle in place.
-        if (reconnect.onReconnectNeeded) {
-          try {
-            reconnect.onReconnectNeeded();
-          } catch {
-            // A throwing recovery callback must not crash the foreground
-            // handler; the app owns its own error handling here.
-          }
+        const recover = reconnect.onReconnectNeeded;
+        if (recover) {
+          // Promise assimilation handles both a synchronous throw and an async
+          // rejection. If replacement fails, close the unusable old node so
+          // `node.closed` gives the app a deterministic recovery signal. The
+          // recovery failure and any subsequent close failure remain observable
+          // through `onReconnectError` (or the console fallback).
+          void Promise.resolve()
+            .then(() => recover())
+            .catch(async (recoveryError) => {
+              reportReconnectError(recoveryError);
+              await closeUnusableNode();
+            });
         } else {
-          node.close().catch(() => {});
+          void closeUnusableNode();
         }
       },
     );
-    if (unsubscribe) {
+    if (unsubscribeLifecycle) {
       const originalClose = node.close.bind(node);
-      (node as IrohNode & { close: () => Promise<void> }).close = async () => {
-        unsubscribe();
-        return originalClose();
+      node.close = async (...args: Parameters<typeof originalClose>) => {
+        releaseLifecycleListener();
+        return originalClose(...args);
       };
     }
   }

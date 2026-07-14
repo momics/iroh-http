@@ -12,6 +12,29 @@ async function flush(): Promise<void> {
   }
 }
 
+async function resolvesWithin(
+  promise: Promise<unknown>,
+  timeoutMs = 50,
+): Promise<void> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      promise,
+      new Promise<never>((_resolve, reject) => {
+        timeout = setTimeout(
+          () =>
+            reject(
+              new Error(`operation did not resolve within ${timeoutMs}ms`),
+            ),
+          timeoutMs,
+        );
+      }),
+    ]);
+  } finally {
+    if (timeout !== undefined) clearTimeout(timeout);
+  }
+}
+
 function memoryStorage(): LifecycleStorage & { data: Map<string, string> } {
   const data = new Map<string, string>();
   return {
@@ -190,6 +213,69 @@ describe("withLifecycle", () => {
     expect(handle.state).toBe("stopped");
   });
 
+  it("stops a signal-owned start when start() and stop() are called in the same tick", async () => {
+    const handle = withLifecycle(
+      "same-tick-stop",
+      ({ signal }) =>
+        new Promise<void>((resolve) => {
+          signal.addEventListener("abort", () => resolve(), { once: true });
+        }),
+      { storage: null },
+    );
+
+    const started = handle.start();
+    const stopped = handle.stop();
+
+    await expect(resolvesWithin(Promise.all([started, stopped]))).resolves
+      .toBeUndefined();
+    expect(handle.state).toBe("stopped");
+    expect(handle.signal).toBeNull();
+  });
+
+  it("restarts a signal-owned start when start() and restart() are called in the same tick", async () => {
+    const handle = withLifecycle(
+      "same-tick-restart",
+      ({ signal, reason }) => {
+        if (reason === "start") {
+          return new Promise<void>((resolve) => {
+            signal.addEventListener("abort", () => resolve(), { once: true });
+          });
+        }
+        return () => {};
+      },
+      { storage: null },
+    );
+
+    const started = handle.start();
+    const restarted = handle.restart();
+
+    await expect(resolvesWithin(Promise.all([started, restarted]))).resolves
+      .toBeUndefined();
+    expect(handle.state).toBe("running");
+    expect(handle.signal?.aborted).toBe(false);
+    await handle.close();
+  });
+
+  it("closes a signal-owned start when start() and close() are called in the same tick", async () => {
+    const handle = withLifecycle(
+      "same-tick-close",
+      ({ signal }) =>
+        new Promise<void>((resolve) => {
+          signal.addEventListener("abort", () => resolve(), { once: true });
+        }),
+      { storage: null },
+    );
+
+    const started = handle.start();
+    const closed = handle.close();
+
+    await expect(resolvesWithin(Promise.all([started, closed]))).resolves
+      .toBeUndefined();
+    expect(handle.state).toBe("stopped");
+    expect(handle.signal).toBeNull();
+    await expect(handle.start()).rejects.toThrow("handle is closed");
+  });
+
   it("aborts the signal when a start fails after taking the signal (#350 F15)", async () => {
     const storage = memoryStorage();
     let capturedSignal: AbortSignal | undefined;
@@ -232,6 +318,80 @@ describe("withLifecycle", () => {
 });
 
 describe("installForegroundHealthCheck", () => {
+  it("does not report an in-flight failed probe after the check is removed", async () => {
+    let resolveProbe!: (healthy: boolean) => void;
+    const probeResult = new Promise<boolean>((resolve) => {
+      resolveProbe = resolve;
+    });
+    const onUnhealthy = vi.fn();
+    const remove = installForegroundHealthCheck({
+      probe: () => probeResult,
+      onUnhealthy,
+      enabled: true,
+      maxRetries: 1,
+    });
+
+    document.dispatchEvent(new Event("visibilitychange"));
+    await flush();
+    remove();
+    resolveProbe(false);
+    await flush();
+
+    expect(onUnhealthy).not.toHaveBeenCalled();
+  });
+
+  it("stops a retry sweep when removed during backoff", async () => {
+    vi.useFakeTimers();
+    try {
+      let probeAttempts = 0;
+      const onUnhealthy = vi.fn();
+      const remove = installForegroundHealthCheck({
+        probe: () => {
+          probeAttempts += 1;
+          return Promise.resolve(false);
+        },
+        onUnhealthy,
+        enabled: true,
+        maxRetries: 2,
+        backoffMs: () => 100,
+      });
+
+      document.dispatchEvent(new Event("visibilitychange"));
+      await flush();
+      expect(probeAttempts).toBe(1);
+
+      remove();
+      await vi.advanceTimersByTimeAsync(100);
+      await flush();
+
+      expect(probeAttempts).toBe(1);
+      expect(onUnhealthy).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("hands off an unhealthy transport only once", async () => {
+    let replacements = 0;
+    const remove = installForegroundHealthCheck({
+      probe: () => Promise.resolve(false),
+      onUnhealthy: () => {
+        replacements += 1;
+      },
+      enabled: true,
+      maxRetries: 1,
+    });
+
+    document.dispatchEvent(new Event("visibilitychange"));
+    await flush();
+    expect(replacements).toBe(1);
+
+    window.dispatchEvent(new PageTransitionEvent("pageshow"));
+    await flush();
+    expect(replacements).toBe(1);
+    remove();
+  });
+
   it("triggers recovery when the foreground transport probe fails", async () => {
     // Regression for #336: a foreground event fires while the endpoint handle
     // still exists, but the transport health probe reports the transport is no

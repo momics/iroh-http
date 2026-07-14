@@ -105,6 +105,7 @@ export function withLifecycle(
   let disposed = false;
   let attempt = 0;
   let operation: Promise<void> = Promise.resolve();
+  let cancellationGeneration = 0;
 
   const setState = (next: LifecycleState): void => {
     state = next;
@@ -147,10 +148,16 @@ export function withLifecycle(
   const startInternal = async (
     reason: LifecycleStartReason,
     persist: boolean,
+    expectedGeneration: number,
   ): Promise<void> => {
     if (disposed) {
       throw new Error("withLifecycle() handle is closed");
     }
+    // A stop/restart/close may be requested in the same tick as start(), before
+    // this queued operation has installed its AbortController. Treat that
+    // request as cancellation of this start generation rather than launching
+    // work that the already-queued control operation can no longer abort.
+    if (expectedGeneration !== cancellationGeneration) return;
     if (state === "running" || state === "starting" || state === "recovering") {
       return;
     }
@@ -203,8 +210,10 @@ export function withLifecycle(
   // cleanup) could never run — a deadlock. Aborting the current controller here
   // unblocks the pending run so the chain can drain to the queued operation,
   // which still performs cleanup and state transitions in order.
-  const abortCurrent = (): void => {
+  const abortCurrent = (): number => {
+    cancellationGeneration += 1;
     controller?.abort();
+    return cancellationGeneration;
   };
 
   const handle: LifecycleHandle = {
@@ -219,20 +228,22 @@ export function withLifecycle(
       return controller?.signal ?? null;
     },
     start() {
-      return enqueue(() => startInternal("start", true));
+      const generation = cancellationGeneration;
+      return enqueue(() => startInternal("start", true, generation));
     },
     restore() {
+      const generation = cancellationGeneration;
       return enqueue(async () => {
         if (!shouldRestore()) return;
-        await startInternal("restore", true);
+        await startInternal("restore", true, generation);
       });
     },
     restart(_reason?: string) {
-      abortCurrent();
+      const generation = abortCurrent();
       return enqueue(async () => {
         setState("stopping");
         await runCleanup();
-        await startInternal("restart", true);
+        await startInternal("restart", true, generation);
       });
     },
     stop() {
@@ -271,7 +282,10 @@ export function withLifecycle(
     // #350 F30: `startInternal` already invokes `options.onError` in its catch
     // before rejecting, so swallow the rejection here rather than calling
     // `onError` a second time. The callback is handled at one layer only.
-    void enqueue(() => startInternal("visible", true)).catch(() => {});
+    const generation = cancellationGeneration;
+    void enqueue(() => startInternal("visible", true, generation)).catch(
+      () => {},
+    );
   };
 
   const removeVisibilityListener = installVisibilityListener(visibilityHandler);
@@ -347,7 +361,35 @@ export function installForegroundHealthCheck(
   }
 
   let running = false;
+  let disposed = false;
+  let cancelBackoff: (() => void) | undefined;
+  let listener: () => void = () => {};
+  const dispose = (): void => {
+    if (disposed) return;
+    disposed = true;
+    cancelBackoff?.();
+    cancelBackoff = undefined;
+    document.removeEventListener("visibilitychange", listener);
+    if (typeof window !== "undefined") {
+      window.removeEventListener("pageshow", listener);
+    }
+  };
+  const waitForBackoff = (delay: number): Promise<void> =>
+    new Promise<void>((resolve) => {
+      let settled = false;
+      let timeout: ReturnType<typeof setTimeout>;
+      const finish = (): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        if (cancelBackoff === finish) cancelBackoff = undefined;
+        resolve();
+      };
+      timeout = setTimeout(finish, delay);
+      cancelBackoff = finish;
+    });
   const handler = async (): Promise<void> => {
+    if (disposed) return;
     if (
       typeof document !== "undefined" && document.visibilityState !== "visible"
     ) {
@@ -364,33 +406,34 @@ export function installForegroundHealthCheck(
         } catch {
           healthy = false;
         }
+        if (disposed) return;
         if (healthy) return;
         if (attempt < maxRetries) {
           const delay = Math.max(0, backoffMs(attempt));
           if (delay > 0) {
-            await new Promise<void>((resolve) => setTimeout(resolve, delay));
+            await waitForBackoff(delay);
+            if (disposed) return;
           }
         }
       }
+      // Recovery owns the next transport generation. Remove this generation's
+      // listeners before handing off so later foreground events cannot start a
+      // second replacement sweep.
+      dispose();
       onUnhealthy();
     } finally {
       running = false;
     }
   };
 
-  const listener = (): void => {
+  listener = (): void => {
     void handler();
   };
   document.addEventListener("visibilitychange", listener);
   if (typeof window !== "undefined") {
     window.addEventListener("pageshow", listener);
   }
-  return () => {
-    document.removeEventListener("visibilitychange", listener);
-    if (typeof window !== "undefined") {
-      window.removeEventListener("pageshow", listener);
-    }
-  };
+  return dispose;
 }
 
 function defaultStorage(): LifecycleStorage | null {
