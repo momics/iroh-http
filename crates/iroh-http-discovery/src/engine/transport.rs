@@ -33,22 +33,28 @@ pub struct AdvertisementUpdate {
 /// An already-started platform advertisement.
 pub trait AdvertisementHandle: Send + Sync + 'static {
     /// Apply mutable advertisement data. The engine never cancels this future.
+    /// The handle must atomically reject native work that loses a race with
+    /// [`Self::request_close`].
     fn update(&self, update: AdvertisementUpdate) -> BoxFuture<'_, Result<(), TransportError>>;
-    /// Mark the handle closed immediately. If an update is in flight, native
+    /// Mark the handle closed immediately. This must be non-blocking,
+    /// runtime-independent, and idempotent. If an update is in flight, native
     /// stop must wait until its callback has been observed.
     fn request_close(&self);
-    /// Wait for in-flight work and native unregister/stop. Repeated calls must
-    /// return the same outcome.
+    /// Observe cleanup already initiated by [`Self::request_close`]. Repeated
+    /// calls must return the same cached outcome.
     fn closed(&self) -> BoxFuture<'_, Result<(), TransportError>>;
 }
 
 /// An already-started platform browse.
 pub trait BrowseHandle: Send + Sync + 'static {
-    /// Await the next event. The engine never cancels this future.
+    /// Await the next event. The handle must atomically reject native work that
+    /// loses a race with [`Self::request_close`].
     fn next(&self) -> BoxFuture<'_, Result<Option<RawEvent>, TransportError>>;
     /// Mark the handle closed and cause an in-flight [`Self::next`] to finish
-    /// after any non-cancellation-safe native callback has been observed.
+    /// after any non-cancellation-safe native callback has been observed. This
+    /// must be non-blocking, runtime-independent, and idempotent.
     fn request_close(&self);
-    /// Wait for native stop. Repeated calls must return the same outcome.
+    /// Observe cleanup already initiated by [`Self::request_close`]. Repeated
+    /// calls must return the same cached outcome.
     fn closed(&self) -> BoxFuture<'_, Result<(), TransportError>>;
 }

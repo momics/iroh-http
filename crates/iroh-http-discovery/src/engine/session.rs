@@ -3,14 +3,65 @@ use std::sync::{
     Arc, Mutex as StdMutex,
 };
 
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 
 use super::{AdvertisementHandle, AdvertisementUpdate, BrowseHandle, RawEvent, TransportError};
+
+struct InFlight<T> {
+    result: StdMutex<Option<T>>,
+    ready: Notify,
+}
+
+impl<T: Clone> InFlight<T> {
+    fn new() -> Self {
+        Self {
+            result: StdMutex::new(None),
+            ready: Notify::new(),
+        }
+    }
+
+    fn complete(&self, result: T) {
+        *self
+            .result
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(result);
+        self.ready.notify_one();
+    }
+
+    async fn wait(&self) -> T {
+        loop {
+            let notified = self.ready.notified();
+            if let Some(result) = self
+                .result
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone()
+            {
+                return result;
+            }
+            notified.await;
+        }
+    }
+}
+
+type BrowseOutcome = Result<Option<RawEvent>, TransportError>;
+type UpdateOutcome = Result<(), TransportError>;
+
+fn clear_operation<T>(slot: &StdMutex<Option<Arc<InFlight<T>>>>, completed: &Arc<InFlight<T>>) {
+    let mut slot = slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if slot
+        .as_ref()
+        .is_some_and(|current| Arc::ptr_eq(current, completed))
+    {
+        slot.take();
+    }
+}
 
 /// Serialized, terminal-safe access to an already-started browse handle.
 pub struct BrowseSession {
     handle: Arc<dyn BrowseHandle>,
     next_gate: Mutex<()>,
+    next_operation: StdMutex<Option<Arc<InFlight<BrowseOutcome>>>>,
     terminal: AtomicBool,
     close_callbacks: StdMutex<Vec<Box<dyn FnOnce() + Send>>>,
 }
@@ -20,6 +71,7 @@ impl BrowseSession {
         Self {
             handle: Arc::new(handle),
             next_gate: Mutex::new(()),
+            next_operation: StdMutex::new(None),
             terminal: AtomicBool::new(false),
             close_callbacks: StdMutex::new(Vec::new()),
         }
@@ -30,10 +82,26 @@ impl BrowseSession {
         if self.terminal.load(Ordering::Acquire) {
             return Ok(None);
         }
-        // Never race this future against close: mobile native invokes are not
-        // cancellation-safe. `request_close` must cause an in-flight `next`
-        // to finish after its native callback has been observed.
-        let result = self.handle.next().await;
+        let operation = {
+            let mut slot = self
+                .next_operation
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(operation) = slot.as_ref() {
+                Arc::clone(operation)
+            } else {
+                let operation = Arc::new(InFlight::new());
+                *slot = Some(Arc::clone(&operation));
+                let task_operation = Arc::clone(&operation);
+                let handle = Arc::clone(&self.handle);
+                tokio::spawn(async move {
+                    task_operation.complete(handle.next().await);
+                });
+                operation
+            }
+        };
+        let result = operation.wait().await;
+        clear_operation(&self.next_operation, &operation);
         if self.terminal.load(Ordering::Acquire) {
             return Ok(None);
         }
@@ -81,6 +149,15 @@ impl BrowseSession {
     pub async fn wait_closed(&self) -> Result<(), TransportError> {
         self.close();
         let _guard = self.next_gate.lock().await;
+        let operation = self
+            .next_operation
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        if let Some(operation) = operation {
+            let _ = operation.wait().await;
+            clear_operation(&self.next_operation, &operation);
+        }
         self.handle.closed().await
     }
 }
@@ -95,6 +172,7 @@ impl Drop for BrowseSession {
 pub struct AdvertisementSession {
     handle: Arc<dyn AdvertisementHandle>,
     update_gate: Mutex<()>,
+    update_operation: StdMutex<Option<Arc<InFlight<UpdateOutcome>>>>,
     closed: AtomicBool,
 }
 
@@ -103,16 +181,42 @@ impl AdvertisementSession {
         Self {
             handle: Arc::new(handle),
             update_gate: Mutex::new(()),
+            update_operation: StdMutex::new(None),
             closed: AtomicBool::new(false),
         }
     }
 
     pub async fn update(&self, update: AdvertisementUpdate) -> Result<(), TransportError> {
         let _guard = self.update_gate.lock().await;
+        let previous = {
+            self.update_operation
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone()
+        };
+        if let Some(previous) = previous {
+            let result = previous.wait().await;
+            clear_operation(&self.update_operation, &previous);
+            if let Err(error) = result {
+                self.close();
+                return Err(error);
+            }
+        }
         if self.closed.load(Ordering::Acquire) {
             return Err(TransportError::new("advertisement is closed"));
         }
-        let result = self.handle.update(update).await;
+        let operation = Arc::new(InFlight::new());
+        *self
+            .update_operation
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Arc::clone(&operation));
+        let task_operation = Arc::clone(&operation);
+        let handle = Arc::clone(&self.handle);
+        tokio::spawn(async move {
+            task_operation.complete(handle.update(update).await);
+        });
+        let result = operation.wait().await;
+        clear_operation(&self.update_operation, &operation);
         if result.is_err() {
             self.close();
         }
@@ -128,6 +232,15 @@ impl AdvertisementSession {
     pub async fn wait_closed(&self) -> Result<(), TransportError> {
         self.close();
         let _guard = self.update_gate.lock().await;
+        let operation = self
+            .update_operation
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        if let Some(operation) = operation {
+            let _ = operation.wait().await;
+            clear_operation(&self.update_operation, &operation);
+        }
         self.handle.closed().await
     }
 }
@@ -324,20 +437,47 @@ mod tests {
         assert_eq!(handle.0.max_active.load(Ordering::Acquire), 1);
     }
 
+    #[tokio::test]
+    async fn cancelling_next_waiter_does_not_cancel_transport_operation() {
+        let handle = FakeBrowse::new(vec![Ok(Some(event("observed")))], true);
+        let session = Arc::new(BrowseSession::new(handle.clone()));
+        let entered = handle.0.entered.notified();
+        let task = tokio::spawn({
+            let session = Arc::clone(&session);
+            async move { session.next().await }
+        });
+        entered.await;
+
+        task.abort();
+        assert!(matches!(task.await, Err(error) if error.is_cancelled()));
+        assert_eq!(handle.0.active.load(Ordering::Acquire), 1);
+        assert!(session.wait_closed().await.is_ok());
+        assert_eq!(handle.0.active.load(Ordering::Acquire), 0);
+        assert_eq!(handle.0.close_count.load(Ordering::Acquire), 1);
+    }
+
     #[derive(Clone)]
     struct FakeAdvertisement(Arc<FakeAdvertisementState>);
 
     struct FakeAdvertisementState {
         fail: AtomicBool,
+        block: AtomicBool,
+        entered: Notify,
+        release: Semaphore,
+        completed: AtomicUsize,
         close_count: AtomicUsize,
         closed: AtomicBool,
         closed_notify: Notify,
     }
 
     impl FakeAdvertisement {
-        fn new(fail: bool) -> Self {
+        fn new(fail: bool, block: bool) -> Self {
             Self(Arc::new(FakeAdvertisementState {
                 fail: AtomicBool::new(fail),
+                block: AtomicBool::new(block),
+                entered: Notify::new(),
+                release: Semaphore::new(0),
+                completed: AtomicUsize::new(0),
                 close_count: AtomicUsize::new(0),
                 closed: AtomicBool::new(false),
                 closed_notify: Notify::new(),
@@ -351,6 +491,14 @@ mod tests {
             _update: AdvertisementUpdate,
         ) -> BoxFuture<'_, Result<(), TransportError>> {
             Box::pin(async move {
+                self.0.entered.notify_waiters();
+                if self.0.block.load(Ordering::Acquire) {
+                    let permit = self.0.release.acquire().await;
+                    if let Ok(permit) = permit {
+                        permit.forget();
+                    }
+                }
+                self.0.completed.fetch_add(1, Ordering::AcqRel);
                 if self.0.fail.load(Ordering::Acquire) {
                     Err(TransportError::new("update failed"))
                 } else {
@@ -377,7 +525,7 @@ mod tests {
 
     #[tokio::test]
     async fn advertisement_update_failure_closes_and_cleanup_is_awaitable() {
-        let handle = FakeAdvertisement::new(true);
+        let handle = FakeAdvertisement::new(true, false);
         let session = AdvertisementSession::new(handle.clone());
         let update = AdvertisementUpdate {
             addrs: Vec::new(),
@@ -394,8 +542,36 @@ mod tests {
 
     #[test]
     fn drop_requests_advertisement_cleanup_without_an_async_runtime() {
-        let handle = FakeAdvertisement::new(false);
+        let handle = FakeAdvertisement::new(false, false);
         drop(AdvertisementSession::new(handle.clone()));
+        assert_eq!(handle.0.close_count.load(Ordering::Acquire), 1);
+    }
+
+    #[tokio::test]
+    async fn cancelling_update_waiter_does_not_cancel_transport_operation() {
+        let handle = FakeAdvertisement::new(false, true);
+        let session = Arc::new(AdvertisementSession::new(handle.clone()));
+        let entered = handle.0.entered.notified();
+        let task = tokio::spawn({
+            let session = Arc::clone(&session);
+            async move {
+                session
+                    .update(AdvertisementUpdate {
+                        addrs: Vec::new(),
+                        txt: Vec::new(),
+                    })
+                    .await
+            }
+        });
+        entered.await;
+
+        task.abort();
+        assert!(matches!(task.await, Err(error) if error.is_cancelled()));
+        session.close();
+        assert_eq!(handle.0.completed.load(Ordering::Acquire), 0);
+        handle.0.release.add_permits(1);
+        assert!(session.wait_closed().await.is_ok());
+        assert_eq!(handle.0.completed.load(Ordering::Acquire), 1);
         assert_eq!(handle.0.close_count.load(Ordering::Acquire), 1);
     }
 
