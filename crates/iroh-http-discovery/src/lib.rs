@@ -21,6 +21,8 @@
 //! - iOS / Android (Tauri mobile): use the platform's native service discovery.
 #![deny(unsafe_code)]
 
+pub mod engine;
+
 #[cfg(feature = "mdns")]
 pub mod dns_sd;
 
