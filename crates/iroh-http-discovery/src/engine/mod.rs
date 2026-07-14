@@ -4,17 +4,13 @@
 //! policy. Platform transports produce canonical [`RawEvent`] values; higher
 //! layers may project those records into application-specific discoveries.
 
-mod advertise;
-mod browse;
 mod transport;
 mod types;
 
-pub use advertise::{
-    AdvertiseCommand, AdvertiseEffect, AdvertiseInput, AdvertiseLifecycle, AdvertiseStatus,
-};
-pub use browse::{BrowseInput, BrowseLifecycle, BrowseStatus};
 pub use transport::{
     BoxFuture, DnsSdTransport, NextEvent, TransportAdvertisement, TransportBrowse, TransportError,
     TransportErrorKind, TransportResult,
 };
+#[cfg(feature = "mdns")]
+pub(crate) use types::service_type;
 pub use types::{BrowseConfig, Protocol, RawEvent, ServiceConfig, ServiceRecord};

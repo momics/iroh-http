@@ -24,7 +24,9 @@ use std::{
 use futures::FutureExt;
 use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
 
-use crate::DiscoveryError;
+use crate::{engine::service_type, DiscoveryError};
+
+pub use crate::engine::{BrowseConfig, Protocol, ServiceConfig, ServiceRecord};
 
 const DAEMON_COMMAND_RETRIES: usize = 100;
 
@@ -50,114 +52,7 @@ fn retire_after_enqueue<T, E>(
     Ok(response)
 }
 
-// ── Protocol ─────────────────────────────────────────────────────────────────
-
-/// Transport protocol component of a DNS-SD service type (`_udp` / `_tcp`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Protocol {
-    /// `_udp` — the default, and what iroh-http uses (QUIC is UDP-based).
-    #[default]
-    Udp,
-    /// `_tcp` — for advertising/browsing TCP-based services.
-    Tcp,
-}
-
-impl Protocol {
-    /// The DNS-SD label for this protocol, including the leading underscore.
-    fn label(self) -> &'static str {
-        match self {
-            Protocol::Udp => "_udp",
-            Protocol::Tcp => "_tcp",
-        }
-    }
-}
-
-// ── Config / record types ────────────────────────────────────────────────────
-
-/// A service to advertise via DNS-SD.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ServiceConfig {
-    /// Bare service name, e.g. `"my-app"` → `_my-app._udp.local.`. Must be a
-    /// single DNS label: non-empty, ASCII alphanumeric or `-`.
-    pub service_name: String,
-    /// DNS-SD instance label (the human/instance-visible name).
-    pub instance_name: String,
-    /// SRV port peers should connect to.
-    pub port: u16,
-    /// Direct IP addresses to advertise. Local interface addresses are always
-    /// added automatically and kept fresh; entries here are advertised in
-    /// addition.
-    pub addrs: Vec<IpAddr>,
-    /// Arbitrary TXT key/value properties.
-    pub txt: Vec<(String, String)>,
-    /// Transport protocol (`_udp` default).
-    pub protocol: Protocol,
-}
-
-/// Parameters for a browse session.
-#[derive(Debug, Clone)]
-pub struct BrowseConfig {
-    /// Bare service name to browse, e.g. `"my-app"` → `_my-app._udp.local.`.
-    pub service_name: String,
-    /// Transport protocol (`_udp` default).
-    pub protocol: Protocol,
-}
-
-impl BrowseConfig {
-    /// Convenience constructor for a `_udp` browse of `service_name`.
-    pub fn udp(service_name: impl Into<String>) -> Self {
-        Self {
-            service_name: service_name.into(),
-            protocol: Protocol::Udp,
-        }
-    }
-}
-
-/// A fully-resolved DNS-SD service record — nothing dropped.
-#[derive(Debug, Clone)]
-pub struct ServiceRecord {
-    /// `true` = the service appeared or updated; `false` = it expired/left.
-    pub is_active: bool,
-    /// Service type and domain, e.g. `_my-app._udp.local.`.
-    pub service_type: String,
-    /// Service instance label.
-    pub instance_name: String,
-    /// Host name of the service, e.g. `my-host.local.` (absent on expiry).
-    pub host: Option<String>,
-    /// SRV port (`0` on expiry).
-    pub port: u16,
-    /// Resolved socket addresses (empty on expiry).
-    pub addrs: Vec<SocketAddr>,
-    /// All TXT key/value properties (empty on expiry).
-    pub txt: Vec<(String, String)>,
-}
-
 // ── Service-type helpers ─────────────────────────────────────────────────────
-
-/// Validate a service name and build the fully-qualified DNS-SD service type
-/// `_<service_name>.<proto>.local.`.
-///
-/// The name must be a single DNS label: non-empty and ASCII alphanumeric or
-/// `-` (no leading `_`, no dot).
-pub(crate) fn service_type(
-    service_name: &str,
-    protocol: Protocol,
-) -> Result<String, DiscoveryError> {
-    if service_name.is_empty() {
-        return Err(DiscoveryError::InvalidServiceName(
-            "service name must not be empty".into(),
-        ));
-    }
-    if !service_name
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '-')
-    {
-        return Err(DiscoveryError::InvalidServiceName(format!(
-            "{service_name:?} must contain only ASCII letters, digits, and '-'"
-        )));
-    }
-    Ok(format!("_{service_name}.{}.local.", protocol.label()))
-}
 
 /// Extract the service instance label from a DNS-SD fullname like
 /// `<instance>._my-app._udp.local.`, given the known `ty_domain` suffix
