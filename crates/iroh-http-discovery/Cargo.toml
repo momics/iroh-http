@@ -19,10 +19,11 @@ required-features = ["mdns"]
 
 [features]
 default = ["mdns"]
+runtime = ["dep:tokio"]
 mdns = [
+    "runtime",
     "dep:iroh-http-core",
     "dep:iroh",
-    "dep:tokio",
     "dep:futures",
     "dep:tracing",
     "dep:mdns-sd",

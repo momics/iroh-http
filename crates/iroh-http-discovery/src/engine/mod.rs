@@ -7,9 +7,13 @@
 mod transport;
 mod types;
 
+#[cfg(feature = "runtime")]
+mod session;
+
+#[cfg(feature = "runtime")]
+pub use session::{AdvertisementSession, BrowseSession};
 pub use transport::{
-    BoxFuture, DnsSdTransport, NextEvent, TransportAdvertisement, TransportBrowse, TransportError,
-    TransportErrorKind, TransportResult,
+    AdvertisementHandle, AdvertisementUpdate, BoxFuture, BrowseHandle, TransportError,
 };
 #[cfg(feature = "mdns")]
 pub(crate) use types::service_type;
