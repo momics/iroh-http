@@ -1,6 +1,11 @@
 import { PublicKey, resolveNodeId } from "./PublicKey.js";
 import { SecretKey } from "./SecretKey.js";
-import { advertiseService, browseServices } from "./dns-sd.js";
+import {
+  advertiseService,
+  browseServices,
+  createDiscoveryIterator,
+  runDiscoveryAdvertisement,
+} from "./dns-sd.js";
 import { type FetchFn, makeFetch } from "./fetch.js";
 import {
   makeServe,
@@ -352,78 +357,21 @@ export class IrohNode extends EventTarget {
     const svcName = options?.serviceName ?? "iroh-http";
     const signal = options?.signal;
     const selfId = this.publicKey;
-
-    return {
-      [Symbol.asyncIterator]() {
-        let browseHandle: number | null = null;
-        return {
-          async next(): Promise<IteratorResult<DiscoveredPeer>> {
-            if (browseHandle === null) {
-              browseHandle = await adapter.browsePeers(handle, svcName);
-            }
-
-            // Loop so this node's own advertisement is transparently skipped.
-            // mDNS echoes a node's own multicast records back to it, so a node
-            // that both advertises and browses sees itself — but a *peer* API
-            // should never surface the local node as a discoverable peer (you
-            // never dial yourself; self-fetch is loopback per ADR-015). The
-            // generic `browse()` primitive stays faithful to DNS-SD and still
-            // reports it.
-            while (true) {
-              if (signal?.aborted) {
-                adapter.browsePeersClose(browseHandle);
-                browseHandle = null;
-                return { done: true as const, value: undefined };
-              }
-
-              let event: PeerDiscoveryEvent | null;
-              if (signal) {
-                const abortPromise = new Promise<null>((resolve) => {
-                  if (signal.aborted) {
-                    resolve(null);
-                    return;
-                  }
-                  signal.addEventListener("abort", () => resolve(null), {
-                    once: true,
-                  });
-                });
-                event = await Promise.race([
-                  adapter.browsePeersNext(browseHandle),
-                  abortPromise,
-                ]);
-                if (signal.aborted && browseHandle !== null) {
-                  adapter.browsePeersClose(browseHandle);
-                  browseHandle = null;
-                  return { done: true as const, value: undefined };
-                }
-              } else {
-                event = await adapter.browsePeersNext(browseHandle);
-              }
-
-              if (event === null) {
-                return { done: true as const, value: undefined };
-              }
-              if (isSelfPeer(event.nodeId, selfId)) {
-                continue;
-              }
-              const discovered: DiscoveredPeer = {
-                nodeId: event.nodeId,
-                addrs: event.addrs ?? [],
-                isActive: event.type === "discovered",
-              };
-              return { done: false as const, value: discovered };
-            }
-          },
-          return(): Promise<IteratorResult<DiscoveredPeer>> {
-            if (browseHandle !== null) {
-              adapter.browsePeersClose(browseHandle);
-              browseHandle = null;
-            }
-            return Promise.resolve({ done: true as const, value: undefined });
-          },
-        };
-      },
-    };
+    return createDiscoveryIterator<PeerDiscoveryEvent, DiscoveredPeer>({
+      signal,
+      start: () => adapter.browsePeers(handle, svcName),
+      poll: (browseHandle) => adapter.browsePeersNext(browseHandle),
+      close: (browseHandle) => adapter.browsePeersClose(browseHandle),
+      // mDNS echoes a node's own multicast records back to it, but a peer API
+      // should only surface other nodes. Returning undefined skips that record
+      // while the shared iterator continues polling the same native session.
+      map: (event) =>
+        isSelfPeer(event.nodeId, selfId) ? undefined : {
+          nodeId: event.nodeId,
+          addrs: event.addrs ?? [],
+          isActive: event.type === "discovered",
+        },
+    });
   }
 
   /**
@@ -450,25 +398,14 @@ export class IrohNode extends EventTarget {
    * await advertising;
    * ```
    */
-  async advertisePeer(options?: AdvertiseOptions): Promise<void> {
+  advertisePeer(options?: AdvertiseOptions): Promise<void> {
     const svcName = options?.serviceName ?? "iroh-http";
     const signal = options?.signal;
-    const advHandle = await this.#adapter.advertisePeer(
-      this.#endpointHandle,
-      svcName,
-    );
-    if (signal) {
-      return new Promise<void>((resolve) => {
-        signal.addEventListener("abort", () => {
-          this.#adapter.advertisePeerClose(advHandle);
-          resolve();
-        }, { once: true });
-        if (signal.aborted) {
-          this.#adapter.advertisePeerClose(advHandle);
-          resolve();
-        }
-      });
-    }
+    return runDiscoveryAdvertisement({
+      signal,
+      start: () => this.#adapter.advertisePeer(this.#endpointHandle, svcName),
+      close: (handle) => this.#adapter.advertisePeerClose(handle),
+    });
   }
 
   /**

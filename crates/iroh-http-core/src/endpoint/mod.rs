@@ -28,6 +28,7 @@ pub(in crate::endpoint) mod http_runtime;
 pub(in crate::endpoint) mod lifecycle;
 pub(in crate::endpoint) mod observe;
 pub(in crate::endpoint) mod session_runtime;
+mod source_scoped_lookup;
 pub(in crate::endpoint) mod transport;
 
 pub mod config;
@@ -36,6 +37,10 @@ pub mod stats;
 pub use bind::parse_direct_addrs;
 pub use config::{DiscoveryOptions, NetworkingOptions, NodeOptions, PoolOptions, StreamingOptions};
 pub use http::server::stack::CompressionOptions;
+pub use source_scoped_lookup::{
+    AddressLookupRemoval, AddressLookupSource, AddressLookupUpsert, AddressLookupUpsertError,
+    SourceScopedAddressLookup,
+};
 pub use stats::{ConnectionEvent, EndpointStats, NodeAddrInfo, PathInfo, PeerStats};
 
 use crate::ffi::handles::HandleStore;

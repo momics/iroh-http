@@ -1,6 +1,9 @@
 #![deny(unsafe_code)]
 
 mod commands;
+#[cfg(all(feature = "discovery", not(mobile)))]
+mod discovery_handles;
+mod discovery_ownership;
 mod state;
 
 pub mod mobile_address_lookup;
@@ -180,6 +183,12 @@ impl<R: Runtime> PluginBuilder<R> {
             );
         }
 
+        plugin_builder = plugin_builder.on_page_load(|webview, payload| {
+            if payload.event() == tauri::webview::PageLoadEvent::Started {
+                commands::advance_webview_discovery_context(webview.app_handle(), webview.label());
+            }
+        });
+
         plugin_builder
             .setup(move |app, _api| {
                 if self.scheme {
@@ -210,11 +219,25 @@ impl<R: Runtime> PluginBuilder<R> {
             // closing window A does not affect window B's networking.
             .on_event(|app, event| {
                 if let tauri::RunEvent::WindowEvent {
+                    label,
                     event: tauri::WindowEvent::Destroyed,
                     ..
                 } = event
                 {
+                    // A destroyed WebView owns only the discovery sessions it
+                    // started. Retire those handles before considering the
+                    // process-wide last-window endpoint shutdown; other live
+                    // windows keep their peer and generic DNS-SD sessions.
+                    commands::retire_webview_discovery_sessions(app, label);
                     if app.webview_windows().is_empty() {
+                        commands::retire_all_discovery_sessions(app);
+                        state::clear_endpoint_owners();
+                        #[cfg(mobile)]
+                        if let Some(lookups) =
+                            app.try_state::<mobile_address_lookup::MobileAddressLookup>()
+                        {
+                            lookups.clear();
+                        }
                         iroh_http_core::registry::close_all_endpoints();
                     }
                 }

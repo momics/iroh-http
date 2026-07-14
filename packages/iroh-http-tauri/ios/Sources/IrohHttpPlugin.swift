@@ -21,9 +21,15 @@ struct AdvertiseStartArgs: Decodable {
     let serviceName: String
     let pk: String
     let relay: String?
-    /// Primary direct `ip:port` address to publish so browsing peers can dial
-    /// this node over the LAN. Carries the real bound QUIC port (never 0). #346.
-    let address: String?
+    /// Structured direct `ip:port` addresses. The native DNS-SD boundary
+    /// serializes these as one comma-separated `address` TXT value.
+    let addresses: [String]
+}
+
+struct AdvertiseUpdateArgs: Decodable {
+    let advertiseId: UInt64
+    let relay: String?
+    let addresses: [String]
 }
 
 struct AdvertiseStopArgs: Decodable {
@@ -48,29 +54,174 @@ struct DnsSdBrowseStartArgs: Decodable {
 
 // MARK: - Session Types
 
+private enum NativeSessionState: Equatable {
+    case starting
+    case active
+    case closed
+    case failed
+
+    /// `starting` is intentionally not part of the cross-language contract.
+    /// A start invoke does not resolve until readiness, so callers cannot poll
+    /// that state through a legitimately acquired handle.
+    var pollValue: String {
+        switch self {
+        case .starting, .active:
+            return "active"
+        case .closed:
+            return "closed"
+        case .failed:
+            return "failed"
+        }
+    }
+}
+
+/// Tauri invokes may be completed by asynchronous native callbacks. Keep a
+/// small one-shot guard at that boundary so readiness/failure/cancellation
+/// races can never resolve and reject the same command.
+private final class InvokeOnce {
+    private let invoke: Invoke
+    private let lock = NSLock()
+    private var completed = false
+
+    init(_ invoke: Invoke) {
+        self.invoke = invoke
+    }
+
+    func resolve(_ payload: [String: Any]) {
+        lock.lock()
+        guard !completed else {
+            lock.unlock()
+            return
+        }
+        completed = true
+        lock.unlock()
+        invoke.resolve(payload)
+    }
+
+    func resolve() {
+        lock.lock()
+        guard !completed else {
+            lock.unlock()
+            return
+        }
+        completed = true
+        lock.unlock()
+        invoke.resolve()
+    }
+
+    func reject(_ message: String) {
+        lock.lock()
+        guard !completed else {
+            lock.unlock()
+            return
+        }
+        completed = true
+        lock.unlock()
+        invoke.reject(message)
+    }
+}
+
 private final class BrowseSession {
     let id: UInt64
     let browser: NWBrowser
+    let startInvoke: InvokeOnce
+    var state: NativeSessionState = .starting
+    var terminalError: String?
     var pendingEvents: [[String: Any]] = []
-    // fullServiceName → (nodeId, signature). The signature is (nodeId + sorted
+    // service instance name → (nodeId, signature). The signature is (nodeId + sorted
     // dialable addrs) so a peer that rebinds to a new address under the SAME
     // nodeId (the foreground-restart-rebind case, #336) re-emits instead of
     // being suppressed by a nodeId-only dedup (#350 review M2).
     var knownNodes: [String: (nodeId: String, signature: String)] = [:]
 
-    init(id: UInt64, browser: NWBrowser) {
+    init(id: UInt64, browser: NWBrowser, startInvoke: InvokeOnce) {
         self.id = id
         self.browser = browser
+        self.startInvoke = startInvoke
+    }
+}
+
+private enum AdvertisementKind {
+    case peer(pk: String)
+    case generic
+
+    func matches(_ expected: AdvertisementStopKind) -> Bool {
+        switch (self, expected) {
+        case (.peer, .peer), (.generic, .generic):
+            return true
+        default:
+            return false
+        }
+    }
+}
+
+private enum AdvertisementStopKind {
+    case peer
+    case generic
+
+    var mismatchMessage: String {
+        switch self {
+        case .peer:
+            return "Advertisement handle is not an iroh peer advertisement"
+        case .generic:
+            return "Advertisement handle is not a generic DNS-SD advertisement"
+        }
+    }
+}
+
+private final class NetServiceRegistrationDelegate: NSObject, NetServiceDelegate {
+    private let onPublished: () -> Void
+    private let onFailure: (String) -> Void
+    private let onStopped: () -> Void
+
+    init(
+        onPublished: @escaping () -> Void,
+        onFailure: @escaping (String) -> Void,
+        onStopped: @escaping () -> Void
+    ) {
+        self.onPublished = onPublished
+        self.onFailure = onFailure
+        self.onStopped = onStopped
+    }
+
+    func netServiceDidPublish(_ sender: NetService) {
+        onPublished()
+    }
+
+    func netService(_ sender: NetService, didNotPublish errorDict: [String: NSNumber]) {
+        let detail = errorDict
+            .map { "\($0.key)=\($0.value)" }
+            .sorted()
+            .joined(separator: ", ")
+        onFailure(detail.isEmpty ? "unknown NetService publish failure" : detail)
+    }
+
+    func netServiceDidStop(_ sender: NetService) {
+        onStopped()
     }
 }
 
 private final class AdvertiseSession {
     let id: UInt64
-    let listener: NWListener
+    let service: NetService
+    let registrationDelegate: NetServiceRegistrationDelegate
+    let kind: AdvertisementKind
+    let startInvoke: InvokeOnce
+    var state: NativeSessionState = .starting
+    var terminalError: String?
 
-    init(id: UInt64, listener: NWListener) {
+    init(
+        id: UInt64,
+        service: NetService,
+        registrationDelegate: NetServiceRegistrationDelegate,
+        kind: AdvertisementKind,
+        startInvoke: InvokeOnce
+    ) {
         self.id = id
-        self.listener = listener
+        self.service = service
+        self.registrationDelegate = registrationDelegate
+        self.kind = kind
+        self.startInvoke = startInvoke
     }
 }
 
@@ -89,13 +240,17 @@ private final class DnsSdBrowseSession {
     let id: UInt64
     let browser: NWBrowser
     let serviceType: String
+    let startInvoke: InvokeOnce
+    var state: NativeSessionState = .starting
+    var terminalError: String?
     var pendingRecords: [[String: Any]] = []
     var knownInstances: [String: DnsSdRecordSnapshot] = [:]
 
-    init(id: UInt64, browser: NWBrowser, serviceType: String) {
+    init(id: UInt64, browser: NWBrowser, serviceType: String, startInvoke: InvokeOnce) {
         self.id = id
         self.browser = browser
         self.serviceType = serviceType
+        self.startInvoke = startInvoke
     }
 }
 
@@ -109,6 +264,20 @@ class IrohHttpPlugin: Plugin {
     private var dnsSdBrowseSessions: [UInt64: DnsSdBrowseSession] = [:]
     private var nextBrowseId: UInt64 = 1
     private var nextAdvertiseId: UInt64 = 1
+
+    private enum TxtEncodingError: LocalizedError {
+        case invalidKey(String)
+        case oversizedEntry(String)
+
+        var errorDescription: String? {
+            switch self {
+            case .invalidKey(let key):
+                return "Invalid DNS-SD TXT key: \(key)"
+            case .oversizedEntry(let key):
+                return "DNS-SD TXT entry exceeds 255 bytes: \(key)"
+            }
+        }
+    }
 
     // MARK: - Helpers
 
@@ -147,21 +316,282 @@ class IrohHttpPlugin: Plugin {
                 let key = String(bytes: slice[..<eqIdx], encoding: .utf8) ?? ""
                 let val = String(bytes: slice[(eqIdx + 1)...], encoding: .utf8) ?? ""
                 if !key.isEmpty { result[key] = val }
+            } else {
+                let key = String(bytes: slice, encoding: .utf8) ?? ""
+                if !key.isEmpty { result[key] = "" }
             }
         }
         return result
     }
 
-    /// Encode key-value pairs into DNS-SD TXT record data.
-    private func encodeTxtData(_ pairs: [String: String]) -> Data {
+    /// Decode the entry-based NWTXTRecord representation available before
+    /// iOS 16. `.empty` is a present key with no value, not an absent key; it
+    /// must survive snapshots so add/remove transitions can be observed.
+    /// Internal visibility keeps this legacy branch host-contract-testable.
+    func decodeLegacyTxtRecord(_ record: NWTXTRecord) -> [String: String] {
+        var result: [String: String] = [:]
+        for (key, entry) in record {
+            switch entry {
+            case .string(let value):
+                result[key] = value
+            case .empty:
+                result[key] = ""
+            case .none:
+                continue
+            case .data:
+                // This helper is only selected before iOS 16, where `.data`
+                // cannot occur. The case keeps newer SDK enums exhaustive.
+                continue
+            @unknown default:
+                continue
+            }
+        }
+        return result
+    }
+
+    /// One TXT decoder shared by peer and generic browse paths.
+    private func decodeTxtRecord(_ record: NWTXTRecord) -> [String: String] {
+        if #available(iOS 16.0, *) {
+            return parseTxtRecord(record.data)
+        }
+        return decodeLegacyTxtRecord(record)
+    }
+
+    /// Encode key-value pairs into DNS-SD TXT record data without silently
+    /// dropping fields. DNS-SD limits each length-prefixed TXT entry to 255
+    /// bytes, so callers get a start/update rejection when fidelity cannot be
+    /// preserved.
+    private func encodeTxtData(_ pairs: [String: String]) throws -> Data {
         var result = Data()
-        for (key, value) in pairs {
+        for key in pairs.keys.sorted() {
+            guard !key.isEmpty, !key.contains("=") else {
+                throw TxtEncodingError.invalidKey(key)
+            }
+            let value = pairs[key] ?? ""
             let entry = "\(key)=\(value)"
-            guard let entryData = entry.data(using: .utf8), entryData.count <= 255 else { continue }
+            guard let entryData = entry.data(using: .utf8), entryData.count <= 255 else {
+                throw TxtEncodingError.oversizedEntry(key)
+            }
             result.append(UInt8(entryData.count))
             result.append(entryData)
         }
         return result
+    }
+
+    /// Return a trimmed socket literal when `raw` is a dialable numeric
+    /// `ip:port` value. Host names and :0/:1 placeholders are not admitted
+    /// into the source-scoped address lookup. IPv6 must use bracket notation;
+    /// numeric non-zero scope ids are accepted for link-local candidates.
+    private func validatedSocketLiteral(_ raw: String) -> String? {
+        let candidate = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !candidate.isEmpty else { return nil }
+
+        let host: String
+        let portText: String
+        let isBracketedV6: Bool
+        if candidate.hasPrefix("[") {
+            guard let close = candidate.lastIndex(of: "]") else { return nil }
+            let afterClose = candidate.index(after: close)
+            guard afterClose < candidate.endIndex, candidate[afterClose] == ":" else { return nil }
+            host = String(candidate[candidate.index(after: candidate.startIndex) ..< close])
+            portText = String(candidate[candidate.index(after: afterClose)...])
+            isBracketedV6 = true
+        } else {
+            guard let separator = candidate.lastIndex(of: ":") else { return nil }
+            host = String(candidate[..<separator])
+            portText = String(candidate[candidate.index(after: separator)...])
+            isBracketedV6 = false
+        }
+
+        guard
+            !portText.isEmpty,
+            portText.allSatisfy({ $0 >= "0" && $0 <= "9" }),
+            let port = UInt16(portText),
+            port > 1,
+            !host.isEmpty
+        else { return nil }
+
+        if !isBracketedV6 {
+            guard !host.contains(":") else { return nil }
+            var addr = in_addr()
+            let valid = host.withCString { inet_pton(AF_INET, $0, &addr) == 1 }
+            return valid ? candidate : nil
+        }
+
+        let scopeParts = host.split(separator: "%", omittingEmptySubsequences: false)
+        guard scopeParts.count <= 2 else { return nil }
+        let addressPart = String(scopeParts[0])
+        if scopeParts.count == 2 {
+            let scopeText = scopeParts[1]
+            guard
+                !scopeText.isEmpty,
+                scopeText.allSatisfy({ $0 >= "0" && $0 <= "9" }),
+                let scope = UInt32(scopeText),
+                scope != 0
+            else { return nil }
+        }
+        var addr = in6_addr()
+        let valid = addressPart.withCString { inet_pton(AF_INET6, $0, &addr) == 1 }
+        guard valid, let parsedAddress = IPv6Address(addressPart) else { return nil }
+        guard !parsedAddress.isLinkLocal || scopeParts.count == 2 else { return nil }
+        return candidate
+    }
+
+    /// Validate and de-duplicate candidates while retaining their first-seen
+    /// order. One malformed TXT member must not suppress other valid direct
+    /// addresses or a relay URL.
+    private func validatedSocketLiterals(_ candidates: [String]) -> [String] {
+        var seen: Set<String> = []
+        var result: [String] = []
+        for candidate in candidates {
+            guard let address = validatedSocketLiteral(candidate), seen.insert(address).inserted else {
+                continue
+            }
+            result.append(address)
+        }
+        return result
+    }
+
+    private func peerTxtData(pk: String, relay: String?, addresses: [String]) throws -> Data {
+        var pairs: [String: String] = ["pk": pk]
+        if let relay = relay, !relay.isEmpty { pairs["relay"] = relay }
+        let validAddresses = validatedSocketLiterals(addresses)
+        if let addressValue = stableFittingPeerAddressTxtValue(validAddresses) {
+            pairs["address"] = addressValue
+        }
+        return try encodeTxtData(pairs)
+    }
+
+    private func advertisementDidPublish(_ advertiseId: UInt64) {
+        guard let session = advertiseSessions[advertiseId], session.state == .starting else { return }
+        session.state = .active
+        session.startInvoke.resolve(["advertiseId": advertiseId])
+    }
+
+    /// Stop a published service on the same main/default run loop where it was
+    /// created. Every terminal path removes that sole implicit schedule and
+    /// clears the assign/weak delegate reference.
+    private func teardownAdvertisementService(_ session: AdvertiseSession) {
+        DispatchQueue.main.async {
+            dispatchPrecondition(condition: .onQueue(DispatchQueue.main))
+            session.service.stop()
+            session.service.remove(from: RunLoop.main, forMode: .default)
+            session.service.delegate = nil
+        }
+    }
+
+    private func advertisementDidFail(_ advertiseId: UInt64, message: String) {
+        guard
+            let session = advertiseSessions[advertiseId],
+            session.state != .closed,
+            session.state != .failed
+        else { return }
+        let failedBeforeReady = session.state == .starting
+        session.state = .failed
+        session.terminalError = message
+        if failedBeforeReady {
+            session.startInvoke.reject("Failed to publish DNS-SD service: \(message)")
+            // No handle escaped from a rejected start, so retaining this entry
+            // would leak an unreachable session. Failures after readiness stay
+            // in the map and remain observable to update calls.
+            advertiseSessions.removeValue(forKey: advertiseId)
+        }
+        NSLog("[iroh-http-dnssd] advertise \(advertiseId) failed: \(message)")
+        teardownAdvertisementService(session)
+    }
+
+    private func advertisementDidStop(_ advertiseId: UInt64) {
+        guard let session = advertiseSessions[advertiseId] else { return }
+        switch session.state {
+        case .starting:
+            advertisementDidFail(advertiseId, message: "registration stopped before it was published")
+        case .active:
+            session.state = .failed
+            session.terminalError = "registration stopped unexpectedly"
+            teardownAdvertisementService(session)
+        case .closed, .failed:
+            break
+        }
+    }
+
+    private func startAdvertisement(
+        invoke: Invoke,
+        advertiseId: UInt64,
+        kind: AdvertisementKind,
+        txtData: Data,
+        makeService: @escaping () -> NetService
+    ) {
+        let startInvoke = InvokeOnce(invoke)
+        DispatchQueue.main.async {
+            // NetService auto-schedules exactly once on the creating thread's
+            // current/default run loop. Construct on main rather than creating
+            // on the Tauri IPC queue and adding a second registration later.
+            dispatchPrecondition(condition: .onQueue(DispatchQueue.main))
+            let service = makeService()
+            let registrationDelegate = NetServiceRegistrationDelegate(
+                onPublished: { [weak self] in
+                    self?.queue.async { self?.advertisementDidPublish(advertiseId) }
+                },
+                onFailure: { [weak self] message in
+                    self?.queue.async { self?.advertisementDidFail(advertiseId, message: message) }
+                },
+                onStopped: { [weak self] in
+                    self?.queue.async { self?.advertisementDidStop(advertiseId) }
+                }
+            )
+            let session = AdvertiseSession(
+                id: advertiseId,
+                service: service,
+                registrationDelegate: registrationDelegate,
+                kind: kind,
+                startInvoke: startInvoke
+            )
+            service.delegate = registrationDelegate
+
+            self.queue.async {
+                // Publish is dispatched only after the serial registry owns the
+                // session, so even an immediate callback finds its exact state.
+                self.advertiseSessions[advertiseId] = session
+                DispatchQueue.main.async {
+                    dispatchPrecondition(condition: .onQueue(DispatchQueue.main))
+                    guard service.setTXTRecord(txtData) else {
+                        self.queue.async {
+                            self.advertisementDidFail(
+                                advertiseId,
+                                message: "NetService rejected the TXT record"
+                            )
+                        }
+                        return
+                    }
+                    service.publish(options: .noAutoRename)
+                }
+            }
+        }
+    }
+
+    private func stopAdvertisement(
+        _ advertiseId: UInt64,
+        expectedKind: AdvertisementStopKind,
+        invoke: Invoke
+    ) {
+        queue.async {
+            guard let session = self.advertiseSessions[advertiseId] else {
+                invoke.resolve()
+                return
+            }
+            guard session.kind.matches(expectedKind) else {
+                invoke.reject(expectedKind.mismatchMessage)
+                return
+            }
+            self.advertiseSessions.removeValue(forKey: advertiseId)
+            let wasStarting = session.state == .starting
+            session.state = .closed
+            if wasStarting {
+                session.startInvoke.reject("DNS-SD advertisement was closed before becoming ready")
+            }
+            self.teardownAdvertisementService(session)
+            invoke.resolve()
+        }
     }
 
     /// Validate that a string is a canonical iroh endpoint id: a 32-byte
@@ -188,30 +618,24 @@ class IrohHttpPlugin: Plugin {
     @objc public func browse_peers_start(_ invoke: Invoke) throws {
         let args = try invoke.parseArgs(BrowseStartArgs.self)
         let browseId = allocBrowseId()
+        let startInvoke = InvokeOnce(invoke)
 
         let serviceType = "_\(args.serviceName)._udp"
         let descriptor = NWBrowser.Descriptor.bonjourWithTXTRecord(type: serviceType, domain: nil)
         let browser = NWBrowser(for: descriptor, using: .udp)
-        let session = BrowseSession(id: browseId, browser: browser)
+        let session = BrowseSession(id: browseId, browser: browser, startInvoke: startInvoke)
 
-        browser.browseResultsChangedHandler = { [weak self] latestResults, _ in
-            guard let self = self else { return }
+        browser.browseResultsChangedHandler = { [weak self, weak session] latestResults, _ in
+            guard let self = self, let session = session else { return }
             self.queue.async {
                 self.handleBrowseResults(session: session, results: latestResults)
             }
         }
 
-        browser.stateUpdateHandler = { [weak self] state in
-            if case .failed(let error) = state {
-                if case .dns(let code) = error, code == -65569 {
-                    // Expected on duplicate/teardown; not worth logging.
-                } else {
-                    NSLog("[iroh-http-mdns] browse \(browseId) failed: \(error.localizedDescription)")
-                }
-                // #350 review L4: on any terminal failure cancel and drop the
-                // session so it doesn't leak in the map.
-                browser.cancel()
-                self?.queue.async { self?.browseSessions.removeValue(forKey: browseId) }
+        browser.stateUpdateHandler = { [weak self, weak session] state in
+            guard let self = self, let session = session else { return }
+            self.queue.async {
+                self.handlePeerBrowseState(session: session, state: state)
             }
         }
 
@@ -219,23 +643,57 @@ class IrohHttpPlugin: Plugin {
             self.browseSessions[browseId] = session
             browser.start(queue: self.queue)
         }
+    }
 
-        invoke.resolve(["browseId": browseId])
+    private func handlePeerBrowseState(session: BrowseSession, state: NWBrowser.State) {
+        guard browseSessions[session.id] === session else { return }
+        switch state {
+        case .ready:
+            guard session.state == .starting else { return }
+            session.state = .active
+            session.startInvoke.resolve(["browseId": session.id])
+        case .failed(let error):
+            guard session.state != .failed, session.state != .closed else { return }
+            let failedBeforeReady = session.state == .starting
+            let message = error.localizedDescription
+            session.state = .failed
+            session.terminalError = message
+            if case .dns(let code) = error, code == -65569 {
+                // Duplicate/teardown is quiet in logs, but still a real native
+                // terminal transition that the start or poll contract reports.
+            } else {
+                NSLog("[iroh-http-mdns] browse \(session.id) failed: \(message)")
+            }
+            session.browser.cancel()
+            if failedBeforeReady {
+                session.startInvoke.reject("Failed to start peer browse: \(message)")
+                browseSessions.removeValue(forKey: session.id)
+            }
+        case .cancelled:
+            if session.state == .starting {
+                session.state = .closed
+                session.startInvoke.reject("Peer browse closed before becoming ready")
+                browseSessions.removeValue(forKey: session.id)
+            } else if session.state == .active {
+                // Unexpected native cancellation remains distinguishable from
+                // an active browse with no results. Poll consumes this state.
+                session.state = .closed
+            }
+        default:
+            break
+        }
     }
 
     private func handleBrowseResults(session: BrowseSession, results: Set<NWBrowser.Result>) {
-        var currentPks: Set<String> = []
+        guard session.state == .starting || session.state == .active else { return }
+        var currentSnapshots: [String: (nodeId: String, addrs: Set<String>)] = [:]
 
         for result in results {
+            guard case .service(let instanceName, _, _, _) = result.endpoint else { continue }
+
             var txt: [String: String] = [:]
-            if case let .bonjour(txtRecord) = result.metadata {
-                if #available(iOS 16.0, *) {
-                    txt = parseTxtRecord(txtRecord.data)
-                } else {
-                    for (key, entry) in txtRecord {
-                        if case .string(let value) = entry { txt[key] = value }
-                    }
-                }
+            if case .bonjour(let txtRecord) = result.metadata {
+                txt = decodeTxtRecord(txtRecord)
             }
 
             // The DNS-SD instance name doubles as the node-id fallback for
@@ -243,52 +701,74 @@ class IrohHttpPlugin: Plugin {
             // advertiser publishes the base32 endpoint id as the instance
             // name *and* sets `pk`, so this only matters for older or
             // third-party advertisers.
-            var instanceName: String? = nil
-            if case .service(let name, _, _, _) = result.endpoint {
-                instanceName = name
-            }
-
             // Resolve the node-id: prefer the `pk` TXT (set by every current
             // advertiser), then fall back to the instance name. Reject
             // records where neither yields a valid id.
             let nodeId: String
             if let pk = txt["pk"], !pk.isEmpty {
                 nodeId = pk
-            } else if let name = instanceName, isValidEndpointId(name) {
-                nodeId = name
+            } else if isValidEndpointId(instanceName) {
+                nodeId = instanceName
             } else {
                 continue
             }
-            currentPks.insert(nodeId)
-
             var addrs: [String] = []
-            // #346: a direct `ip:port` address published by the advertiser lets
-            // this peer be dialed over the LAN. It already carries the real
-            // bound QUIC port, so it is surfaced verbatim.
-            if let address = txt["address"], !address.isEmpty { addrs.append(address) }
+            // The TXT boundary is plural and comma-separated. Each candidate's
+            // authoritative port is preserved; malformed members and :0/:1
+            // placeholders are ignored independently.
+            if let address = txt["address"], !address.isEmpty {
+                let candidates = address.split(separator: ",", omittingEmptySubsequences: false)
+                    .map(String.init)
+                addrs.append(contentsOf: validatedSocketLiterals(candidates))
+            }
             if let relay = txt["relay"], !relay.isEmpty { addrs.append(relay) }
 
-            if let name = instanceName {
-                // #350 review M2: dedup on (nodeId + sorted addrs) so a rebind
-                // under the same nodeId re-emits with the new address instead of
-                // being suppressed.
-                let signature = nodeId + "|" + addrs.sorted().joined(separator: ",")
-                if session.knownNodes[name]?.signature != signature {
-                    session.knownNodes[name] = (nodeId: nodeId, signature: signature)
-                    session.pendingEvents.append([
-                        "type": "discovered",
-                        "nodeId": nodeId,
-                        "addrs": addrs,
-                    ])
+            if var existing = currentSnapshots[instanceName] {
+                if existing.nodeId == nodeId {
+                    existing.addrs.formUnion(addrs)
+                    currentSnapshots[instanceName] = existing
+                } else if nodeId < existing.nodeId {
+                    // Conflicting identities for one service instance are
+                    // invalid. Pick deterministically instead of allowing Set
+                    // iteration order to oscillate the effective source.
+                    currentSnapshots[instanceName] = (nodeId: nodeId, addrs: Set(addrs))
                 }
+            } else {
+                currentSnapshots[instanceName] = (nodeId: nodeId, addrs: Set(addrs))
             }
         }
 
-        // Emit "expired" for nodes that vanished from the result set.
-        let expiredNames = session.knownNodes.filter { !currentPks.contains($0.value.nodeId) }.map { $0.key }
+        for instanceName in currentSnapshots.keys.sorted() {
+            guard let snapshot = currentSnapshots[instanceName] else { continue }
+            let nodeId = snapshot.nodeId
+            let addrs = snapshot.addrs.sorted()
+            // Dedup on (nodeId + sorted addrs) so a rebind under the same node
+            // re-emits, while retaining the service-instance identity used for
+            // exact source-scoped replacement and expiry.
+            let signature = nodeId + "|" + addrs.joined(separator: ",")
+            if session.knownNodes[instanceName]?.signature != signature {
+                session.knownNodes[instanceName] = (nodeId: nodeId, signature: signature)
+                session.pendingEvents.append([
+                    "type": "discovered",
+                    "instanceName": instanceName,
+                    "nodeId": nodeId,
+                    "addrs": addrs,
+                ])
+            }
+        }
+
+        // Expire by DNS-SD service instance, never by node id. Two instances
+        // may legitimately advertise the same stable node during replacement.
+        let currentInstances = Set(currentSnapshots.keys)
+        let expiredNames = session.knownNodes.keys.filter { !currentInstances.contains($0) }.sorted()
         for name in expiredNames {
             if let snapshot = session.knownNodes.removeValue(forKey: name) {
-                session.pendingEvents.append(["type": "expired", "nodeId": snapshot.nodeId, "addrs": []])
+                session.pendingEvents.append([
+                    "type": "expired",
+                    "instanceName": name,
+                    "nodeId": snapshot.nodeId,
+                    "addrs": [] as [String],
+                ])
             }
         }
     }
@@ -297,12 +777,25 @@ class IrohHttpPlugin: Plugin {
         let args = try invoke.parseArgs(BrowsePollArgs.self)
         queue.async {
             guard let session = self.browseSessions[args.browseId] else {
-                invoke.resolve(["events": [] as [[String: Any]]])
+                invoke.resolve([
+                    "status": "closed",
+                    "events": [] as [[String: Any]],
+                ])
                 return
             }
             let events = session.pendingEvents
             session.pendingEvents = []
-            invoke.resolve(["events": events])
+            var payload: [String: Any] = [
+                "status": session.state.pollValue,
+                "events": events,
+            ]
+            if let error = session.terminalError { payload["error"] = error }
+            invoke.resolve(payload)
+            if session.state == .closed || session.state == .failed {
+                // Terminal state is retained until exactly one native poll has
+                // observed it; subsequent polls naturally report `closed`.
+                self.browseSessions.removeValue(forKey: args.browseId)
+            }
         }
     }
 
@@ -310,10 +803,17 @@ class IrohHttpPlugin: Plugin {
         let args = try invoke.parseArgs(BrowseStopArgs.self)
         queue.async {
             if let session = self.browseSessions.removeValue(forKey: args.browseId) {
+                let wasStarting = session.state == .starting
+                session.state = .closed
+                if wasStarting {
+                    session.startInvoke.reject("Peer browse closed before becoming ready")
+                }
+                session.browser.browseResultsChangedHandler = nil
+                session.browser.stateUpdateHandler = nil
                 session.browser.cancel()
             }
+            invoke.resolve()
         }
-        invoke.resolve()
     }
 
     // MARK: - Advertise Commands
@@ -322,62 +822,92 @@ class IrohHttpPlugin: Plugin {
         let args = try invoke.parseArgs(AdvertiseStartArgs.self)
         let advertiseId = allocAdvertiseId()
 
-        let serviceType = "_\(args.serviceName)._udp"
-        let listener: NWListener
+        let txtData: Data
         do {
-            listener = try NWListener(using: .udp)
+            txtData = try peerTxtData(pk: args.pk, relay: args.relay, addresses: args.addresses)
         } catch {
-            invoke.reject("Failed to create listener: \(error.localizedDescription)")
+            invoke.reject("Failed to encode peer DNS-SD TXT: \(error.localizedDescription)")
             return
         }
 
-        var txtPairs: [String: String] = ["pk": args.pk]
-        if let relay = args.relay { txtPairs["relay"] = relay }
-        // #346: publish the node's direct `ip:port` address so peers can dial it
-        // over the LAN. The iOS `NWListener`'s own UDP port is unrelated to the
-        // QUIC socket, so the SRV port is not usable — the reconciled address
-        // (with the real bound QUIC port) travels in this TXT entry instead.
-        if let address = args.address, !address.isEmpty { txtPairs["address"] = address }
-        let txtData = encodeTxtData(txtPairs)
-
-        listener.service = NWListener.Service(
-            name: String(args.pk.prefix(63)),
-            type: serviceType,
-            domain: nil,
-            txtRecord: txtData
-        )
-        listener.newConnectionHandler = { conn in conn.cancel() }
-
-        listener.stateUpdateHandler = { [weak self] state in
-            if case .failed(let error) = state {
-                if case .dns(let code) = error, code == -65569 {
-                    // Expected on duplicate/teardown; not worth logging.
-                } else {
-                    NSLog("[iroh-http-mdns] advertise \(advertiseId) failed: \(error.localizedDescription)")
-                }
-                // #350 review L4: on any terminal failure cancel and drop the
-                // session so it doesn't leak in the map.
-                listener.cancel()
-                self?.queue.async { self?.advertiseSessions.removeValue(forKey: advertiseId) }
+        // NetService publishes metadata for the existing QUIC endpoint without
+        // binding or blackholing a socket. Port 1 is only the peer record's SRV
+        // placeholder; complete dialable candidates retain their authoritative
+        // ports in the plural `address` TXT value.
+        startAdvertisement(
+            invoke: invoke,
+            advertiseId: advertiseId,
+            kind: .peer(pk: args.pk),
+            txtData: txtData,
+            makeService: {
+                NetService(
+                    domain: "local.",
+                    type: "_\(args.serviceName)._udp.",
+                    name: args.pk,
+                    port: 1
+                )
             }
-        }
+        )
+    }
+
+    @objc public func advertise_peer_update(_ invoke: Invoke) throws {
+        let args = try invoke.parseArgs(AdvertiseUpdateArgs.self)
+        let completion = InvokeOnce(invoke)
 
         queue.async {
-            self.advertiseSessions[advertiseId] = AdvertiseSession(id: advertiseId, listener: listener)
-            listener.start(queue: self.queue)
-        }
+            guard let session = self.advertiseSessions[args.advertiseId] else {
+                completion.reject("Peer advertisement is closed")
+                return
+            }
+            guard case .peer(let pk) = session.kind else {
+                completion.reject("Advertisement handle is not an iroh peer advertisement")
+                return
+            }
+            guard session.state == .active else {
+                if session.state == .failed {
+                    completion.reject(
+                        "Peer advertisement failed: \(session.terminalError ?? "unknown native failure")"
+                    )
+                } else {
+                    completion.reject("Peer advertisement is not active")
+                }
+                return
+            }
 
-        invoke.resolve(["advertiseId": advertiseId])
+            let txtData: Data
+            do {
+                txtData = try self.peerTxtData(pk: pk, relay: args.relay, addresses: args.addresses)
+            } catch {
+                completion.reject("Failed to encode peer DNS-SD TXT: \(error.localizedDescription)")
+                return
+            }
+
+            DispatchQueue.main.async {
+                let didUpdate = session.service.setTXTRecord(txtData)
+                self.queue.async {
+                    guard self.advertiseSessions[args.advertiseId] === session else {
+                        completion.reject("Peer advertisement is closed")
+                        return
+                    }
+                    guard session.state == .active else {
+                        completion.reject(
+                            "Peer advertisement failed: \(session.terminalError ?? "not active")"
+                        )
+                        return
+                    }
+                    if didUpdate {
+                        completion.resolve()
+                    } else {
+                        completion.reject("NetService rejected the updated peer TXT record")
+                    }
+                }
+            }
+        }
     }
 
     @objc public func advertise_peer_stop(_ invoke: Invoke) throws {
         let args = try invoke.parseArgs(AdvertiseStopArgs.self)
-        queue.async {
-            if let session = self.advertiseSessions.removeValue(forKey: args.advertiseId) {
-                session.listener.cancel()
-            }
-        }
-        invoke.resolve()
+        stopAdvertisement(args.advertiseId, expectedKind: .peer, invoke: invoke)
     }
 
     // MARK: - Generic DNS-SD Commands
@@ -391,31 +921,30 @@ class IrohHttpPlugin: Plugin {
     @objc public func browse_start(_ invoke: Invoke) throws {
         let args = try invoke.parseArgs(DnsSdBrowseStartArgs.self)
         let browseId = allocBrowseId()
+        let startInvoke = InvokeOnce(invoke)
 
         let proto = args.`protocol`.lowercased() == "tcp" ? "_tcp" : "_udp"
         let serviceType = "_\(args.serviceName).\(proto)"
         let descriptor = NWBrowser.Descriptor.bonjourWithTXTRecord(type: serviceType, domain: nil)
         let browser = NWBrowser(for: descriptor, using: parameters(for: args.`protocol`))
-        let session = DnsSdBrowseSession(id: browseId, browser: browser, serviceType: serviceType)
+        let session = DnsSdBrowseSession(
+            id: browseId,
+            browser: browser,
+            serviceType: serviceType,
+            startInvoke: startInvoke
+        )
 
-        browser.browseResultsChangedHandler = { [weak self] latestResults, _ in
-            guard let self = self else { return }
+        browser.browseResultsChangedHandler = { [weak self, weak session] latestResults, _ in
+            guard let self = self, let session = session else { return }
             self.queue.async {
                 self.handleDnsSdBrowseResults(session: session, results: latestResults)
             }
         }
 
-        browser.stateUpdateHandler = { [weak self] state in
-            if case .failed(let error) = state {
-                if case .dns(let code) = error, code == -65569 {
-                    // Expected on duplicate/teardown; not worth logging.
-                } else {
-                    NSLog("[iroh-http-dnssd] browse \(browseId) failed: \(error.localizedDescription)")
-                }
-                // #350 review L4: on any terminal failure cancel and drop the
-                // session so it doesn't leak in the map.
-                browser.cancel()
-                self?.queue.async { self?.dnsSdBrowseSessions.removeValue(forKey: browseId) }
+        browser.stateUpdateHandler = { [weak self, weak session] state in
+            guard let self = self, let session = session else { return }
+            self.queue.async {
+                self.handleDnsSdBrowseState(session: session, state: state)
             }
         }
 
@@ -423,8 +952,42 @@ class IrohHttpPlugin: Plugin {
             self.dnsSdBrowseSessions[browseId] = session
             browser.start(queue: self.queue)
         }
+    }
 
-        invoke.resolve(["browseId": browseId])
+    private func handleDnsSdBrowseState(session: DnsSdBrowseSession, state: NWBrowser.State) {
+        guard dnsSdBrowseSessions[session.id] === session else { return }
+        switch state {
+        case .ready:
+            guard session.state == .starting else { return }
+            session.state = .active
+            session.startInvoke.resolve(["browseId": session.id])
+        case .failed(let error):
+            guard session.state != .failed, session.state != .closed else { return }
+            let failedBeforeReady = session.state == .starting
+            let message = error.localizedDescription
+            session.state = .failed
+            session.terminalError = message
+            if case .dns(let code) = error, code == -65569 {
+                // Quiet expected duplicate/teardown failures in logs only.
+            } else {
+                NSLog("[iroh-http-dnssd] browse \(session.id) failed: \(message)")
+            }
+            session.browser.cancel()
+            if failedBeforeReady {
+                session.startInvoke.reject("Failed to start DNS-SD browse: \(message)")
+                dnsSdBrowseSessions.removeValue(forKey: session.id)
+            }
+        case .cancelled:
+            if session.state == .starting {
+                session.state = .closed
+                session.startInvoke.reject("DNS-SD browse closed before becoming ready")
+                dnsSdBrowseSessions.removeValue(forKey: session.id)
+            } else if session.state == .active {
+                session.state = .closed
+            }
+        default:
+            break
+        }
     }
 
     /// Build generic DNS-SD records from browse results.
@@ -437,6 +1000,7 @@ class IrohHttpPlugin: Plugin {
     private func handleDnsSdBrowseResults(
         session: DnsSdBrowseSession, results: Set<NWBrowser.Result>
     ) {
+        guard session.state == .starting || session.state == .active else { return }
         var current: Set<String> = []
 
         for result in results {
@@ -444,14 +1008,8 @@ class IrohHttpPlugin: Plugin {
             current.insert(name)
 
             var txt: [String: String] = [:]
-            if case let .bonjour(txtRecord) = result.metadata {
-                if #available(iOS 16.0, *) {
-                    txt = parseTxtRecord(txtRecord.data)
-                } else {
-                    for (key, entry) in txtRecord {
-                        if case .string(let value) = entry { txt[key] = value }
-                    }
-                }
+            if case .bonjour(let txtRecord) = result.metadata {
+                txt = decodeTxtRecord(txtRecord)
             }
 
             var addrs: [String] = []
@@ -482,7 +1040,7 @@ class IrohHttpPlugin: Plugin {
         }
 
         // Emit inactive records for instances that vanished.
-        let expired = Set(session.knownInstances.keys).subtracting(current)
+        let expired = Set(session.knownInstances.keys).subtracting(current).sorted()
         for name in expired {
             session.knownInstances.removeValue(forKey: name)
             session.pendingRecords.append([
@@ -501,12 +1059,23 @@ class IrohHttpPlugin: Plugin {
         let args = try invoke.parseArgs(BrowsePollArgs.self)
         queue.async {
             guard let session = self.dnsSdBrowseSessions[args.browseId] else {
-                invoke.resolve(["records": [] as [[String: Any]]])
+                invoke.resolve([
+                    "status": "closed",
+                    "records": [] as [[String: Any]],
+                ])
                 return
             }
             let records = session.pendingRecords
             session.pendingRecords = []
-            invoke.resolve(["records": records])
+            var payload: [String: Any] = [
+                "status": session.state.pollValue,
+                "records": records,
+            ]
+            if let error = session.terminalError { payload["error"] = error }
+            invoke.resolve(payload)
+            if session.state == .closed || session.state == .failed {
+                self.dnsSdBrowseSessions.removeValue(forKey: args.browseId)
+            }
         }
     }
 
@@ -514,71 +1083,75 @@ class IrohHttpPlugin: Plugin {
         let args = try invoke.parseArgs(BrowseStopArgs.self)
         queue.async {
             if let session = self.dnsSdBrowseSessions.removeValue(forKey: args.browseId) {
+                let wasStarting = session.state == .starting
+                session.state = .closed
+                if wasStarting {
+                    session.startInvoke.reject("DNS-SD browse closed before becoming ready")
+                }
+                session.browser.browseResultsChangedHandler = nil
+                session.browser.stateUpdateHandler = nil
                 session.browser.cancel()
             }
+            invoke.resolve()
         }
-        invoke.resolve()
     }
 
     @objc public func advertise_start(_ invoke: Invoke) throws {
         let args = try invoke.parseArgs(DnsSdAdvertiseStartArgs.self)
+        guard args.addrs.isEmpty else {
+            invoke.reject(
+                "iOS DNS-SD advertisement cannot publish explicit addrs; "
+                    + "omit addrs to advertise the device's current interface addresses"
+            )
+            return
+        }
+        guard args.port != 0 else {
+            invoke.reject("Cannot advertise a generic DNS-SD service on port 0")
+            return
+        }
+        guard
+            let instanceData = args.instanceName.data(using: .utf8),
+            !instanceData.isEmpty,
+            instanceData.count <= 63
+        else {
+            invoke.reject("DNS-SD instanceName must contain 1...63 UTF-8 bytes")
+            return
+        }
         let advertiseId = allocAdvertiseId()
 
         let proto = args.`protocol`.lowercased() == "tcp" ? "_tcp" : "_udp"
-        let serviceType = "_\(args.serviceName).\(proto)"
-        let params = parameters(for: args.`protocol`)
-
-        let listener: NWListener
+        let serviceType = "_\(args.serviceName).\(proto)."
+        let txtData: Data
         do {
-            if let port = NWEndpoint.Port(rawValue: args.port), args.port != 0 {
-                listener = try NWListener(using: params, on: port)
-            } else {
-                listener = try NWListener(using: params)
-            }
+            txtData = try encodeTxtData(args.txt)
         } catch {
-            invoke.reject("Failed to create listener: \(error.localizedDescription)")
+            invoke.reject("Failed to encode generic DNS-SD TXT: \(error.localizedDescription)")
             return
         }
 
-        let txtData = encodeTxtData(args.txt)
-        listener.service = NWListener.Service(
-            name: String(args.instanceName.prefix(63)),
-            type: serviceType,
-            domain: nil,
-            txtRecord: txtData
-        )
-        listener.newConnectionHandler = { conn in conn.cancel() }
-
-        listener.stateUpdateHandler = { [weak self] state in
-            if case .failed(let error) = state {
-                if case .dns(let code) = error, code == -65569 {
-                    // Expected on duplicate/teardown; not worth logging.
-                } else {
-                    NSLog("[iroh-http-dnssd] advertise \(advertiseId) failed: \(error.localizedDescription)")
-                }
-                // #350 review L4: on any terminal failure cancel and drop the
-                // session so it doesn't leak in the map.
-                listener.cancel()
-                self?.queue.async { self?.advertiseSessions.removeValue(forKey: advertiseId) }
+        // NetService registers the caller-owned service's existing port. It
+        // does not bind that port and therefore cannot intercept or blackhole
+        // incoming connections (#366). Bonjour derives local A/AAAA records
+        // when explicit `addrs` is empty; TXT is retained field-for-field.
+        startAdvertisement(
+            invoke: invoke,
+            advertiseId: advertiseId,
+            kind: .generic,
+            txtData: txtData,
+            makeService: {
+                NetService(
+                    domain: "local.",
+                    type: serviceType,
+                    name: args.instanceName,
+                    port: Int32(args.port)
+                )
             }
-        }
-
-        queue.async {
-            self.advertiseSessions[advertiseId] = AdvertiseSession(id: advertiseId, listener: listener)
-            listener.start(queue: self.queue)
-        }
-
-        invoke.resolve(["advertiseId": advertiseId])
+        )
     }
 
     @objc public func advertise_stop(_ invoke: Invoke) throws {
         let args = try invoke.parseArgs(AdvertiseStopArgs.self)
-        queue.async {
-            if let session = self.advertiseSessions.removeValue(forKey: args.advertiseId) {
-                session.listener.cancel()
-            }
-        }
-        invoke.resolve()
+        stopAdvertisement(args.advertiseId, expectedKind: .generic, invoke: invoke)
     }
 
     /// Convert one POSIX interface address to a numeric IP literal. Conversion

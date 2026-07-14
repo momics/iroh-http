@@ -2494,9 +2494,10 @@ version = "0.6.0"
 dependencies = [
  "base32",
  "futures",
+ "if-addrs",
  "iroh",
+ "iroh-http-core",
  "mdns-sd",
- "n0-future",
  "tokio",
  "tracing",
 ]
@@ -5158,11 +5159,9 @@ dependencies = [
  "iroh-http-adapter",
  "iroh-http-core",
  "iroh-http-discovery",
- "n0-future",
  "rustls",
  "serde",
  "serde_json",
- "slab",
  "tauri",
  "tauri-plugin",
  "tokio",

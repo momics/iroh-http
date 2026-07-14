@@ -30,6 +30,12 @@ mod command_tests {
         tauri::test::mock_app().handle().clone()
     }
 
+    /// Preserve the concise lifecycle calls below while supplying the
+    /// WebView-aware command's app context.
+    async fn close_endpoint(handle: u64, force: Option<bool>) -> Result<(), String> {
+        crate::commands::close_endpoint(mock_handle(), handle, force).await
+    }
+
     /// Create a real endpoint in loopback/offline mode for testing.
     async fn make_test_endpoint() -> u64 {
         let result = create_endpoint(
@@ -412,7 +418,7 @@ mod platform_dependency_contract {
 ///
 /// The mobile mDNS/DNS-SD commands cross a Rust ↔ Swift/Kotlin boundary that is
 /// matched **by string at runtime**: the Rust plugin calls
-/// `run_mobile_plugin("browse_peers_start", …)`, which dispatches to the native
+/// `run_mobile_plugin_async("browse_peers_start", …)`, which dispatches to the native
 /// handler declared as `@objc public func browse_peers_start` (Swift) and
 /// `@Command fun browse_peers_start` (Kotlin). Each side compiles independently,
 /// so a rename or a dropped handler on one side is a *silent* contract drift
@@ -447,7 +453,7 @@ mod ffi_contract {
     /// Extract the identifier that follows `marker` in `haystack`, i.e. the run
     /// of `[A-Za-z0-9_]` characters starting at the first non-identifier byte
     /// after each occurrence of `marker`. Used to pull the command name out of
-    /// `func NAME(`, `run_mobile_plugin("NAME"`, etc.
+    /// `func NAME(`, `run_mobile_plugin_async("NAME"`, etc.
     fn names_after(haystack: &str, marker: &str) -> BTreeSet<String> {
         let bytes = haystack.as_bytes();
         let mut out = BTreeSet::new();
@@ -475,32 +481,37 @@ mod ffi_contract {
         b.is_ascii_alphanumeric() || b == b'_'
     }
 
-    /// Command strings the Rust plugin invokes via `run_mobile_plugin`.
+    /// Command strings the Rust plugin invokes via Tauri's synchronous or
+    /// asynchronous mobile bridge.
     ///
-    /// Matches `run_mobile_plugin` optionally followed by a turbofish
+    /// Matches `run_mobile_plugin[_async]` optionally followed by a turbofish
     /// (`::<()>`) and `(`, then the first string-literal argument.
     fn rust_commands() -> BTreeSet<String> {
         let src = read("src/mobile_mdns.rs");
         let mut out = BTreeSet::new();
-        let marker = "run_mobile_plugin";
-        for (idx, _) in src.match_indices(marker) {
-            // Find the opening quote of the first argument, skipping an optional
-            // turbofish and the opening paren / whitespace / newlines.
-            let after = &src[idx + marker.len()..];
-            let Some(q) = after.find('"') else { continue };
-            // Guard: the string literal must be the *first* argument, i.e. only
-            // separators / turbofish / `(` may appear before the quote.
-            if after[..q]
-                .chars()
-                .any(|c| c.is_ascii_alphanumeric() && c != '(')
-            {
-                // Defensive: an alnum before the quote would mean we matched a
-                // different construct. `::<()>` contains no alnum, `(` is fine.
-                continue;
-            }
-            let name: String = after[q + 1..].chars().take_while(|&c| c != '"').collect();
-            if !name.is_empty() {
-                out.insert(name);
+        // Scan the longer marker first. The shorter marker also occurs inside
+        // `_async`, but its first-argument guard intentionally rejects that
+        // duplicate because `_async` contains identifier characters.
+        for marker in ["run_mobile_plugin_async", "run_mobile_plugin"] {
+            for (idx, _) in src.match_indices(marker) {
+                // Find the opening quote of the first argument, skipping an optional
+                // turbofish and the opening paren / whitespace / newlines.
+                let after = &src[idx + marker.len()..];
+                let Some(q) = after.find('"') else { continue };
+                // Guard: the string literal must be the *first* argument, i.e. only
+                // separators / turbofish / `(` may appear before the quote.
+                if after[..q]
+                    .chars()
+                    .any(|c| c.is_ascii_alphanumeric() && c != '(')
+                {
+                    // Defensive: an alnum before the quote would mean we matched a
+                    // different construct. `::<()>` contains no alnum, `(` is fine.
+                    continue;
+                }
+                let name: String = after[q + 1..].chars().take_while(|&c| c != '"').collect();
+                if !name.is_empty() {
+                    out.insert(name);
+                }
             }
         }
         out
@@ -557,7 +568,7 @@ mod ffi_contract {
         let swift = swift_commands();
         assert!(
             !rust.is_empty(),
-            "no run_mobile_plugin command strings found in src/mobile_mdns.rs \
+            "no run_mobile_plugin[_async] command strings found in src/mobile_mdns.rs \
              — the scanner is broken, not the contract"
         );
         assert!(
@@ -569,7 +580,7 @@ mod ffi_contract {
             rust,
             swift,
             "Rust ↔ Swift mobile command contract drift ({}). Every \
-             run_mobile_plugin(\"…\") string must have a matching \
+             run_mobile_plugin[_async](\"…\") string must have a matching \
              `@objc public func` in ios/Sources/IrohHttpPlugin.swift, and \
              vice-versa. See issue #333.",
             diff(&rust, &swift)
@@ -582,7 +593,7 @@ mod ffi_contract {
         let kotlin = kotlin_commands();
         assert!(
             !rust.is_empty(),
-            "no run_mobile_plugin command strings found in src/mobile_mdns.rs \
+            "no run_mobile_plugin[_async] command strings found in src/mobile_mdns.rs \
              — the scanner is broken, not the contract"
         );
         assert!(
@@ -594,7 +605,7 @@ mod ffi_contract {
             rust,
             kotlin,
             "Rust ↔ Kotlin mobile command contract drift ({}). Every \
-             run_mobile_plugin(\"…\") string must have a matching \
+             run_mobile_plugin[_async](\"…\") string must have a matching \
              `@Command fun` in android/.../IrohHttpPlugin.kt, and vice-versa. \
              See issue #333.",
             diff(&rust, &kotlin)

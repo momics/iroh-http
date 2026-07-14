@@ -124,6 +124,9 @@ jobs:
           npm run typecheck --workspace=packages/iroh-http-shared
           npm run typecheck --workspace=packages/iroh-http-tauri
 
+      - name: Shared discovery lifecycle tests
+        run: npm test --workspace=packages/iroh-http-shared
+
       # Clean example build (#350 F1): the Tauri example uses file: links to the
       # local packages. A clean `tsc` build must resolve PR-only APIs against the
       # freshly-built dist. This step is what catches the example importing
@@ -236,6 +239,8 @@ jobs:
       # macOS job. See issue #333.
       - name: Compile iOS Swift plugin (FFI contract, #333)
         run: bash packages/iroh-http-tauri/scripts/ci-ios-swift-build.sh
+      - name: iOS peer TXT policy contract
+        run: bash packages/iroh-http-tauri/ios/ContractTests/run.sh
 
   # ── Mobile FFI contract: compile the Android Kotlin plugin sources ───────────
   # Ubuntu (no macOS cost), build-only: no emulator, no NDK, no Rust
@@ -265,6 +270,8 @@ jobs:
           gradle-version: '8.14.3'
       - name: Compile Android Kotlin plugin (FFI contract, #333)
         run: bash packages/iroh-http-tauri/scripts/ci-android-gradle-build.sh
+      - name: Android discovery lifecycle contract
+        run: bash packages/iroh-http-tauri/android-contract-tests/run.sh
 
   rust-check-windows:
     name: Rust check (Windows)

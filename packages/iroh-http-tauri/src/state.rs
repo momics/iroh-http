@@ -52,6 +52,14 @@ fn remove_endpoint_owner(handle: u64) {
         .retain(|_, owned_handle| *owned_handle != handle);
 }
 
+/// Clear stable-node ownership after process-wide endpoint teardown.
+pub(crate) fn clear_endpoint_owners() {
+    endpoint_owners()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .clear();
+}
+
 // ── Scheme handler state ─────────────────────────────────────────────────────
 
 /// Managed state tracking which endpoint the `httpi://` scheme handler

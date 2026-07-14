@@ -232,7 +232,7 @@ export abstract class IrohAdapter {
       new Error(`browsePeersNext() not supported by this adapter`),
     );
   }
-  browsePeersClose(_browseHandle: number): void {/* no-op */}
+  browsePeersClose(_browseHandle: number): void | Promise<void> {/* no-op */}
   advertisePeer(
     _endpointHandle: number,
     _serviceName: string,
@@ -241,7 +241,9 @@ export abstract class IrohAdapter {
       new Error(`advertisePeer() not supported by this adapter`),
     );
   }
-  advertisePeerClose(_advertiseHandle: number): void {/* no-op */}
+  advertisePeerClose(_advertiseHandle: number): void | Promise<void> {
+    /* no-op */
+  }
 
   // ── Optional: generic DNS-SD ────────────────────────────────────────────────
   advertise(_config: ServiceConfig): Promise<number> {
@@ -249,7 +251,7 @@ export abstract class IrohAdapter {
       new Error(`advertise() not supported by this adapter`),
     );
   }
-  advertiseClose(_advertiseHandle: number): void {/* no-op */}
+  advertiseClose(_advertiseHandle: number): void | Promise<void> {/* no-op */}
   browse(
     _serviceName: string,
     _protocol?: DnsSdProtocol,
@@ -263,7 +265,7 @@ export abstract class IrohAdapter {
       new Error(`browseNext() not supported by this adapter`),
     );
   }
-  browseClose(_browseHandle: number): void {/* no-op */}
+  browseClose(_browseHandle: number): void | Promise<void> {/* no-op */}
 
   // ── Optional: transport events ──────────────────────────────────────────────
   // Transport events are delivered via a Rust-driven push mechanism: the

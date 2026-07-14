@@ -32,11 +32,8 @@ iroh-http-adapter = { path = "../../crates/iroh-http-adapter", version = "0.6.0"
 # iroh: the mobile AddressLookup bridge implements
 # `iroh::address_lookup::AddressLookup` in-process. Inherited from
 # `[workspace.dependencies]` above so it stays locked to the same iroh as
-# iroh-http-core / -adapter. n0-future supplies the `BoxStream` /
-# `stream::once` used by `resolve()`; pinned to the version iroh 1.0.x uses.
+# iroh-http-core / -adapter.
 iroh = { workspace = true }
-n0-future = "0.3"
-slab = "0.4"
 bytes = "1"
 base64 = "0.22"
 serde = { version = "1", features = ["derive"] }

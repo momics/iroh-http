@@ -11,11 +11,44 @@
 //! module: it builds a [`ServiceConfig`] from an [`iroh::Endpoint`] and wires
 //! browse results into the endpoint's address lookup. See ADR-018.
 
-use std::net::{IpAddr, SocketAddr};
+use std::{
+    future::Future,
+    net::{IpAddr, SocketAddr, SocketAddrV6},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
+    thread,
+};
 
+use futures::FutureExt;
 use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
 
 use crate::DiscoveryError;
+
+const DAEMON_COMMAND_RETRIES: usize = 100;
+
+fn retry_daemon_command<T>(mut command: impl FnMut() -> mdns_sd::Result<T>) -> mdns_sd::Result<T> {
+    let mut retries = DAEMON_COMMAND_RETRIES;
+    loop {
+        match command() {
+            Err(mdns_sd::Error::Again) if retries != 0 => {
+                retries = retries.saturating_sub(1);
+                thread::sleep(std::time::Duration::from_millis(1));
+            }
+            result => return result,
+        }
+    }
+}
+
+fn retire_after_enqueue<T, E>(
+    current: &mut Option<ServiceConfig>,
+    enqueue: impl FnOnce() -> Result<T, E>,
+) -> Result<T, E> {
+    let response = enqueue()?;
+    current.take();
+    Ok(response)
+}
 
 // ── Protocol ─────────────────────────────────────────────────────────────────
 
@@ -42,7 +75,7 @@ impl Protocol {
 // ── Config / record types ────────────────────────────────────────────────────
 
 /// A service to advertise via DNS-SD.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServiceConfig {
     /// Bare service name, e.g. `"my-app"` → `_my-app._udp.local.`. Must be a
     /// single DNS label: non-empty, ASCII alphanumeric or `-`.
@@ -161,12 +194,36 @@ pub(crate) fn new_daemon() -> Result<ServiceDaemon, DiscoveryError> {
 
 // ── Record conversion ────────────────────────────────────────────────────────
 
+fn socket_addr_with_scope(ip: IpAddr, port: u16, scope_id: u32) -> SocketAddr {
+    match ip {
+        IpAddr::V4(ip) => SocketAddr::new(IpAddr::V4(ip), port),
+        IpAddr::V6(ip) => SocketAddr::V6(SocketAddrV6::new(ip, port, 0, scope_id)),
+    }
+}
+
+fn applicable_ipv6_scope(ip: &std::net::Ipv6Addr, discovered_scope: u32) -> u32 {
+    if (ip.segments()[0] & 0xffc0) == 0xfe80 {
+        discovered_scope
+    } else {
+        0
+    }
+}
+
+fn socket_addr_from_scoped(ip: &mdns_sd::ScopedIp, port: u16) -> SocketAddr {
+    let ip_addr = ip.to_ip_addr();
+    let scope_id = match ip {
+        mdns_sd::ScopedIp::V6(ip) => applicable_ipv6_scope(ip.addr(), ip.scope_id().index),
+        _ => 0,
+    };
+    socket_addr_with_scope(ip_addr, port, scope_id)
+}
+
 fn record_from_resolved(rs: &mdns_sd::ResolvedService) -> Option<ServiceRecord> {
     let instance_name = instance_from_fullname(&rs.fullname, &rs.ty_domain)?;
     let addrs = rs
         .addresses
         .iter()
-        .map(|scoped| SocketAddr::new(scoped.to_ip_addr(), rs.port))
+        .map(|scoped| socket_addr_from_scoped(scoped, rs.port))
         .collect();
     let txt = rs
         .txt_properties
@@ -199,19 +256,179 @@ fn record_from_removed(service_type: String, fullname: &str) -> Option<ServiceRe
 
 // ── Advertise ────────────────────────────────────────────────────────────────
 
+fn service_info(
+    config: &ServiceConfig,
+    enable_addr_auto: bool,
+) -> Result<ServiceInfo, DiscoveryError> {
+    let service_type = service_type(&config.service_name, config.protocol)?;
+    let host_name = format!("{}.local.", config.instance_name);
+    let info = ServiceInfo::new(
+        &service_type,
+        &config.instance_name,
+        &host_name,
+        &config.addrs[..],
+        config.port,
+        &config.txt[..],
+    )
+    .map_err(|error| DiscoveryError::Setup(error.to_string()))?;
+    Ok(if enable_addr_auto {
+        info.enable_addr_auto()
+    } else {
+        info
+    })
+}
+
+fn register_changed(
+    current: &mut Option<ServiceConfig>,
+    next: ServiceConfig,
+    enable_addr_auto: bool,
+    register: impl FnOnce(ServiceInfo) -> Result<(), DiscoveryError>,
+) -> Result<bool, DiscoveryError> {
+    if current.as_ref() == Some(&next) {
+        return Ok(false);
+    }
+    register(service_info(&next, enable_addr_auto)?)?;
+    *current = Some(next);
+    Ok(true)
+}
+
+#[derive(Clone)]
+pub(crate) struct AdvertiseUpdater {
+    daemon: ServiceDaemon,
+    fullname: String,
+    current: Arc<Mutex<Option<ServiceConfig>>>,
+    enable_addr_auto: bool,
+}
+
+impl AdvertiseUpdater {
+    pub(crate) fn update(&self, next: ServiceConfig) -> Result<bool, DiscoveryError> {
+        let mut current = self
+            .current
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if current.is_none() {
+            return Ok(false);
+        }
+        register_changed(&mut current, next, self.enable_addr_auto, |info| {
+            if info.get_fullname() != self.fullname {
+                return Err(DiscoveryError::Setup(
+                    "cannot change an active DNS-SD advertisement identity".to_string(),
+                ));
+            }
+            self.daemon
+                .register(info)
+                .map_err(|error| DiscoveryError::Setup(error.to_string()))
+        })
+    }
+
+    pub(crate) fn unregister(&self) {
+        let mut current = self
+            .current
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if current.is_none() {
+            return;
+        }
+        match retire_after_enqueue(&mut current, || {
+            retry_daemon_command(|| self.daemon.unregister(&self.fullname))
+        }) {
+            Ok(_) => {}
+            Err(mdns_sd::Error::DaemonShutdown) => {
+                // A stopped daemon cannot still advertise the record.
+                current.take();
+            }
+            Err(error) => {
+                tracing::warn!(%error, "iroh-http-discovery: could not enqueue DNS-SD unregister; retaining state for retry");
+            }
+        }
+    }
+}
+
 /// An active advertise session.
 ///
 /// Drop to stop advertising; this unregisters the DNS-SD service and shuts the
-/// session's mDNS daemon down.
+/// session's mDNS daemon down. A peer-specialized session can also own a refresh
+/// worker; drop cancels and joins that worker before unregistering.
 pub struct AdvertiseSession {
     daemon: ServiceDaemon,
-    fullname: String,
+    updater: AdvertiseUpdater,
+    refresh_worker: Option<RefreshWorker>,
+}
+
+pub(crate) struct RefreshWorker {
+    cancel: Option<futures::channel::oneshot::Sender<()>>,
+    thread: Option<thread::JoinHandle<()>>,
+}
+
+impl RefreshWorker {
+    fn cancel(&mut self) {
+        if let Some(cancel) = self.cancel.take() {
+            let _ = cancel.send(());
+        }
+        if let Some(thread) = self.thread.take() {
+            // The worker never owns its `AdvertiseSession`, but keep this guard
+            // so future refactors cannot accidentally self-join.
+            if thread.thread().id() != thread::current().id() {
+                let _ = thread.join();
+            }
+        }
+    }
+}
+
+pub(crate) fn spawn_refresh_until_closed<C, R, F>(
+    closed: C,
+    refresh: R,
+    on_finish: F,
+) -> Result<RefreshWorker, DiscoveryError>
+where
+    C: Future<Output = ()> + Send + 'static,
+    R: Future<Output = ()> + Send + 'static,
+    F: FnOnce() + Send + 'static,
+{
+    let (cancel, cancel_rx) = futures::channel::oneshot::channel();
+    let thread = thread::Builder::new()
+        .name("iroh-http-mdns-refresh".to_string())
+        .spawn(move || {
+            futures::executor::block_on(async move {
+                let cancel = cancel_rx.fuse();
+                let closed = closed.fuse();
+                let refresh = refresh.fuse();
+                futures::pin_mut!(cancel, closed, refresh);
+                futures::select_biased! {
+                    _ = cancel => {}
+                    _ = closed => {}
+                    _ = refresh => {}
+                }
+            });
+            on_finish();
+        })
+        .map_err(|error| {
+            DiscoveryError::Setup(format!("cannot start peer advertisement refresh: {error}"))
+        })?;
+    Ok(RefreshWorker {
+        cancel: Some(cancel),
+        thread: Some(thread),
+    })
+}
+
+impl AdvertiseSession {
+    pub(crate) fn updater(&self) -> AdvertiseUpdater {
+        self.updater.clone()
+    }
+
+    pub(crate) fn set_refresh_worker(&mut self, worker: RefreshWorker) {
+        debug_assert!(self.refresh_worker.is_none());
+        self.refresh_worker = Some(worker);
+    }
 }
 
 impl Drop for AdvertiseSession {
     fn drop(&mut self) {
-        let _ = self.daemon.unregister(&self.fullname);
-        let _ = self.daemon.shutdown();
+        if let Some(mut worker) = self.refresh_worker.take() {
+            worker.cancel();
+        }
+        self.updater.unregister();
+        let _ = retry_daemon_command(|| self.daemon.shutdown());
     }
 }
 
@@ -223,54 +440,186 @@ impl Drop for AdvertiseSession {
 /// [`ServiceConfig::addrs`] are advertised in addition. The service stays
 /// advertised until the returned [`AdvertiseSession`] is dropped.
 pub fn advertise(config: ServiceConfig) -> Result<AdvertiseSession, DiscoveryError> {
-    let service_type = service_type(&config.service_name, config.protocol)?;
-    let daemon = new_daemon()?;
-    let host_name = format!("{}.local.", config.instance_name);
+    advertise_inner(config, true)
+}
 
-    let info = ServiceInfo::new(
-        &service_type,
-        &config.instance_name,
-        &host_name,
-        &config.addrs[..],
-        config.port,
-        &config.txt[..],
-    )
-    .map_err(|e| DiscoveryError::Setup(e.to_string()))?
-    .enable_addr_auto();
+/// Advertise an explicitly selected address set, enabling `mdns-sd` host
+/// interface expansion only when the caller has established that its single
+/// SRV port is valid for every bound family.
+///
+/// Peer advertisements use this because their authoritative QUIC candidates
+/// can carry different per-family or reflexive ports in TXT; unconditionally
+/// pairing every local interface with one SRV port would manufacture
+/// undialable paths.
+pub(crate) fn advertise_selected_addrs(
+    config: ServiceConfig,
+    enable_addr_auto: bool,
+) -> Result<AdvertiseSession, DiscoveryError> {
+    advertise_inner(config, enable_addr_auto)
+}
+
+fn advertise_inner(
+    config: ServiceConfig,
+    enable_addr_auto: bool,
+) -> Result<AdvertiseSession, DiscoveryError> {
+    let info = service_info(&config, enable_addr_auto)?;
+    let daemon = new_daemon()?;
 
     let fullname = info.get_fullname().to_string();
-    daemon
-        .register(info)
-        .map_err(|e| DiscoveryError::Setup(e.to_string()))?;
+    if let Err(error) = daemon.register(info) {
+        let _ = retry_daemon_command(|| daemon.shutdown());
+        return Err(DiscoveryError::Setup(error.to_string()));
+    }
 
-    Ok(AdvertiseSession { daemon, fullname })
+    let updater = AdvertiseUpdater {
+        daemon: daemon.clone(),
+        fullname: fullname.clone(),
+        current: Arc::new(Mutex::new(Some(config))),
+        enable_addr_auto,
+    };
+    Ok(AdvertiseSession {
+        daemon,
+        updater,
+        refresh_worker: None,
+    })
 }
 
 // ── Browse ───────────────────────────────────────────────────────────────────
 
+struct BrowseShared {
+    rx: tokio::sync::Mutex<tokio::sync::mpsc::Receiver<ServiceRecord>>,
+    daemon: Option<ServiceDaemon>,
+    service_type: String,
+    pump: Mutex<Option<tokio::task::AbortHandle>>,
+    closed: AtomicBool,
+    closed_notify: tokio::sync::Notify,
+    close_callbacks: Mutex<Vec<Box<dyn FnOnce() + Send>>>,
+}
+
+impl BrowseShared {
+    fn stop_daemon(&self) {
+        if let Some(daemon) = &self.daemon {
+            let _ = retry_daemon_command(|| daemon.stop_browse(&self.service_type));
+            let _ = retry_daemon_command(|| daemon.shutdown());
+        }
+    }
+
+    fn run_close_callbacks(&self) {
+        let callbacks = std::mem::take(
+            &mut *self
+                .close_callbacks
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()),
+        );
+        for callback in callbacks {
+            callback();
+        }
+    }
+
+    fn install_pump(&self, pump: tokio::task::AbortHandle) {
+        let mut slot = self.pump.lock().unwrap_or_else(|error| error.into_inner());
+        if self.closed.load(Ordering::Acquire) {
+            pump.abort();
+        } else {
+            *slot = Some(pump);
+        }
+    }
+
+    fn finish_from_pump(&self) {
+        if self.closed.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        self.stop_daemon();
+        self.closed_notify.notify_waiters();
+        self.run_close_callbacks();
+        self.pump
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take();
+    }
+
+    fn close(&self) {
+        if self.closed.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        self.stop_daemon();
+        self.closed_notify.notify_waiters();
+        self.run_close_callbacks();
+        if let Some(pump) = self
+            .pump
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take()
+        {
+            pump.abort();
+        }
+    }
+}
+
 /// An active browse session that yields [`ServiceRecord`]s.
 ///
-/// Drop to stop receiving records; this stops the underlying DNS-SD browse,
-/// shuts the session's mDNS daemon down, and stops the record pump.
+/// Drop or call [`Self::close`] to stop receiving records, stop the underlying
+/// DNS-SD browse, shut its daemon down, and stop the record pump.
 pub struct BrowseSession {
-    rx: tokio::sync::mpsc::Receiver<ServiceRecord>,
-    daemon: ServiceDaemon,
-    service_type: String,
-    pump: tokio::task::JoinHandle<()>,
+    shared: Arc<BrowseShared>,
 }
 
 impl BrowseSession {
     /// Returns the next record, or `None` when the session is closed.
-    pub async fn next_record(&mut self) -> Option<ServiceRecord> {
-        self.rx.recv().await
+    ///
+    /// This takes `&self`, so a session can be placed directly in an [`Arc`]
+    /// and polled without an external asynchronous mutex.
+    pub async fn next_record(&self) -> Option<ServiceRecord> {
+        let closed = self.shared.closed_notify.notified();
+        tokio::pin!(closed);
+        closed.as_mut().enable();
+        if self.shared.closed.load(Ordering::Acquire) {
+            return None;
+        }
+        let record = {
+            let mut rx = self.shared.rx.lock().await;
+            if self.shared.closed.load(Ordering::Acquire) {
+                None
+            } else {
+                tokio::select! {
+                    record = rx.recv() => record,
+                    _ = &mut closed => None,
+                }
+            }
+        };
+        if self.shared.closed.load(Ordering::Acquire) {
+            None
+        } else {
+            record
+        }
+    }
+
+    /// Synchronously stop this browse session.
+    ///
+    /// Closing is idempotent and aborts the record pump, which drops the sole
+    /// channel sender and wakes any pending [`Self::next_record`] call.
+    pub fn close(&self) {
+        self.shared.close();
+    }
+
+    pub(crate) fn on_close(&self, callback: impl FnOnce() + Send + 'static) {
+        let mut callbacks = self
+            .shared
+            .close_callbacks
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if self.shared.closed.load(Ordering::Acquire) {
+            drop(callbacks);
+            callback();
+        } else {
+            callbacks.push(Box::new(callback));
+        }
     }
 }
 
 impl Drop for BrowseSession {
     fn drop(&mut self) {
-        let _ = self.daemon.stop_browse(&self.service_type);
-        let _ = self.daemon.shutdown();
-        self.pump.abort();
+        self.close();
     }
 }
 
@@ -281,11 +630,25 @@ impl Drop for BrowseSession {
 pub fn browse(config: BrowseConfig) -> Result<BrowseSession, DiscoveryError> {
     let service_type = service_type(&config.service_name, config.protocol)?;
     let daemon = new_daemon()?;
-    let receiver = daemon
-        .browse(&service_type)
-        .map_err(|e| DiscoveryError::Setup(e.to_string()))?;
+    let receiver = match daemon.browse(&service_type) {
+        Ok(receiver) => receiver,
+        Err(error) => {
+            let _ = retry_daemon_command(|| daemon.shutdown());
+            return Err(DiscoveryError::Setup(error.to_string()));
+        }
+    };
 
     let (tx, rx) = tokio::sync::mpsc::channel(64);
+    let shared = Arc::new(BrowseShared {
+        rx: tokio::sync::Mutex::new(rx),
+        daemon: Some(daemon),
+        service_type,
+        pump: Mutex::new(None),
+        closed: AtomicBool::new(false),
+        closed_notify: tokio::sync::Notify::new(),
+        close_callbacks: Mutex::new(Vec::new()),
+    });
+    let weak = Arc::downgrade(&shared);
     let pump = tokio::spawn(async move {
         while let Ok(event) = receiver.recv_async().await {
             let record = match event {
@@ -299,14 +662,40 @@ pub fn browse(config: BrowseConfig) -> Result<BrowseSession, DiscoveryError> {
                 }
             }
         }
+        if let Some(shared) = weak.upgrade() {
+            shared.finish_from_pump();
+        }
     });
+    shared.install_pump(pump.abort_handle());
+    drop(pump);
 
-    Ok(BrowseSession {
-        rx,
-        daemon,
-        service_type,
-        pump,
-    })
+    Ok(BrowseSession { shared })
+}
+
+#[cfg(test)]
+pub(crate) fn controlled_test_browse() -> (BrowseSession, futures::channel::oneshot::Sender<()>) {
+    let (tx, rx) = tokio::sync::mpsc::channel(1);
+    let (finish_tx, finish_rx) = futures::channel::oneshot::channel();
+    let shared = Arc::new(BrowseShared {
+        rx: tokio::sync::Mutex::new(rx),
+        daemon: None,
+        service_type: "_test._udp.local.".to_string(),
+        pump: Mutex::new(None),
+        closed: AtomicBool::new(false),
+        closed_notify: tokio::sync::Notify::new(),
+        close_callbacks: Mutex::new(Vec::new()),
+    });
+    let weak = Arc::downgrade(&shared);
+    let pump = tokio::spawn(async move {
+        let _ = finish_rx.await;
+        drop(tx);
+        if let Some(shared) = weak.upgrade() {
+            shared.finish_from_pump();
+        }
+    });
+    shared.install_pump(pump.abort_handle());
+    drop(pump);
+    (BrowseSession { shared }, finish_tx)
 }
 
 // ── Unit tests ────────────────────────────────────────────────────────────────
@@ -388,5 +777,201 @@ mod tests {
         assert!(rec.txt.is_empty());
         assert_eq!(rec.port, 0);
         assert!(rec.host.is_none());
+    }
+
+    #[test]
+    fn scoped_ipv6_socket_conversion_preserves_the_interface_index() {
+        let socket = socket_addr_with_scope("fe80::1234".parse().unwrap(), 5353, 17);
+
+        assert_eq!(socket.ip(), "fe80::1234".parse::<IpAddr>().unwrap());
+        assert_eq!(socket.port(), 5353);
+        let SocketAddr::V6(socket) = socket else {
+            panic!("expected an IPv6 socket address");
+        };
+        assert_eq!(socket.scope_id(), 17);
+    }
+
+    #[test]
+    fn non_link_local_ipv6_socket_conversion_drops_incidental_scope() {
+        let ip = "fd00::1234".parse().unwrap();
+        let socket = socket_addr_with_scope(IpAddr::V6(ip), 5353, applicable_ipv6_scope(&ip, 17));
+
+        let SocketAddr::V6(socket) = socket else {
+            panic!("expected an IPv6 socket address");
+        };
+        assert_eq!(socket.scope_id(), 0);
+    }
+
+    #[test]
+    fn changed_advertisement_rebuilds_the_record_and_deduplicates_snapshots() {
+        let initial = ServiceConfig {
+            service_name: "iroh-http".to_string(),
+            instance_name: "peer".to_string(),
+            port: 4433,
+            addrs: vec!["192.168.1.2".parse().unwrap()],
+            txt: vec![("address".to_string(), "192.168.1.2:4433".to_string())],
+            protocol: Protocol::Udp,
+        };
+        let updated = ServiceConfig {
+            addrs: vec!["192.168.1.3".parse().unwrap(), "fd00::3".parse().unwrap()],
+            txt: vec![(
+                "address".to_string(),
+                "192.168.1.3:4433,[fd00::3]:4433".to_string(),
+            )],
+            ..initial.clone()
+        };
+        let mut current = Some(initial);
+        let mut registered = Vec::new();
+
+        assert!(
+            register_changed(&mut current, updated.clone(), true, |info| {
+                registered.push(info);
+                Ok(())
+            })
+            .unwrap()
+        );
+        assert_eq!(registered.len(), 1);
+        assert_eq!(
+            registered[0].get_property_val_str("address"),
+            Some("192.168.1.3:4433,[fd00::3]:4433")
+        );
+        assert!(!register_changed(&mut current, updated, true, |info| {
+            registered.push(info);
+            Ok(())
+        })
+        .unwrap());
+        assert_eq!(
+            registered.len(),
+            1,
+            "an unchanged snapshot is not re-announced"
+        );
+    }
+
+    #[test]
+    fn failed_unregister_enqueue_keeps_registration_state_for_retry() {
+        let config = ServiceConfig {
+            service_name: "iroh-http".to_string(),
+            instance_name: "peer".to_string(),
+            port: 4433,
+            addrs: vec!["192.168.1.2".parse().unwrap()],
+            txt: Vec::new(),
+            protocol: Protocol::Udp,
+        };
+        let mut current = Some(config);
+
+        let first = retire_after_enqueue(&mut current, || Err::<(), _>("queue full"));
+        assert_eq!(first, Err("queue full"));
+        assert!(current.is_some(), "a failed enqueue remains retryable");
+
+        retire_after_enqueue(&mut current, || Ok::<_, &str>(())).unwrap();
+        assert!(current.is_none(), "successful retry retires the state");
+    }
+
+    #[tokio::test]
+    async fn close_is_idempotent_and_wakes_a_shared_pending_next() {
+        let (session, _finish) = controlled_test_browse();
+        let session = Arc::new(session);
+        let waiting = tokio::spawn({
+            let session = session.clone();
+            async move { session.next_record().await }
+        });
+        tokio::task::yield_now().await;
+
+        session.close();
+        session.close();
+
+        let result = tokio::time::timeout(std::time::Duration::from_secs(1), waiting)
+            .await
+            .expect("close must wake next_record")
+            .unwrap();
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn unexpected_pump_terminal_wakes_and_closes_the_session() {
+        let (session, finish) = controlled_test_browse();
+        let session = Arc::new(session);
+        let waiting = tokio::spawn({
+            let session = session.clone();
+            async move { session.next_record().await }
+        });
+        tokio::task::yield_now().await;
+
+        finish.send(()).unwrap();
+
+        let result = tokio::time::timeout(std::time::Duration::from_secs(1), waiting)
+            .await
+            .expect("pump terminal must wake next_record")
+            .unwrap();
+        assert!(result.is_none());
+        session.close();
+    }
+
+    #[test]
+    fn refresh_worker_needs_no_tokio_context_and_finalizes_every_terminal_path() {
+        use std::future::pending;
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        struct DropNotify(Option<mpsc::Sender<()>>);
+
+        impl Drop for DropNotify {
+            fn drop(&mut self) {
+                if let Some(sender) = self.0.take() {
+                    let _ = sender.send(());
+                }
+            }
+        }
+
+        let (close_tx, close_rx) = futures::channel::oneshot::channel();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (closed_drop_tx, closed_drop_rx) = mpsc::channel();
+        let (finished_tx, finished_rx) = mpsc::channel();
+        let mut closed_worker = spawn_refresh_until_closed(
+            async move {
+                let _ = close_rx.await;
+            },
+            async move {
+                started_tx.send(()).unwrap();
+                let _notify = DropNotify(Some(closed_drop_tx));
+                pending::<()>().await;
+            },
+            move || finished_tx.send(()).unwrap(),
+        )
+        .unwrap();
+        started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        close_tx.send(()).unwrap();
+        closed_drop_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        finished_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        closed_worker.cancel();
+
+        let (abort_started_tx, abort_started_rx) = mpsc::channel();
+        let (abort_drop_tx, abort_drop_rx) = mpsc::channel();
+        let mut cancelled_worker = spawn_refresh_until_closed(
+            pending::<()>(),
+            async move {
+                abort_started_tx.send(()).unwrap();
+                let _notify = DropNotify(Some(abort_drop_tx));
+                pending::<()>().await;
+            },
+            || {},
+        )
+        .unwrap();
+        abort_started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
+        cancelled_worker.cancel();
+        abort_drop_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+
+        let (refresh_finished_tx, refresh_finished_rx) = mpsc::channel();
+        let mut terminal_worker =
+            spawn_refresh_until_closed(pending::<()>(), futures::future::ready(()), move || {
+                refresh_finished_tx.send(()).unwrap()
+            })
+            .unwrap();
+        refresh_finished_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("refresh termination must run the unregister finalizer");
+        terminal_worker.cancel();
     }
 }

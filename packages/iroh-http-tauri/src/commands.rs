@@ -155,7 +155,7 @@ pub async fn create_endpoint<R: tauri::Runtime>(
         let mut opts = opts;
         if should_query_mobile_dns(&opts) {
             if let Some(mdns) = app.try_state::<crate::mobile_mdns::MobileMdns<R>>() {
-                let servers = mdns.get_dns_servers().map_err(|e| {
+                let servers = mdns.get_dns_servers().await.map_err(|e| {
                     format_error_json("REFUSED", format!("failed to query platform DNS: {e}"))
                 })?;
                 if !servers.is_empty() {
@@ -170,19 +170,30 @@ pub async fn create_endpoint<R: tauri::Runtime>(
         .await
         .map_err(|e| core_error_to_json(&e))?;
 
-    // #310: on mobile, register the in-process AddressLookup on this endpoint so
-    // iroh's dialer resolves natively-discovered peers by node-id (desktop gets
-    // this from iroh-http-discovery's MdnsAddressLookup). Same `add()` call
-    // desktop makes. Missing state (scheme/discovery not configured) is a no-op.
+    // Register a fresh endpoint-local lookup before exposing the endpoint
+    // handle. Each native peer browse later receives an independent source in
+    // this lookup, so closing one browse cannot retract another browse's data.
     #[cfg(mobile)]
-    if let Some(lookup) = app.try_state::<crate::mobile_address_lookup::MobileAddressLookup>() {
-        if let Ok(services) = ep.raw().address_lookup() {
-            services.add(lookup.inner().clone());
-        }
-    }
+    let mobile_lookup = app
+        .try_state::<crate::mobile_address_lookup::MobileAddressLookup>()
+        .and_then(|registry| {
+            let lookup = registry.new_endpoint_lookup();
+            ep.raw().address_lookup().ok().map(|services| {
+                services.add(lookup.clone());
+                lookup
+            })
+        });
 
     let node_id = ep.node_id().to_string();
     let (handle, replaced) = state::replace_endpoint_for_node_id(node_id.clone(), ep);
+    discovery_ownership::activate_endpoint(handle);
+    #[cfg(mobile)]
+    if let (Some(registry), Some(lookup)) = (
+        app.try_state::<crate::mobile_address_lookup::MobileAddressLookup>(),
+        mobile_lookup,
+    ) {
+        registry.insert_endpoint(handle, lookup);
+    }
     if let Some((old_handle, old_ep)) = replaced {
         tracing::warn!(
             node_id = %node_id,
@@ -190,22 +201,16 @@ pub async fn create_endpoint<R: tauri::Runtime>(
             new_handle = handle,
             "iroh-http-tauri: replacing existing endpoint for node id"
         );
+        // Retire only sessions owned by the replaced endpoint. Other endpoints
+        // and generic DNS-SD sessions in live WebViews remain untouched.
+        retire_endpoint_discovery_sessions(&app, old_handle).await;
         old_ep.close_force().await;
 
-        // F11: a WebView reload / #336 foreground rebuild orphans every
-        // discovery session the previous JS context started — its close
-        // commands can no longer run, so a stale advertisement would keep
-        // publishing the now-dead QUIC port and browse listeners would
-        // accumulate. Retire them all; the new context restarts what it needs.
-        retire_orphaned_discovery_sessions::<R>(&app);
-
-        // #336: the endpoint was rebuilt (foreground recovery / webview
-        // reload). Addresses discovered before the previous endpoint died may
-        // now be stale, so drop them and let a fresh browse repopulate the
-        // lookup instead of dialing dead paths.
+        // The replacement has its own empty lookup. Remove only the retired
+        // endpoint's lookup; other endpoints retain their browse contributions.
         #[cfg(mobile)]
         if let Some(lookup) = app.try_state::<crate::mobile_address_lookup::MobileAddressLookup>() {
-            lookup.clear();
+            lookup.remove_endpoint(old_handle);
         }
     }
 
@@ -228,19 +233,30 @@ pub async fn create_endpoint<R: tauri::Runtime>(
 /// The endpoint is removed from the registry **after** closing to avoid
 /// INVALID_HANDLE errors from background tasks during drain.
 #[command]
-pub async fn close_endpoint(endpoint_handle: u64, force: Option<bool>) -> Result<(), String> {
+pub async fn close_endpoint<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    endpoint_handle: u64,
+    force: Option<bool>,
+) -> Result<(), String> {
     let ep = state::get_endpoint(endpoint_handle).ok_or_else(|| {
         format_error_json(
             "INVALID_HANDLE",
             format!("node closed or not found (handle {endpoint_handle})"),
         )
     })?;
+    // Stop advertisements and retract browse-owned lookup contributions before
+    // the transport disappears. Retirement is endpoint-scoped and idempotent.
+    retire_endpoint_discovery_sessions(&app, endpoint_handle).await;
     if force.unwrap_or(false) {
         ep.close_force().await;
     } else {
         ep.close().await;
     }
     state::remove_endpoint(endpoint_handle);
+    #[cfg(mobile)]
+    if let Some(lookup) = app.try_state::<crate::mobile_address_lookup::MobileAddressLookup>() {
+        lookup.remove_endpoint(endpoint_handle);
+    }
     Ok(())
 }
 
@@ -331,9 +347,9 @@ pub fn home_relay(endpoint_handle: u64) -> Result<Option<String>, String> {
 /// local or reflexive QAD port is preserved verbatim; only a platform
 /// placeholder (`:0`/`:1`) borrows a same-family bound QUIC port. Desktop
 /// resolves it from the core's `dialable_direct_address` (mirrors the
-/// discovery-crate helper); mobile reuses `primary_direct_addr`, which also
-/// falls back to the active OS interface inventory when the endpoint enumerates
-/// no usable direct address at advertise time (#346).
+/// discovery-crate helper); mobile uses the plural address selector and falls
+/// back to the active OS interface inventory when the endpoint enumerates no
+/// usable direct address at advertise time (#346).
 #[command]
 #[cfg(not(mobile))]
 pub fn discovery_info(endpoint_handle: u64) -> Result<DiscoveryInfoPayload, String> {
@@ -355,7 +371,7 @@ pub fn discovery_info(endpoint_handle: u64) -> Result<DiscoveryInfoPayload, Stri
 
 #[command]
 #[cfg(mobile)]
-pub fn discovery_info<R: tauri::Runtime>(
+pub async fn discovery_info<R: tauri::Runtime>(
     _app: tauri::AppHandle<R>,
     state: tauri::State<'_, crate::mobile_mdns::MobileMdns<R>>,
     endpoint_handle: u64,
@@ -366,7 +382,7 @@ pub fn discovery_info<R: tauri::Runtime>(
             format!("invalid endpoint handle: {endpoint_handle}"),
         )
     })?;
-    let direct_addresses = primary_direct_addrs(&ep, mobile_routable_ips(&state));
+    let direct_addresses = primary_direct_addrs(&ep, mobile_routable_ips(&state).await);
     let direct_address = direct_addresses.first().cloned();
     Ok(DiscoveryInfoPayload {
         node_id: ep.node_id().to_string(),
@@ -1214,140 +1230,387 @@ pub fn generate_secret_key() -> Result<String, String> {
 
 // ── mDNS browse / advertise ──────────────────────────────────────────────────
 
+#[cfg(any(test, mobile, all(feature = "discovery", not(mobile))))]
 use std::sync::{Mutex, OnceLock};
 
 #[cfg(all(feature = "discovery", not(mobile)))]
+use crate::discovery_handles::DiscoveryHandleMap;
+#[cfg(any(mobile, all(feature = "discovery", not(mobile))))]
+use crate::discovery_ownership::DiscoveryKind;
+use crate::discovery_ownership::{self, TrackedDiscovery};
+
+#[cfg(any(test, mobile, all(feature = "discovery", not(mobile))))]
 use std::sync::Arc;
-#[cfg(all(feature = "discovery", not(mobile)))]
+#[cfg(mobile)]
 use tokio::sync::Mutex as TokioMutex;
 
 #[cfg(all(feature = "discovery", not(mobile)))]
-type BrowseHandle = Arc<TokioMutex<iroh_http_discovery::BrowseSession>>;
+type BrowseHandle = Arc<iroh_http_discovery::BrowseSession>;
 
-/// ISS-017: shared mobile mDNS event buffer, accessible from both
-/// `browse_peers_next` and `browse_peers_close` to clear stale events.
 #[cfg(mobile)]
-fn mobile_mdns_buffer() -> &'static Mutex<
-    std::collections::HashMap<
-        u64,
-        std::collections::VecDeque<crate::mobile_mdns::MobileDiscoveryEvent>,
-    >,
-> {
-    static BUFFER: OnceLock<
-        Mutex<
-            std::collections::HashMap<
-                u64,
-                std::collections::VecDeque<crate::mobile_mdns::MobileDiscoveryEvent>,
-            >,
-        >,
+enum MobileBrowseTerminal {
+    Closed,
+    Failed(String),
+}
+
+/// Completion fence for native resources retired by a WebView page advance or
+/// destruction. A new context reusing that label waits on this fence before
+/// asking the platform to register the same service again.
+#[cfg(any(mobile, test))]
+#[derive(Default)]
+struct MobileWebviewCleanupBarrier {
+    complete: std::sync::atomic::AtomicBool,
+    notify: tokio::sync::Notify,
+}
+
+#[cfg(any(mobile, test))]
+impl MobileWebviewCleanupBarrier {
+    fn finish(&self) {
+        self.complete
+            .store(true, std::sync::atomic::Ordering::Release);
+        self.notify.notify_waiters();
+    }
+
+    async fn wait(&self) {
+        loop {
+            if self.complete.load(std::sync::atomic::Ordering::Acquire) {
+                return;
+            }
+            let notified = self.notify.notified();
+            if self.complete.load(std::sync::atomic::Ordering::Acquire) {
+                return;
+            }
+            notified.await;
+        }
+    }
+}
+
+#[cfg(any(mobile, test))]
+fn mobile_webview_cleanup_barriers(
+) -> &'static Mutex<std::collections::HashMap<String, Arc<MobileWebviewCleanupBarrier>>> {
+    static BARRIERS: OnceLock<
+        Mutex<std::collections::HashMap<String, Arc<MobileWebviewCleanupBarrier>>>,
     > = OnceLock::new();
-    BUFFER.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+    BARRIERS.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
 }
 
-/// Set of browse handles that are still open. The native mDNS poll
-/// (`browse_peers_poll`) is non-blocking and, once a session is stopped, resolves
-/// with an empty event list rather than an error. `browse_peers_next` long-polls
-/// that layer, so it consults this set to detect closure and terminate with
-/// `None` (stream finished) instead of spinning forever after
-/// `browse_peers_close`.
+#[cfg(any(mobile, test))]
+async fn await_mobile_webview_cleanup_with_timeout(
+    webview_label: &str,
+    timeout: std::time::Duration,
+) -> Result<(), String> {
+    let barrier = mobile_webview_cleanup_barriers()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .get(webview_label)
+        .cloned();
+    let Some(barrier) = barrier else {
+        return Ok(());
+    };
+    tokio::time::timeout(timeout, barrier.wait())
+        .await
+        .map_err(|_| {
+            format_error_json(
+                "REFUSED",
+                format!("prior WebView discovery cleanup timed out for {webview_label:?}"),
+            )
+        })
+}
+
+#[cfg(any(mobile, test))]
+async fn await_mobile_peer_start_barrier_with_timeout(
+    webview_label: &str,
+    owner: &discovery_ownership::PeerOwnerToken,
+    timeout: std::time::Duration,
+) -> Result<(), String> {
+    await_mobile_webview_cleanup_with_timeout(webview_label, timeout).await?;
+    if !discovery_ownership::is_peer_current(owner) {
+        return Err(format_error_json(
+            "REFUSED",
+            "discovery owner retired while waiting for prior WebView cleanup",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(any(mobile, test))]
+async fn await_mobile_generic_start_barrier_with_timeout(
+    webview_label: &str,
+    owner: &discovery_ownership::WebviewOwnerToken,
+    timeout: std::time::Duration,
+) -> Result<(), String> {
+    await_mobile_webview_cleanup_with_timeout(webview_label, timeout).await?;
+    if !discovery_ownership::is_webview_current(owner) {
+        return Err(format_error_json(
+            "REFUSED",
+            "WebView retired while waiting for prior discovery cleanup",
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(mobile)]
-fn mobile_active_browses() -> &'static Mutex<std::collections::HashSet<u64>> {
-    static S: OnceLock<Mutex<std::collections::HashSet<u64>>> = OnceLock::new();
-    S.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+async fn await_mobile_peer_start_barrier(
+    webview_label: &str,
+    owner: &discovery_ownership::PeerOwnerToken,
+) -> Result<(), String> {
+    await_mobile_peer_start_barrier_with_timeout(
+        webview_label,
+        owner,
+        std::time::Duration::from_secs(10),
+    )
+    .await
 }
 
-#[cfg(all(feature = "discovery", not(mobile)))]
-fn browse_slab() -> &'static Mutex<slab::Slab<BrowseHandle>> {
-    static S: OnceLock<Mutex<slab::Slab<BrowseHandle>>> = OnceLock::new();
-    S.get_or_init(|| Mutex::new(slab::Slab::new()))
+#[cfg(mobile)]
+async fn await_mobile_generic_start_barrier(
+    webview_label: &str,
+    owner: &discovery_ownership::WebviewOwnerToken,
+) -> Result<(), String> {
+    await_mobile_generic_start_barrier_with_timeout(
+        webview_label,
+        owner,
+        std::time::Duration::from_secs(10),
+    )
+    .await
 }
 
-#[cfg(all(feature = "discovery", not(mobile)))]
-fn advertise_slab() -> &'static Mutex<slab::Slab<iroh_http_discovery::AdvertiseSession>> {
-    static S: OnceLock<Mutex<slab::Slab<iroh_http_discovery::AdvertiseSession>>> = OnceLock::new();
-    S.get_or_init(|| Mutex::new(slab::Slab::new()))
+#[cfg(mobile)]
+struct MobilePeerBrowseSession {
+    /// Serialises concurrent `next()` calls without blocking explicit close.
+    next: TokioMutex<()>,
+    buffer: Mutex<std::collections::VecDeque<MobilePeerEvent>>,
+    terminal: Mutex<Option<MobileBrowseTerminal>>,
+    source: iroh_http_core::AddressLookupSource,
 }
 
-/// F11: identifies a live DNS-SD discovery session so it can be retired when the
-/// owning WebView context is orphaned (endpoint replacement / reload).
-#[cfg(any(mobile, feature = "discovery"))]
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum DiscoveryKind {
-    /// `browse_peers_start` — peer discovery.
-    BrowsePeers,
-    /// `advertise_peer_start` — advertise this node.
-    AdvertisePeer,
-    /// `advertise_start` — generic DNS-SD advertise.
-    GenericAdvertise,
-    /// `browse_start` — generic DNS-SD browse.
-    GenericBrowse,
-}
-
-/// F11: every discovery session started by the current WebView context.
+/// Node-keyed event after applying one native instance update to the endpoint's
+/// source-scoped lookup.
 ///
-/// A WebView reload or foreground endpoint rebuild (`replace_endpoint_for_node_id`)
-/// orphans the JavaScript that owns these handles, so its `*_close` commands can
-/// never run. Without retirement, a stale advertisement keeps publishing the
-/// dead QUIC port and browse listeners accumulate. Sessions register here on
-/// start, deregister on close, and are all retired on endpoint replacement.
-#[cfg(any(mobile, feature = "discovery"))]
-fn active_discovery_sessions() -> &'static Mutex<Vec<(DiscoveryKind, u64)>> {
-    static S: OnceLock<Mutex<Vec<(DiscoveryKind, u64)>>> = OnceLock::new();
-    S.get_or_init(|| Mutex::new(Vec::new()))
+/// This stays independent of the platform FFI payload so the authoritative
+/// replacement/expiry semantics can be exercised by host unit tests.
+#[cfg(any(mobile, test))]
+#[derive(Debug, PartialEq, Eq)]
+struct MobilePeerEvent {
+    is_active: bool,
+    node_id: String,
+    addrs: Vec<String>,
 }
 
-#[cfg(any(mobile, feature = "discovery"))]
-fn track_discovery(kind: DiscoveryKind, handle: u64) {
-    active_discovery_sessions()
+#[cfg(any(mobile, test))]
+fn apply_mobile_peer_event(
+    source: &iroh_http_core::AddressLookupSource,
+    accept_updates: bool,
+    kind: &str,
+    instance_name: &str,
+    node_id: &str,
+    addrs: &[String],
+) -> Vec<MobilePeerEvent> {
+    if !accept_updates || instance_name.is_empty() {
+        return Vec::new();
+    }
+
+    let from_removal = |removal: iroh_http_core::AddressLookupRemoval| MobilePeerEvent {
+        is_active: removal.has_remaining_contributions,
+        node_id: removal.node_id,
+        addrs: removal.remaining_addrs,
+    };
+
+    match kind {
+        "discovered" => match source.upsert(instance_name, node_id, addrs) {
+            Ok(update) => {
+                let mut events = Vec::with_capacity(if update.replaced.is_some() { 2 } else { 1 });
+                if let Some(replaced) = update.replaced {
+                    // A service instance can change its advertised node id.
+                    // Publish the old node's transition before the new node's
+                    // active source-local union so peer-keyed consumers do
+                    // not retain a ghost entry or inherit another browse's
+                    // state.
+                    events.push(from_removal(replaced));
+                }
+                events.push(MobilePeerEvent {
+                    is_active: true,
+                    node_id: update.node_id,
+                    addrs: update.effective_addrs,
+                });
+                events
+            }
+            Err(error) => {
+                tracing::warn!(%error, "iroh-http-tauri: rejected invalid mobile peer discovery record");
+                // A malformed authoritative replacement retracts the prior
+                // instance. Surface that effect to peer-keyed JS consumers;
+                // otherwise they would retain the old peer forever while the
+                // endpoint lookup had already removed it.
+                error.into_removal().map(from_removal).into_iter().collect()
+            }
+        },
+        "expired" => source
+            .remove_with_snapshot(instance_name)
+            .map(from_removal)
+            .into_iter()
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+#[cfg(mobile)]
+fn mobile_peer_browse_sessions(
+) -> &'static Mutex<std::collections::HashMap<u64, Arc<MobilePeerBrowseSession>>> {
+    static S: OnceLock<Mutex<std::collections::HashMap<u64, Arc<MobilePeerBrowseSession>>>> =
+        OnceLock::new();
+    S.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+#[cfg(mobile)]
+fn mobile_peer_session_is_current(handle: u64, expected: &Arc<MobilePeerBrowseSession>) -> bool {
+    mobile_peer_browse_sessions()
         .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .push((kind, handle));
+        .unwrap_or_else(|error| error.into_inner())
+        .get(&handle)
+        .is_some_and(|current| Arc::ptr_eq(current, expected))
 }
 
-#[cfg(any(mobile, feature = "discovery"))]
-fn untrack_discovery(kind: DiscoveryKind, handle: u64) {
-    active_discovery_sessions()
+#[cfg(mobile)]
+fn take_mobile_peer_session(
+    handle: u64,
+    expected: Option<&Arc<MobilePeerBrowseSession>>,
+) -> Option<Arc<MobilePeerBrowseSession>> {
+    let mut sessions = mobile_peer_browse_sessions()
         .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .retain(|&(k, h)| !(k == kind && h == handle));
+        .unwrap_or_else(|error| error.into_inner());
+    if expected.is_some_and(|expected| {
+        !sessions
+            .get(&handle)
+            .is_some_and(|current| Arc::ptr_eq(current, expected))
+    }) {
+        return None;
+    }
+    sessions.remove(&handle)
 }
 
-/// F11: retire every discovery session orphaned by an endpoint replacement.
+#[cfg(mobile)]
+struct MobilePeerAdvertiseTask {
+    generation: u64,
+    cancel: tokio::sync::watch::Sender<bool>,
+    task: tauri::async_runtime::JoinHandle<()>,
+}
+
+/// Await one native plugin call to completion before observing cancellation.
 ///
-/// Called from `create_endpoint` when an existing endpoint for the same node id
-/// is replaced (WebView reload / #336 foreground rebuild). The previous JS
-/// context can no longer close its advertise/browse handles, so we retire them
-/// here — mirroring each `*_close` command — and the new context re-starts
-/// whatever it needs.
+/// `PluginHandle::run_mobile_plugin_async` installs a native callback backed by
+/// a Rust oneshot receiver. Selecting cancellation against that future would
+/// drop the receiver while the callback is still live, so refresh teardown may
+/// only take effect between native calls.
+#[cfg(any(mobile, test))]
+async fn complete_mobile_call_before_cancellation<F>(
+    cancel: &tokio::sync::watch::Receiver<bool>,
+    call: F,
+) -> (F::Output, bool)
+where
+    F: std::future::Future,
+{
+    let output = call.await;
+    (output, *cancel.borrow())
+}
+
+#[cfg(mobile)]
+fn next_mobile_peer_advertise_generation() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+        current.checked_add(1)
+    })
+    .expect("mobile peer advertisement generation exhausted")
+}
+
+#[cfg(mobile)]
+fn mobile_peer_advertise_tasks(
+) -> &'static Mutex<std::collections::HashMap<u64, MobilePeerAdvertiseTask>> {
+    static S: OnceLock<Mutex<std::collections::HashMap<u64, MobilePeerAdvertiseTask>>> =
+        OnceLock::new();
+    S.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+#[cfg(mobile)]
+fn cancel_mobile_peer_advertise_refresh(
+    handle: u64,
+) -> Option<tauri::async_runtime::JoinHandle<()>> {
+    mobile_peer_advertise_tasks()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .remove(&handle)
+        .map(|task| {
+            // Never abort a future that may be awaiting
+            // `run_mobile_plugin_async`: Tauri's native response callback
+            // expects its oneshot receiver to remain alive until completion.
+            let _ = task.cancel.send(true);
+            task.task
+        })
+}
+
+#[cfg(mobile)]
+async fn wait_for_mobile_peer_advertise_refresh(handle: u64) {
+    if let Some(task) = cancel_mobile_peer_advertise_refresh(handle) {
+        let _ = task.await;
+    }
+}
+
+/// Atomically retire only the refresh worker generation that reached a native
+/// terminal state. A delayed worker from a reused native handle must not remove
+/// the newer task or its ownership entry.
+#[cfg(mobile)]
+fn finish_mobile_peer_advertise_refresh(handle: u64, generation: u64) {
+    let mut tasks = mobile_peer_advertise_tasks()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let is_current = tasks
+        .get(&handle)
+        .is_some_and(|task| task.generation == generation);
+    if is_current {
+        discovery_ownership::untrack(DiscoveryKind::AdvertisePeer, handle);
+        tasks.remove(&handle);
+    }
+}
+
 #[cfg(all(feature = "discovery", not(mobile)))]
-fn retire_orphaned_discovery_sessions<R: tauri::Runtime>(_app: &tauri::AppHandle<R>) {
-    let drained: Vec<(DiscoveryKind, u64)> = std::mem::take(
-        &mut *active_discovery_sessions()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()),
-    );
-    for (kind, handle) in drained {
-        match kind {
+fn browse_slab() -> &'static Mutex<DiscoveryHandleMap<BrowseHandle>> {
+    static S: OnceLock<Mutex<DiscoveryHandleMap<BrowseHandle>>> = OnceLock::new();
+    S.get_or_init(|| Mutex::new(DiscoveryHandleMap::default()))
+}
+
+#[cfg(all(feature = "discovery", not(mobile)))]
+fn advertise_slab() -> &'static Mutex<DiscoveryHandleMap<iroh_http_discovery::AdvertiseSession>> {
+    static S: OnceLock<Mutex<DiscoveryHandleMap<iroh_http_discovery::AdvertiseSession>>> =
+        OnceLock::new();
+    S.get_or_init(|| Mutex::new(DiscoveryHandleMap::default()))
+}
+
+#[cfg(all(feature = "discovery", not(mobile)))]
+fn retire_discovery_sessions<R: tauri::Runtime>(
+    _app: &tauri::AppHandle<R>,
+    sessions: Vec<TrackedDiscovery>,
+) {
+    for session in sessions {
+        match session.kind {
             DiscoveryKind::BrowsePeers => {
                 let mut slab = browse_slab().lock().unwrap_or_else(|e| e.into_inner());
-                if slab.contains(handle as usize) {
-                    slab.remove(handle as usize);
+                if let Some(browse) = slab.remove(session.handle) {
+                    browse.close();
                 }
             }
             // Peer and generic advertise share `advertise_slab`; dropping the
             // session stops the advertisement.
             DiscoveryKind::AdvertisePeer | DiscoveryKind::GenericAdvertise => {
                 let mut slab = advertise_slab().lock().unwrap_or_else(|e| e.into_inner());
-                if slab.contains(handle as usize) {
-                    slab.remove(handle as usize);
-                }
+                slab.remove(session.handle);
             }
             DiscoveryKind::GenericBrowse => {
                 let mut slab = generic_browse_slab()
                     .lock()
                     .unwrap_or_else(|e| e.into_inner());
-                if slab.contains(handle as usize) {
-                    slab.remove(handle as usize);
+                if let Some(browse) = slab.remove(session.handle) {
+                    browse.close();
                 }
             }
         }
@@ -1355,51 +1618,203 @@ fn retire_orphaned_discovery_sessions<R: tauri::Runtime>(_app: &tauri::AppHandle
 }
 
 #[cfg(mobile)]
-fn retire_orphaned_discovery_sessions<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
-    let drained: Vec<(DiscoveryKind, u64)> = std::mem::take(
-        &mut *active_discovery_sessions()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()),
-    );
-    let Some(state) = app.try_state::<crate::mobile_mdns::MobileMdns<R>>() else {
-        return;
-    };
-    for (kind, handle) in drained {
-        match kind {
-            DiscoveryKind::BrowsePeers => {
-                mobile_active_browses()
+enum MobileDiscoveryRetirement {
+    BrowsePeers(u64),
+    AdvertisePeer {
+        handle: u64,
+        refresh: Option<tauri::async_runtime::JoinHandle<()>>,
+    },
+    GenericAdvertise(u64),
+    GenericBrowse(u64),
+}
+
+#[cfg(mobile)]
+fn prepare_mobile_discovery_retirement(session: TrackedDiscovery) -> MobileDiscoveryRetirement {
+    match session.kind {
+        DiscoveryKind::BrowsePeers => {
+            if let Some(browse) = take_mobile_peer_session(session.handle, None) {
+                browse.source.retire();
+                browse
+                    .buffer
                     .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .remove(&handle);
-                let _ = state.browse_peers_stop(handle);
-                mobile_mdns_buffer()
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .remove(&handle);
+                    .unwrap_or_else(|error| error.into_inner())
+                    .clear();
             }
-            DiscoveryKind::AdvertisePeer => {
-                let _ = state.advertise_peer_stop(handle);
-            }
-            DiscoveryKind::GenericAdvertise => {
-                let _ = state.advertise_stop(handle);
-            }
-            DiscoveryKind::GenericBrowse => {
-                mobile_active_dns_sd_browses()
+            MobileDiscoveryRetirement::BrowsePeers(session.handle)
+        }
+        DiscoveryKind::AdvertisePeer => MobileDiscoveryRetirement::AdvertisePeer {
+            handle: session.handle,
+            refresh: cancel_mobile_peer_advertise_refresh(session.handle),
+        },
+        DiscoveryKind::GenericAdvertise => {
+            MobileDiscoveryRetirement::GenericAdvertise(session.handle)
+        }
+        DiscoveryKind::GenericBrowse => {
+            if let Some(browse) = take_mobile_generic_session(session.handle, None) {
+                browse
+                    .buffer
                     .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .remove(&handle);
-                let _ = state.browse_stop(handle);
-                mobile_dns_sd_buffer()
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .remove(&handle);
+                    .unwrap_or_else(|error| error.into_inner())
+                    .clear();
+            }
+            MobileDiscoveryRetirement::GenericBrowse(session.handle)
+        }
+    }
+}
+
+#[cfg(mobile)]
+async fn complete_mobile_discovery_retirement<R: tauri::Runtime>(
+    state: Option<crate::mobile_mdns::MobileMdns<R>>,
+    retirement: MobileDiscoveryRetirement,
+) {
+    match retirement {
+        MobileDiscoveryRetirement::BrowsePeers(handle) => {
+            if let Some(state) = state {
+                let _ = state.browse_peers_stop(handle).await;
+            }
+        }
+        MobileDiscoveryRetirement::AdvertisePeer { handle, refresh } => {
+            if let Some(refresh) = refresh {
+                let _ = refresh.await;
+            }
+            if let Some(state) = state {
+                let _ = state.advertise_peer_stop(handle).await;
+            }
+        }
+        MobileDiscoveryRetirement::GenericAdvertise(handle) => {
+            if let Some(state) = state {
+                let _ = state.advertise_stop(handle).await;
+            }
+        }
+        MobileDiscoveryRetirement::GenericBrowse(handle) => {
+            if let Some(state) = state {
+                let _ = state.browse_stop(handle).await;
             }
         }
     }
 }
 
+#[cfg(mobile)]
+fn retire_discovery_sessions<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    sessions: Vec<TrackedDiscovery>,
+) {
+    let state = app
+        .try_state::<crate::mobile_mdns::MobileMdns<R>>()
+        .map(|state| (*state).clone());
+    for session in sessions {
+        let retirement = prepare_mobile_discovery_retirement(session);
+        tauri::async_runtime::spawn(complete_mobile_discovery_retirement(
+            state.clone(),
+            retirement,
+        ));
+    }
+}
+
+/// Retire one WebView generation immediately in Rust, then serialize its
+/// native unregister calls behind any older generation for the same label. The
+/// barrier remains visible to new-context start commands until every
+/// unregister callback has completed.
+#[cfg(mobile)]
+fn retire_mobile_webview_generation<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    webview_label: &str,
+    sessions: Vec<TrackedDiscovery>,
+) {
+    if sessions.is_empty() {
+        return;
+    }
+    let retirements: Vec<_> = sessions
+        .into_iter()
+        .map(prepare_mobile_discovery_retirement)
+        .collect();
+    let state = app
+        .try_state::<crate::mobile_mdns::MobileMdns<R>>()
+        .map(|state| (*state).clone());
+    let barrier = Arc::new(MobileWebviewCleanupBarrier::default());
+    let previous = mobile_webview_cleanup_barriers()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .insert(webview_label.to_string(), barrier.clone());
+    let label = webview_label.to_string();
+    tauri::async_runtime::spawn(async move {
+        if let Some(previous) = previous {
+            previous.wait().await;
+        }
+        for retirement in retirements {
+            complete_mobile_discovery_retirement(state.clone(), retirement).await;
+        }
+        barrier.finish();
+        let mut barriers = mobile_webview_cleanup_barriers()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if barriers
+            .get(&label)
+            .is_some_and(|current| Arc::ptr_eq(current, &barrier))
+        {
+            barriers.remove(&label);
+        }
+    });
+}
+
 #[cfg(all(not(feature = "discovery"), not(mobile)))]
-fn retire_orphaned_discovery_sessions<R: tauri::Runtime>(_app: &tauri::AppHandle<R>) {}
+fn retire_discovery_sessions<R: tauri::Runtime>(
+    _app: &tauri::AppHandle<R>,
+    _sessions: Vec<TrackedDiscovery>,
+) {
+}
+
+/// Retire only peer discovery sessions owned by `endpoint_handle`.
+pub(crate) async fn retire_endpoint_discovery_sessions<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    endpoint_handle: u64,
+) {
+    let sessions = discovery_ownership::retire_endpoint(endpoint_handle);
+    #[cfg(mobile)]
+    {
+        let state = app
+            .try_state::<crate::mobile_mdns::MobileMdns<R>>()
+            .map(|state| (*state).clone());
+        let retirements: Vec<_> = sessions
+            .into_iter()
+            .map(prepare_mobile_discovery_retirement)
+            .collect();
+        for retirement in retirements {
+            complete_mobile_discovery_retirement(state.clone(), retirement).await;
+        }
+    }
+    #[cfg(not(mobile))]
+    retire_discovery_sessions(app, sessions);
+}
+
+/// Retire every peer/generic discovery session owned by one WebView context.
+pub(crate) fn retire_webview_discovery_sessions<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    webview_label: &str,
+) {
+    let sessions = discovery_ownership::retire_webview(webview_label);
+    #[cfg(mobile)]
+    retire_mobile_webview_generation(app, webview_label, sessions);
+    #[cfg(not(mobile))]
+    retire_discovery_sessions(app, sessions);
+}
+
+/// Advance one WebView's page generation and retire the prior JS context.
+pub(crate) fn advance_webview_discovery_context<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    webview_label: &str,
+) {
+    let sessions = discovery_ownership::advance_webview(webview_label);
+    #[cfg(mobile)]
+    retire_mobile_webview_generation(app, webview_label, sessions);
+    #[cfg(not(mobile))]
+    retire_discovery_sessions(app, sessions);
+}
+
+/// Defensive last-window cleanup for any owner not already retired.
+pub(crate) fn retire_all_discovery_sessions<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
+    retire_discovery_sessions(app, discovery_ownership::retire_all());
+}
 
 /// Discovery event payload for the Tauri frontend.
 #[derive(Serialize)]
@@ -1413,7 +1828,18 @@ pub struct PeerDiscoveryEventPayload {
 /// Start a browse session: discover peers on the local network via mDNS.
 #[command]
 #[cfg(all(feature = "discovery", not(mobile)))]
-pub async fn browse_peers(endpoint_handle: u64, service_name: String) -> Result<u64, String> {
+pub async fn browse_peers<R: tauri::Runtime>(
+    webview: tauri::Webview<R>,
+    endpoint_handle: u64,
+    service_name: String,
+) -> Result<u64, String> {
+    let owner =
+        discovery_ownership::begin_peer(endpoint_handle, webview.label()).ok_or_else(|| {
+            format_error_json(
+                "INVALID_HANDLE",
+                "endpoint or WebView discovery owner is closed",
+            )
+        })?;
     let ep = state::get_endpoint(endpoint_handle).ok_or_else(|| {
         format_error_json(
             "INVALID_HANDLE",
@@ -1426,8 +1852,20 @@ pub async fn browse_peers(endpoint_handle: u64, service_name: String) -> Result<
     let handle = browse_slab()
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .insert(Arc::new(TokioMutex::new(session))) as u64;
-    track_discovery(DiscoveryKind::BrowsePeers, handle);
+        .insert(Arc::new(session))
+        .map_err(|error| format_error_json("REFUSED", error))?;
+    if discovery_ownership::track_peer(owner, DiscoveryKind::BrowsePeers, handle).is_err() {
+        let mut slab = browse_slab()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(session) = slab.remove(handle) {
+            session.close();
+        }
+        return Err(format_error_json(
+            "REFUSED",
+            "discovery owner retired while peer browse was starting",
+        ));
+    }
     Ok(handle)
 }
 
@@ -1444,20 +1882,57 @@ pub async fn browse_peers(_endpoint_handle: u64, _service_name: String) -> Resul
 #[cfg(mobile)]
 pub async fn browse_peers<R: tauri::Runtime>(
     _app: tauri::AppHandle<R>,
+    webview: tauri::Webview<R>,
     state: tauri::State<'_, crate::mobile_mdns::MobileMdns<R>>,
-    _endpoint_handle: u64,
+    lookup: tauri::State<'_, crate::mobile_address_lookup::MobileAddressLookup>,
+    endpoint_handle: u64,
     service_name: String,
 ) -> Result<u64, String> {
+    let owner =
+        discovery_ownership::begin_peer(endpoint_handle, webview.label()).ok_or_else(|| {
+            format_error_json(
+                "INVALID_HANDLE",
+                "endpoint or WebView discovery owner is closed",
+            )
+        })?;
+    await_mobile_peer_start_barrier(webview.label(), &owner).await?;
+    let source = lookup.new_source(endpoint_handle).ok_or_else(|| {
+        format_error_json(
+            "INVALID_HANDLE",
+            format!("invalid endpoint handle: {endpoint_handle}"),
+        )
+    })?;
     let browse_id = state
         .browse_peers_start(&service_name)
+        .await
         .map_err(|e| format_error_json("REFUSED", e))?;
-    // Mark the session active so `browse_peers_next` knows to keep long-polling
-    // until `browse_peers_close` retires the handle.
-    mobile_active_browses()
+    let session = Arc::new(MobilePeerBrowseSession {
+        next: TokioMutex::new(()),
+        buffer: Mutex::new(std::collections::VecDeque::new()),
+        terminal: Mutex::new(None),
+        source,
+    });
+    if let Some(replaced) = mobile_peer_browse_sessions()
         .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .insert(browse_id);
-    track_discovery(DiscoveryKind::BrowsePeers, browse_id);
+        .unwrap_or_else(|error| error.into_inner())
+        .insert(browse_id, session)
+    {
+        // Native handles are expected to be unique for the app lifetime. If a
+        // platform nevertheless reuses one, retire the old generation before
+        // exposing the new session.
+        replaced.source.retire();
+        discovery_ownership::untrack(DiscoveryKind::BrowsePeers, browse_id);
+    }
+    if discovery_ownership::track_peer(owner, DiscoveryKind::BrowsePeers, browse_id).is_err() {
+        if let Some(session) = take_mobile_peer_session(browse_id, None) {
+            session.source.retire();
+        }
+        let _ = state.browse_peers_stop(browse_id).await;
+        return Err(format_error_json(
+            "REFUSED",
+            "discovery owner retired while peer browse was starting",
+        ));
+    }
     Ok(browse_id)
 }
 
@@ -1471,7 +1946,7 @@ pub async fn browse_peers_next(
         browse_slab()
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .get(browse_handle as usize)
+            .get(browse_handle)
             .cloned()
     }
     .ok_or_else(|| {
@@ -1480,7 +1955,19 @@ pub async fn browse_peers_next(
             format!("invalid browse handle: {browse_handle}"),
         )
     })?;
-    let event = session.lock().await.next_event().await;
+    let event = session.next_event().await;
+    if event.is_none() {
+        let removed = browse_slab()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove_if(browse_handle, |current| Arc::ptr_eq(current, &session))
+            .is_some();
+        if removed {
+            // Keep the public handle valid while buffered events drain, then
+            // retire it at the same terminal observation returned to JS.
+            discovery_ownership::untrack(DiscoveryKind::BrowsePeers, browse_handle);
+        }
+    }
     Ok(event.map(|ev| PeerDiscoveryEventPayload {
         is_active: ev.is_active,
         node_id: ev.node_id,
@@ -1504,116 +1991,159 @@ pub async fn browse_peers_next(
 pub async fn browse_peers_next<R: tauri::Runtime>(
     _app: tauri::AppHandle<R>,
     state: tauri::State<'_, crate::mobile_mdns::MobileMdns<R>>,
-    lookup: tauri::State<'_, crate::mobile_address_lookup::MobileAddressLookup>,
     browse_handle: u64,
 ) -> Result<Option<PeerDiscoveryEventPayload>, String> {
-    // The native NWBrowser / NsdManager layer is poll-based and non-blocking:
-    // `browse_peers_poll` returns `[]` whenever nothing has been discovered *yet*.
-    // The shared JS async iterator, however, treats a `null` event as
-    // "stream ended" — matching the desktop `next_event().await` contract,
-    // where `None` only ever means the browse session finished. Returning
-    // `Ok(None)` on an empty poll would therefore make `node.browse()` stop
-    // immediately on the very first call, before any peer had a chance to
-    // appear (the browse UI flips straight back to "start browsing").
-    //
-    // Long-poll instead: keep re-polling with a short delay until an event is
-    // available or the session is closed, so `None` retains its cross-platform
-    // "finished" meaning. Closure is detected via `mobile_active_browses`
-    // because the native poll resolves empty (not an error) after stop.
-    let buffer = mobile_mdns_buffer();
+    let session = mobile_peer_browse_sessions()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .get(&browse_handle)
+        .cloned();
+    let Some(session) = session else {
+        return Ok(None);
+    };
+    let _next = session.next.lock().await;
 
     loop {
-        // 1. Drain any event buffered by a previous poll first.
-        {
-            let mut map = buffer.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(queue) = map.get_mut(&browse_handle) {
-                if let Some(ev) = queue.pop_front() {
-                    return Ok(Some(PeerDiscoveryEventPayload {
-                        is_active: ev.kind == "discovered",
-                        node_id: ev.node_id,
-                        addrs: ev.addrs,
-                    }));
-                }
-            }
-        }
-
-        // 2. Stop long-polling once the session has been closed.
-        let active = mobile_active_browses()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .contains(&browse_handle);
-        if !active {
+        if !mobile_peer_session_is_current(browse_handle, &session) {
             return Ok(None);
         }
 
-        // 3. Poll the native layer for freshly discovered / expired peers.
-        let mut events = state
-            .browse_peers_poll(browse_handle)
-            .map_err(|e| format_error_json("INVALID_HANDLE", e))?;
-
-        // #310: feed every freshly polled event into the in-process AddressLookup so
-        // iroh's dialer can resolve discovered peers by node-id, regardless of how
-        // fast the JS side drains events. `discovered` upserts addrs; `expired`
-        // evicts. This is what gives mobile `fetch(nodeId)` auto-dial parity.
-        for ev in &events {
-            lookup.apply_event(&ev.kind, &ev.node_id, &ev.addrs);
-        }
-
-        let first = events.drain(..1.min(events.len())).next();
-
-        // Buffer remaining events.
-        if !events.is_empty() {
-            let mut map = buffer.lock().unwrap_or_else(|e| e.into_inner());
-            map.entry(browse_handle).or_default().extend(events);
-        }
-
-        if let Some(ev) = first {
+        if let Some(event) = session
+            .buffer
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .pop_front()
+        {
             return Ok(Some(PeerDiscoveryEventPayload {
-                is_active: ev.kind == "discovered",
-                node_id: ev.node_id,
-                addrs: ev.addrs,
+                is_active: event.is_active,
+                node_id: event.node_id,
+                addrs: event.addrs,
             }));
         }
 
-        // 4. Nothing discovered yet — wait briefly, then poll again.
-        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        if let Some(terminal) = session
+            .terminal
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take()
+        {
+            if take_mobile_peer_session(browse_handle, Some(&session)).is_some() {
+                // A delayed terminal observation from a replaced native handle
+                // must not untrack the newer session with the same number.
+                discovery_ownership::untrack(DiscoveryKind::BrowsePeers, browse_handle);
+            }
+            return match terminal {
+                MobileBrowseTerminal::Closed => Ok(None),
+                MobileBrowseTerminal::Failed(error) => Err(format_error_json("REFUSED", error)),
+            };
+        }
+
+        let response = match state.browse_peers_poll(browse_handle).await {
+            Ok(response) => response,
+            Err(error) => {
+                session.source.retire();
+                let _ = state.browse_peers_stop(browse_handle).await;
+                *session
+                    .terminal
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner()) =
+                    Some(MobileBrowseTerminal::Failed(error));
+                continue;
+            }
+        };
+
+        use crate::mobile_mdns::MobileSessionStatus;
+        let session_active = response.status == MobileSessionStatus::Active;
+        let buffered: Vec<_> = response
+            .events
+            .into_iter()
+            .flat_map(|event| {
+                apply_mobile_peer_event(
+                    &session.source,
+                    session_active,
+                    &event.kind,
+                    &event.instance_name,
+                    &event.node_id,
+                    &event.addrs,
+                )
+            })
+            .collect();
+        session
+            .buffer
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .extend(buffered);
+
+        let terminal = match response.status {
+            MobileSessionStatus::Active => None,
+            MobileSessionStatus::Closed => Some(MobileBrowseTerminal::Closed),
+            MobileSessionStatus::Failed => Some(MobileBrowseTerminal::Failed(
+                response
+                    .error
+                    .unwrap_or_else(|| "native peer browse failed".to_string()),
+            )),
+        };
+        if let Some(terminal) = terminal {
+            // Retraction is synchronous even when native callbacks or another
+            // `next()` are still in flight. Late upserts are rejected by the
+            // retired source lease.
+            session.source.retire();
+            // Terminal native implementations normally release themselves,
+            // but make adapter cleanup idempotently explicit so a failed
+            // platform session cannot remain registered after Rust consumes
+            // its final status.
+            let _ = state.browse_peers_stop(browse_handle).await;
+            *session
+                .terminal
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()) = Some(terminal);
+        } else if session
+            .buffer
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .is_empty()
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
     }
 }
 
 /// Close a browse session, stopping mDNS discovery.
 #[command]
 #[cfg(not(mobile))]
-pub fn browse_peers_close(browse_handle: u64) {
+pub fn browse_peers_close(_browse_handle: u64) {
     #[cfg(feature = "discovery")]
     {
-        untrack_discovery(DiscoveryKind::BrowsePeers, browse_handle);
+        let browse_handle = _browse_handle;
         let mut slab = browse_slab().lock().unwrap_or_else(|e| e.into_inner());
-        if slab.contains(browse_handle as usize) {
-            slab.remove(browse_handle as usize);
+        if discovery_ownership::untrack(DiscoveryKind::BrowsePeers, browse_handle).is_some() {
+            if let Some(session) = slab.remove(browse_handle) {
+                session.close();
+            }
         }
     }
 }
 
 #[command]
 #[cfg(mobile)]
-pub fn browse_peers_close<R: tauri::Runtime>(
+pub async fn browse_peers_close<R: tauri::Runtime>(
     _app: tauri::AppHandle<R>,
     state: tauri::State<'_, crate::mobile_mdns::MobileMdns<R>>,
     browse_handle: u64,
-) {
-    untrack_discovery(DiscoveryKind::BrowsePeers, browse_handle);
-    // Retire the handle first so any in-flight `browse_peers_next` long-poll
-    // observes the closure and returns `None` (stream finished).
-    mobile_active_browses()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .remove(&browse_handle);
-    let _ = state.browse_peers_stop(browse_handle);
-    // ISS-017: clear stale buffered events for the closed browse session.
-    mobile_mdns_buffer()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .remove(&browse_handle);
+) -> Result<(), String> {
+    if discovery_ownership::untrack(DiscoveryKind::BrowsePeers, browse_handle).is_none() {
+        return Ok(());
+    }
+    if let Some(session) = take_mobile_peer_session(browse_handle, None) {
+        session.source.retire();
+        session
+            .buffer
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clear();
+    }
+    let _ = state.browse_peers_stop(browse_handle).await;
+    Ok(())
 }
 
 /// Start advertising this node on the local network via mDNS.
@@ -1626,7 +2156,18 @@ pub fn browse_peers_close<R: tauri::Runtime>(
 /// advertising aborted the process. Mirrors the Node adapter fix (#243).
 #[command]
 #[cfg(all(feature = "discovery", not(mobile)))]
-pub async fn advertise_peer(endpoint_handle: u64, service_name: String) -> Result<u64, String> {
+pub async fn advertise_peer<R: tauri::Runtime>(
+    webview: tauri::Webview<R>,
+    endpoint_handle: u64,
+    service_name: String,
+) -> Result<u64, String> {
+    let owner =
+        discovery_ownership::begin_peer(endpoint_handle, webview.label()).ok_or_else(|| {
+            format_error_json(
+                "INVALID_HANDLE",
+                "endpoint or WebView discovery owner is closed",
+            )
+        })?;
     let ep = state::get_endpoint(endpoint_handle).ok_or_else(|| {
         format_error_json(
             "INVALID_HANDLE",
@@ -1638,8 +2179,18 @@ pub async fn advertise_peer(endpoint_handle: u64, service_name: String) -> Resul
     let handle = advertise_slab()
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .insert(session) as u64;
-    track_discovery(DiscoveryKind::AdvertisePeer, handle);
+        .insert(session)
+        .map_err(|error| format_error_json("REFUSED", error))?;
+    if discovery_ownership::track_peer(owner, DiscoveryKind::AdvertisePeer, handle).is_err() {
+        let mut slab = advertise_slab()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        slab.remove(handle);
+        return Err(format_error_json(
+            "REFUSED",
+            "discovery owner retired while peer advertisement was starting",
+        ));
+    }
     Ok(handle)
 }
 
@@ -1654,12 +2205,21 @@ pub fn advertise_peer(_endpoint_handle: u64, _service_name: String) -> Result<u6
 
 #[command]
 #[cfg(mobile)]
-pub fn advertise_peer<R: tauri::Runtime>(
+pub async fn advertise_peer<R: tauri::Runtime>(
     _app: tauri::AppHandle<R>,
+    webview: tauri::Webview<R>,
     state: tauri::State<'_, crate::mobile_mdns::MobileMdns<R>>,
     endpoint_handle: u64,
     service_name: String,
 ) -> Result<u64, String> {
+    let owner =
+        discovery_ownership::begin_peer(endpoint_handle, webview.label()).ok_or_else(|| {
+            format_error_json(
+                "INVALID_HANDLE",
+                "endpoint or WebView discovery owner is closed",
+            )
+        })?;
+    await_mobile_peer_start_barrier(webview.label(), &owner).await?;
     // TAURI-014: Resolve node identity so native advertise can publish TXT
     // metadata (pk, relay) that browse expects.
     let ep = state::get_endpoint(endpoint_handle).ok_or_else(|| {
@@ -1668,49 +2228,128 @@ pub fn advertise_peer<R: tauri::Runtime>(
             format!("invalid endpoint handle: {endpoint_handle}"),
         )
     })?;
+    use iroh::Watcher as _;
     let node_id = ep.node_id().to_string();
     let relay = ep.home_relay();
-    // #346: publish a primary direct `ip:port` candidate so browsing peers can
-    // dial this node over the LAN. A real local or reflexive port is
-    // authoritative; only a `:0`/`:1` placeholder borrows a same-family bound
-    // port. No placeholder reaches the dialer.
-    let address = primary_direct_addr(&ep, mobile_routable_ips(&state));
+    let mut watcher = ep.raw().watch_addr();
+    // Publish every viable path (for example VPN plus physical LAN), then keep
+    // the native registration synchronized with endpoint address changes.
+    let addresses = primary_direct_addrs(&ep, mobile_routable_ips(&state).await);
     let handle = state
-        .advertise_peer_start(
-            &service_name,
-            &node_id,
-            relay.as_deref(),
-            address.as_deref(),
-        )
+        .advertise_peer_start(&service_name, &node_id, relay.as_deref(), &addresses)
+        .await
         .map_err(|e| format_error_json("REFUSED", e))?;
-    track_discovery(DiscoveryKind::AdvertisePeer, handle);
-    Ok(handle)
-}
 
-/// Pick the primary direct address to advertise. See #346.
-///
-/// Prefers a reconciled direct address that is already routable (has a real
-/// port and is neither loopback nor unspecified). When the endpoint enumerates
-/// no such address — the iOS failure mode, where `ip_addrs()` yields nothing
-/// usable at advertise time even though the QUIC socket is bound — it falls
-/// back to combining a routable IP from the active interface inventory with a
-/// same-family bound QUIC port.
-#[cfg(mobile)]
-fn primary_direct_addr(
-    ep: &iroh_http_core::IrohEndpoint,
-    fallback_ips: impl IntoIterator<Item = std::net::IpAddr>,
-) -> Option<String> {
-    let reconciled = ep.direct_socket_addrs();
-    let bound_sockets = ep.bound_sockets();
-    select_primary_direct_addr(&reconciled, &bound_sockets, fallback_ips).map(|a| a.to_string())
+    let mdns = (*state).clone();
+    let refresh_endpoint = ep.clone();
+    let mut published_relay = relay;
+    let mut published_addresses = addresses;
+    let refresh_generation = next_mobile_peer_advertise_generation();
+    // Do not let the refresh worker observe terminal endpoint/native state
+    // until its handle is present in both cleanup registries. This closes the
+    // narrow race where an immediately-closed watcher could finish before the
+    // task map insertion, leaving a completed task and a false-active owner.
+    let (refresh_start, refresh_start_rx) = tokio::sync::oneshot::channel();
+    let (refresh_cancel, mut refresh_cancel_rx) = tokio::sync::watch::channel(false);
+    let refresh = tauri::async_runtime::spawn(async move {
+        let started = tokio::select! {
+            result = refresh_start_rx => result.is_ok(),
+            result = refresh_cancel_rx.changed() => {
+                let _ = result;
+                false
+            }
+        };
+        if started {
+            loop {
+                let watcher_result = tokio::select! {
+                    result = refresh_cancel_rx.changed() => {
+                        let _ = result;
+                        break;
+                    }
+                    result = watcher.updated() => result,
+                };
+                if watcher_result.is_err() || *refresh_cancel_rx.borrow() {
+                    break;
+                }
+                let next_relay = refresh_endpoint.home_relay();
+                let next_addresses =
+                    primary_direct_addrs(&refresh_endpoint, mobile_routable_ips(&mdns).await);
+                if *refresh_cancel_rx.borrow() {
+                    break;
+                }
+                if next_relay == published_relay && next_addresses == published_addresses {
+                    continue;
+                }
+                let (update_result, cancelled) = complete_mobile_call_before_cancellation(
+                    &refresh_cancel_rx,
+                    mdns.advertise_peer_update(handle, next_relay.as_deref(), &next_addresses),
+                )
+                .await;
+                match update_result {
+                    Ok(()) => {
+                        published_relay = next_relay;
+                        published_addresses = next_addresses;
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            %error,
+                            advertise_handle = handle,
+                            "iroh-http-tauri: failed to refresh native peer advertisement"
+                        );
+                        break;
+                    }
+                }
+                if cancelled {
+                    break;
+                }
+            }
+        }
+        // A disconnected watcher or fatal native refresh leaves no usable
+        // dynamic advertisement. Retire it instead of retaining a false-active
+        // JS handle and stale TXT snapshot.
+        let _ = mdns.advertise_peer_stop(handle).await;
+        finish_mobile_peer_advertise_refresh(handle, refresh_generation);
+    });
+    let previous = mobile_peer_advertise_tasks()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .insert(
+            handle,
+            MobilePeerAdvertiseTask {
+                generation: refresh_generation,
+                cancel: refresh_cancel,
+                task: refresh,
+            },
+        );
+    if let Some(previous) = previous {
+        let _ = previous.cancel.send(true);
+        discovery_ownership::untrack(DiscoveryKind::AdvertisePeer, handle);
+        // Preserve the previous task's in-flight native response receiver.
+        let _ = previous.task.await;
+    }
+    if discovery_ownership::track_peer(owner, DiscoveryKind::AdvertisePeer, handle).is_err() {
+        // Dropping the startup sender lets the worker own final native stop
+        // even though this command will never expose the handle.
+        drop(refresh_start);
+        wait_for_mobile_peer_advertise_refresh(handle).await;
+        let _ = state.advertise_peer_stop(handle).await;
+        return Err(format_error_json(
+            "REFUSED",
+            "discovery owner retired while peer advertisement was starting",
+        ));
+    }
+    // The task map and ownership entry are now both visible to endpoint,
+    // WebView, and explicit-close cleanup paths.
+    let _ = refresh_start.send(());
+    Ok(handle)
 }
 
 /// All routable direct addresses to advertise on mobile (#348).
 ///
-/// The plural of [`primary_direct_addr`]: every routable real-port candidate is
-/// kept verbatim, while only `:0`/`:1` placeholders borrow a same-family bound
-/// port. A device on both a VPN `10.x` interface and the real LAN therefore
-/// advertises both so the dialing peer can race the usable paths.
+/// Every routable real-port candidate is kept verbatim, while only `:0`/`:1`
+/// placeholders borrow a same-family bound port. A device on both a VPN `10.x`
+/// interface and the real LAN therefore advertises both so the dialing peer can
+/// race the usable paths.
 #[cfg(mobile)]
 fn primary_direct_addrs(
     ep: &iroh_http_core::IrohEndpoint,
@@ -1731,7 +2370,7 @@ fn primary_direct_addrs(
 /// route, and therefore misses IPv6 ULA/local-only LANs. Keeping all usable
 /// interface addresses also preserves the VPN + physical-LAN multi-path case.
 #[cfg(target_os = "ios")]
-fn mobile_routable_ips<R: tauri::Runtime>(
+async fn mobile_routable_ips<R: tauri::Runtime>(
     _state: &crate::mobile_mdns::MobileMdns<R>,
 ) -> Vec<std::net::IpAddr> {
     match if_addrs::get_if_addrs() {
@@ -1748,10 +2387,10 @@ fn mobile_routable_ips<R: tauri::Runtime>(
 }
 
 #[cfg(target_os = "android")]
-fn mobile_routable_ips<R: tauri::Runtime>(
+async fn mobile_routable_ips<R: tauri::Runtime>(
     state: &crate::mobile_mdns::MobileMdns<R>,
 ) -> Vec<std::net::IpAddr> {
-    match state.get_interface_addresses() {
+    match state.get_interface_addresses().await {
         Ok(addresses) => parse_mobile_interface_ips(addresses),
         Err(reason) => {
             // Interface fallback supplements iroh's own candidates; failure to
@@ -1786,7 +2425,7 @@ fn select_routable_interface_ips(
 
 /// Parse native mobile interface literals and apply the same routability and
 /// deduplication policy as the iOS Rust-side interface inventory.
-#[cfg(any(mobile, test))]
+#[cfg(any(target_os = "android", test))]
 fn parse_mobile_interface_ips(
     addresses: impl IntoIterator<Item = String>,
 ) -> Vec<std::net::IpAddr> {
@@ -1809,7 +2448,7 @@ fn parse_mobile_interface_ips(
 /// placeholders borrow from `bound_sockets()`. The borrowed port must belong
 /// to the same address family; otherwise the endpoint is not listening at the
 /// synthesized address (#350 F14). Returns `None` when no candidate is usable.
-#[cfg(any(mobile, test))]
+#[cfg(test)]
 fn select_primary_direct_addr<I>(
     reconciled: &[std::net::SocketAddr],
     bound_sockets: &[std::net::SocketAddr],
@@ -1825,14 +2464,13 @@ where
 
 /// All routable direct addresses (#348), pure for testing.
 ///
-/// The plural of [`select_primary_direct_addr`]: every routable real-port
-/// candidate is preserved verbatim, while only `:0`/`:1` placeholders borrow a
-/// same-family bound QUIC port. Results stay in enumeration order and are
-/// deduplicated. Every fallback interface IP is synthesized with a same-family
-/// bound port unless that exact candidate is already present; one IPv4 VPN
-/// candidate therefore cannot suppress a different IPv4 LAN candidate. One bad
-/// candidate never suppresses the others. This is the single policy
-/// implementation used by both the singular and plural advertisement APIs.
+/// Every routable real-port candidate is preserved verbatim, while only
+/// `:0`/`:1` placeholders borrow a same-family bound QUIC port. Results stay in
+/// enumeration order and are deduplicated. Every fallback interface IP is
+/// synthesized with a same-family bound port unless that exact candidate is
+/// already present; one IPv4 VPN candidate therefore cannot suppress a
+/// different IPv4 LAN candidate. One bad candidate never suppresses the
+/// others.
 #[cfg(any(mobile, test))]
 fn select_primary_direct_addrs<I>(
     reconciled: &[std::net::SocketAddr],
@@ -1904,66 +2542,86 @@ fn is_routable_ip(ip: &std::net::IpAddr) -> bool {
 /// Stop advertising this node on the local network.
 #[command]
 #[cfg(not(mobile))]
-pub fn advertise_peer_close(advertise_handle: u64) {
+pub fn advertise_peer_close(_advertise_handle: u64) {
     #[cfg(feature = "discovery")]
     {
-        untrack_discovery(DiscoveryKind::AdvertisePeer, advertise_handle);
+        let advertise_handle = _advertise_handle;
         let mut slab = advertise_slab().lock().unwrap_or_else(|e| e.into_inner());
-        if slab.contains(advertise_handle as usize) {
-            slab.remove(advertise_handle as usize);
+        if discovery_ownership::untrack(DiscoveryKind::AdvertisePeer, advertise_handle).is_some() {
+            slab.remove(advertise_handle);
         }
     }
 }
 
 #[command]
 #[cfg(mobile)]
-pub fn advertise_peer_close<R: tauri::Runtime>(
+pub async fn advertise_peer_close<R: tauri::Runtime>(
     _app: tauri::AppHandle<R>,
     state: tauri::State<'_, crate::mobile_mdns::MobileMdns<R>>,
     advertise_handle: u64,
-) {
-    untrack_discovery(DiscoveryKind::AdvertisePeer, advertise_handle);
-    let _ = state.advertise_peer_stop(advertise_handle);
+) -> Result<(), String> {
+    if discovery_ownership::untrack(DiscoveryKind::AdvertisePeer, advertise_handle).is_none() {
+        return Ok(());
+    }
+    wait_for_mobile_peer_advertise_refresh(advertise_handle).await;
+    let _ = state.advertise_peer_stop(advertise_handle).await;
+    Ok(())
 }
 
 // ── Generic DNS-SD ─────────────────────────────────────────────────────────────────────────
 
 #[cfg(all(feature = "discovery", not(mobile)))]
-type GenericBrowseHandle = Arc<TokioMutex<iroh_http_discovery::ServiceBrowseSession>>;
+type GenericBrowseHandle = Arc<iroh_http_discovery::ServiceBrowseSession>;
 
 #[cfg(all(feature = "discovery", not(mobile)))]
-fn generic_browse_slab() -> &'static Mutex<slab::Slab<GenericBrowseHandle>> {
-    static S: OnceLock<Mutex<slab::Slab<GenericBrowseHandle>>> = OnceLock::new();
-    S.get_or_init(|| Mutex::new(slab::Slab::new()))
+fn generic_browse_slab() -> &'static Mutex<DiscoveryHandleMap<GenericBrowseHandle>> {
+    static S: OnceLock<Mutex<DiscoveryHandleMap<GenericBrowseHandle>>> = OnceLock::new();
+    S.get_or_init(|| Mutex::new(DiscoveryHandleMap::default()))
 }
 
-/// Mobile generic DNS-SD browse buffer, mirroring the peer path's
-/// `mobile_mdns_buffer`: holds records polled from the native layer that have
-/// not yet been drained by `browse_next`.
 #[cfg(mobile)]
-#[allow(clippy::type_complexity)]
-fn mobile_dns_sd_buffer() -> &'static Mutex<
-    std::collections::HashMap<
-        u64,
-        std::collections::VecDeque<crate::mobile_mdns::MobileServiceRecord>,
-    >,
-> {
-    static BUFFER: OnceLock<
-        Mutex<
-            std::collections::HashMap<
-                u64,
-                std::collections::VecDeque<crate::mobile_mdns::MobileServiceRecord>,
-            >,
-        >,
-    > = OnceLock::new();
-    BUFFER.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+struct MobileGenericBrowseSession {
+    next: TokioMutex<()>,
+    buffer: Mutex<std::collections::VecDeque<crate::mobile_mdns::MobileServiceRecord>>,
+    terminal: Mutex<Option<MobileBrowseTerminal>>,
 }
 
-/// Set of generic browse handles still open, mirroring `mobile_active_browses`.
 #[cfg(mobile)]
-fn mobile_active_dns_sd_browses() -> &'static Mutex<std::collections::HashSet<u64>> {
-    static S: OnceLock<Mutex<std::collections::HashSet<u64>>> = OnceLock::new();
-    S.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+fn mobile_generic_browse_sessions(
+) -> &'static Mutex<std::collections::HashMap<u64, Arc<MobileGenericBrowseSession>>> {
+    static S: OnceLock<Mutex<std::collections::HashMap<u64, Arc<MobileGenericBrowseSession>>>> =
+        OnceLock::new();
+    S.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+#[cfg(mobile)]
+fn mobile_generic_session_is_current(
+    handle: u64,
+    expected: &Arc<MobileGenericBrowseSession>,
+) -> bool {
+    mobile_generic_browse_sessions()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .get(&handle)
+        .is_some_and(|current| Arc::ptr_eq(current, expected))
+}
+
+#[cfg(mobile)]
+fn take_mobile_generic_session(
+    handle: u64,
+    expected: Option<&Arc<MobileGenericBrowseSession>>,
+) -> Option<Arc<MobileGenericBrowseSession>> {
+    let mut sessions = mobile_generic_browse_sessions()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    if expected.is_some_and(|expected| {
+        !sessions
+            .get(&handle)
+            .is_some_and(|current| Arc::ptr_eq(current, expected))
+    }) {
+        return None;
+    }
+    sessions.remove(&handle)
 }
 
 #[cfg(mobile)]
@@ -1982,6 +2640,7 @@ fn service_record_from_mobile(r: crate::mobile_mdns::MobileServiceRecord) -> Ser
 /// A generic DNS-SD service to advertise, mirroring the shared `ServiceConfig`.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[cfg_attr(all(not(feature = "discovery"), not(mobile)), allow(dead_code))]
 pub struct ServiceConfigPayload {
     pub service_name: String,
     pub instance_name: String,
@@ -1992,6 +2651,21 @@ pub struct ServiceConfigPayload {
     pub txt: std::collections::HashMap<String, String>,
     #[serde(default)]
     pub protocol: Option<String>,
+}
+
+/// Native DNS-SD APIs own A/AAAA publication and do not accept caller-selected
+/// interface addresses. Rejecting the field explicitly avoids pretending the
+/// cross-platform configuration was honoured.
+#[cfg(any(mobile, test))]
+fn reject_mobile_explicit_addrs(addrs: &[String]) -> Result<(), String> {
+    if addrs.is_empty() {
+        Ok(())
+    } else {
+        Err(format_error_json(
+            "INVALID_INPUT",
+            "generic DNS-SD explicit addrs are desktop-only; native mobile adapters select A/AAAA records",
+        ))
+    }
 }
 
 /// A resolved DNS-SD service record, mirroring the shared `ServiceRecord`.
@@ -2022,7 +2696,12 @@ fn parse_protocol(p: Option<&str>) -> Result<iroh_http_discovery::Protocol, Stri
 /// Advertise a generic DNS-SD service (not tied to an iroh endpoint).
 #[command]
 #[cfg(all(feature = "discovery", not(mobile)))]
-pub async fn advertise(config: ServiceConfigPayload) -> Result<u64, String> {
+pub async fn advertise<R: tauri::Runtime>(
+    webview: tauri::Webview<R>,
+    config: ServiceConfigPayload,
+) -> Result<u64, String> {
+    let owner = discovery_ownership::begin_webview(webview.label())
+        .ok_or_else(|| format_error_json("INVALID_HANDLE", "WebView discovery owner is closed"))?;
     let protocol = parse_protocol(config.protocol.as_deref())?;
     let addrs = config
         .addrs
@@ -2045,8 +2724,18 @@ pub async fn advertise(config: ServiceConfigPayload) -> Result<u64, String> {
     let handle = advertise_slab()
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .insert(session) as u64;
-    track_discovery(DiscoveryKind::GenericAdvertise, handle);
+        .insert(session)
+        .map_err(|error| format_error_json("REFUSED", error))?;
+    if discovery_ownership::track_generic(owner, DiscoveryKind::GenericAdvertise, handle).is_err() {
+        let mut slab = advertise_slab()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        slab.remove(handle);
+        return Err(format_error_json(
+            "REFUSED",
+            "WebView retired while DNS-SD advertisement was starting",
+        ));
+    }
     Ok(handle)
 }
 
@@ -2061,11 +2750,16 @@ pub async fn advertise(_config: ServiceConfigPayload) -> Result<u64, String> {
 
 #[command]
 #[cfg(mobile)]
-pub fn advertise<R: tauri::Runtime>(
+pub async fn advertise<R: tauri::Runtime>(
     _app: tauri::AppHandle<R>,
+    webview: tauri::Webview<R>,
     state: tauri::State<'_, crate::mobile_mdns::MobileMdns<R>>,
     config: ServiceConfigPayload,
 ) -> Result<u64, String> {
+    let owner = discovery_ownership::begin_webview(webview.label())
+        .ok_or_else(|| format_error_json("INVALID_HANDLE", "WebView discovery owner is closed"))?;
+    await_mobile_generic_start_barrier(webview.label(), &owner).await?;
+    reject_mobile_explicit_addrs(&config.addrs)?;
     let protocol = config.protocol.as_deref().unwrap_or("udp");
     let handle = state
         .advertise_start(
@@ -2076,40 +2770,57 @@ pub fn advertise<R: tauri::Runtime>(
             &config.addrs,
             &config.txt,
         )
+        .await
         .map_err(|e| format_error_json("REFUSED", e))?;
-    track_discovery(DiscoveryKind::GenericAdvertise, handle);
+    if discovery_ownership::track_generic(owner, DiscoveryKind::GenericAdvertise, handle).is_err() {
+        let _ = state.advertise_stop(handle).await;
+        return Err(format_error_json(
+            "REFUSED",
+            "WebView retired while DNS-SD advertisement was starting",
+        ));
+    }
     Ok(handle)
 }
 
 /// Stop a generic DNS-SD advertisement.
 #[command]
 #[cfg(not(mobile))]
-pub fn advertise_close(advertise_handle: u64) {
+pub fn advertise_close(_advertise_handle: u64) {
     #[cfg(feature = "discovery")]
     {
-        untrack_discovery(DiscoveryKind::GenericAdvertise, advertise_handle);
+        let advertise_handle = _advertise_handle;
         let mut slab = advertise_slab().lock().unwrap_or_else(|e| e.into_inner());
-        if slab.contains(advertise_handle as usize) {
-            slab.remove(advertise_handle as usize);
+        if discovery_ownership::untrack(DiscoveryKind::GenericAdvertise, advertise_handle).is_some()
+        {
+            slab.remove(advertise_handle);
         }
     }
 }
 
 #[command]
 #[cfg(mobile)]
-pub fn advertise_close<R: tauri::Runtime>(
+pub async fn advertise_close<R: tauri::Runtime>(
     _app: tauri::AppHandle<R>,
     state: tauri::State<'_, crate::mobile_mdns::MobileMdns<R>>,
     advertise_handle: u64,
-) {
-    untrack_discovery(DiscoveryKind::GenericAdvertise, advertise_handle);
-    let _ = state.advertise_stop(advertise_handle);
+) -> Result<(), String> {
+    if discovery_ownership::untrack(DiscoveryKind::GenericAdvertise, advertise_handle).is_none() {
+        return Ok(());
+    }
+    let _ = state.advertise_stop(advertise_handle).await;
+    Ok(())
 }
 
 /// Browse for a generic DNS-SD service.
 #[command]
 #[cfg(all(feature = "discovery", not(mobile)))]
-pub async fn browse(service_name: String, protocol: Option<String>) -> Result<u64, String> {
+pub async fn browse<R: tauri::Runtime>(
+    webview: tauri::Webview<R>,
+    service_name: String,
+    protocol: Option<String>,
+) -> Result<u64, String> {
+    let owner = discovery_ownership::begin_webview(webview.label())
+        .ok_or_else(|| format_error_json("INVALID_HANDLE", "WebView discovery owner is closed"))?;
     let protocol = parse_protocol(protocol.as_deref())?;
     let config = iroh_http_discovery::BrowseConfig {
         service_name,
@@ -2120,8 +2831,20 @@ pub async fn browse(service_name: String, protocol: Option<String>) -> Result<u6
     let handle = generic_browse_slab()
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .insert(Arc::new(TokioMutex::new(session))) as u64;
-    track_discovery(DiscoveryKind::GenericBrowse, handle);
+        .insert(Arc::new(session))
+        .map_err(|error| format_error_json("REFUSED", error))?;
+    if discovery_ownership::track_generic(owner, DiscoveryKind::GenericBrowse, handle).is_err() {
+        let mut slab = generic_browse_slab()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(session) = slab.remove(handle) {
+            session.close();
+        }
+        return Err(format_error_json(
+            "REFUSED",
+            "WebView retired while DNS-SD browse was starting",
+        ));
+    }
     Ok(handle)
 }
 
@@ -2136,21 +2859,46 @@ pub async fn browse(_service_name: String, _protocol: Option<String>) -> Result<
 
 #[command]
 #[cfg(mobile)]
-pub fn browse<R: tauri::Runtime>(
+pub async fn browse<R: tauri::Runtime>(
     _app: tauri::AppHandle<R>,
+    webview: tauri::Webview<R>,
     state: tauri::State<'_, crate::mobile_mdns::MobileMdns<R>>,
     service_name: String,
     protocol: Option<String>,
 ) -> Result<u64, String> {
+    let owner = discovery_ownership::begin_webview(webview.label())
+        .ok_or_else(|| format_error_json("INVALID_HANDLE", "WebView discovery owner is closed"))?;
+    await_mobile_generic_start_barrier(webview.label(), &owner).await?;
     let protocol = protocol.as_deref().unwrap_or("udp");
     let browse_id = state
         .browse_start(&service_name, protocol)
+        .await
         .map_err(|e| format_error_json("REFUSED", e))?;
-    mobile_active_dns_sd_browses()
+    let session = Arc::new(MobileGenericBrowseSession {
+        next: TokioMutex::new(()),
+        buffer: Mutex::new(std::collections::VecDeque::new()),
+        terminal: Mutex::new(None),
+    });
+    if let Some(replaced) = mobile_generic_browse_sessions()
         .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .insert(browse_id);
-    track_discovery(DiscoveryKind::GenericBrowse, browse_id);
+        .unwrap_or_else(|error| error.into_inner())
+        .insert(browse_id, session)
+    {
+        replaced
+            .buffer
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clear();
+        discovery_ownership::untrack(DiscoveryKind::GenericBrowse, browse_id);
+    }
+    if discovery_ownership::track_generic(owner, DiscoveryKind::GenericBrowse, browse_id).is_err() {
+        take_mobile_generic_session(browse_id, None);
+        let _ = state.browse_stop(browse_id).await;
+        return Err(format_error_json(
+            "REFUSED",
+            "WebView retired while DNS-SD browse was starting",
+        ));
+    }
     Ok(browse_id)
 }
 
@@ -2162,7 +2910,7 @@ pub async fn browse_next(browse_handle: u64) -> Result<Option<ServiceRecordPaylo
         generic_browse_slab()
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .get(browse_handle as usize)
+            .get(browse_handle)
             .cloned()
     }
     .ok_or_else(|| {
@@ -2171,7 +2919,17 @@ pub async fn browse_next(browse_handle: u64) -> Result<Option<ServiceRecordPaylo
             format!("invalid browse handle: {browse_handle}"),
         )
     })?;
-    let record = session.lock().await.next_record().await;
+    let record = session.next_record().await;
+    if record.is_none() {
+        let removed = generic_browse_slab()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove_if(browse_handle, |current| Arc::ptr_eq(current, &session))
+            .is_some();
+        if removed {
+            discovery_ownership::untrack(DiscoveryKind::GenericBrowse, browse_handle);
+        }
+    }
     Ok(record.map(|r| ServiceRecordPayload {
         is_active: r.is_active,
         service_type: r.service_type,
@@ -2199,84 +2957,131 @@ pub async fn browse_next<R: tauri::Runtime>(
     state: tauri::State<'_, crate::mobile_mdns::MobileMdns<R>>,
     browse_handle: u64,
 ) -> Result<Option<ServiceRecordPayload>, String> {
-    // The native NsdManager / NWBrowser layer is poll-based and non-blocking
-    // (`browse_poll` returns `[]` until a record appears), whereas the
-    // shared async iterator treats `None` as "stream finished". Long-poll so
-    // `None` keeps its cross-platform meaning — mirrors `browse_peers_next`.
-    let buffer = mobile_dns_sd_buffer();
-    loop {
-        // 1. Drain any record buffered by a previous poll first.
-        {
-            let mut map = buffer.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(queue) = map.get_mut(&browse_handle) {
-                if let Some(rec) = queue.pop_front() {
-                    return Ok(Some(service_record_from_mobile(rec)));
-                }
-            }
-        }
+    let session = mobile_generic_browse_sessions()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .get(&browse_handle)
+        .cloned();
+    let Some(session) = session else {
+        return Ok(None);
+    };
+    let _next = session.next.lock().await;
 
-        // 2. Stop long-polling once the session has been closed.
-        let active = mobile_active_dns_sd_browses()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .contains(&browse_handle);
-        if !active {
+    loop {
+        if !mobile_generic_session_is_current(browse_handle, &session) {
             return Ok(None);
         }
 
-        // 3. Poll the native layer for freshly resolved records.
-        let mut records = state
-            .browse_poll(browse_handle)
-            .map_err(|e| format_error_json("INVALID_HANDLE", e))?;
-        let first = records.drain(..1.min(records.len())).next();
-        if !records.is_empty() {
-            let mut map = buffer.lock().unwrap_or_else(|e| e.into_inner());
-            map.entry(browse_handle).or_default().extend(records);
-        }
-        if let Some(rec) = first {
-            return Ok(Some(service_record_from_mobile(rec)));
+        if let Some(record) = session
+            .buffer
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .pop_front()
+        {
+            return Ok(Some(service_record_from_mobile(record)));
         }
 
-        // 4. Nothing yet — wait briefly, then poll again.
-        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        if let Some(terminal) = session
+            .terminal
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take()
+        {
+            if take_mobile_generic_session(browse_handle, Some(&session)).is_some() {
+                discovery_ownership::untrack(DiscoveryKind::GenericBrowse, browse_handle);
+            }
+            return match terminal {
+                MobileBrowseTerminal::Closed => Ok(None),
+                MobileBrowseTerminal::Failed(error) => Err(format_error_json("REFUSED", error)),
+            };
+        }
+
+        let response = match state.browse_poll(browse_handle).await {
+            Ok(response) => response,
+            Err(error) => {
+                let _ = state.browse_stop(browse_handle).await;
+                *session
+                    .terminal
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner()) =
+                    Some(MobileBrowseTerminal::Failed(error));
+                continue;
+            }
+        };
+        use crate::mobile_mdns::MobileSessionStatus;
+        // A terminal response is authoritative for the browse generation.
+        // Do not expose records from that final batch after the session has
+        // already ceased owning them.
+        if response.status == MobileSessionStatus::Active {
+            session
+                .buffer
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .extend(response.records);
+        }
+        let terminal = match response.status {
+            MobileSessionStatus::Active => None,
+            MobileSessionStatus::Closed => Some(MobileBrowseTerminal::Closed),
+            MobileSessionStatus::Failed => {
+                Some(MobileBrowseTerminal::Failed(response.error.unwrap_or_else(
+                    || "native DNS-SD browse failed".to_string(),
+                )))
+            }
+        };
+        if let Some(terminal) = terminal {
+            let _ = state.browse_stop(browse_handle).await;
+            *session
+                .terminal
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()) = Some(terminal);
+        } else if session
+            .buffer
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .is_empty()
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
     }
 }
 
 /// Close a generic DNS-SD browse session.
 #[command]
 #[cfg(not(mobile))]
-pub fn browse_close(browse_handle: u64) {
+pub fn browse_close(_browse_handle: u64) {
     #[cfg(feature = "discovery")]
     {
-        untrack_discovery(DiscoveryKind::GenericBrowse, browse_handle);
+        let browse_handle = _browse_handle;
         let mut slab = generic_browse_slab()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        if slab.contains(browse_handle as usize) {
-            slab.remove(browse_handle as usize);
+        if discovery_ownership::untrack(DiscoveryKind::GenericBrowse, browse_handle).is_some() {
+            if let Some(session) = slab.remove(browse_handle) {
+                session.close();
+            }
         }
     }
 }
 
 #[command]
 #[cfg(mobile)]
-pub fn browse_close<R: tauri::Runtime>(
+pub async fn browse_close<R: tauri::Runtime>(
     _app: tauri::AppHandle<R>,
     state: tauri::State<'_, crate::mobile_mdns::MobileMdns<R>>,
     browse_handle: u64,
-) {
-    untrack_discovery(DiscoveryKind::GenericBrowse, browse_handle);
-    // Retire the handle first so any in-flight `browse_next` long-poll
-    // observes the closure and returns `None` (stream finished).
-    mobile_active_dns_sd_browses()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .remove(&browse_handle);
-    let _ = state.browse_stop(browse_handle);
-    mobile_dns_sd_buffer()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .remove(&browse_handle);
+) -> Result<(), String> {
+    if discovery_ownership::untrack(DiscoveryKind::GenericBrowse, browse_handle).is_none() {
+        return Ok(());
+    }
+    if let Some(session) = take_mobile_generic_session(browse_handle, None) {
+        session
+            .buffer
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clear();
+    }
+    let _ = state.browse_stop(browse_handle).await;
+    Ok(())
 }
 
 // ── Transport events ──────────────────────────────────────────────────────────
@@ -2430,8 +3235,41 @@ pub fn unsubscribe_path_changes(endpoint_handle: u64, node_id: String) -> Result
 
 #[cfg(test)]
 mod mobile_dns_policy_tests {
-    use super::should_query_mobile_dns;
-    use iroh_http_core::endpoint::{DiscoveryOptions, NodeOptions};
+    use super::{
+        apply_mobile_peer_event, await_mobile_generic_start_barrier_with_timeout,
+        await_mobile_peer_start_barrier_with_timeout, await_mobile_webview_cleanup_with_timeout,
+        complete_mobile_call_before_cancellation, mobile_webview_cleanup_barriers,
+        reject_mobile_explicit_addrs, should_query_mobile_dns, MobileWebviewCleanupBarrier,
+    };
+    use iroh::SecretKey;
+    use iroh_http_core::{
+        endpoint::{DiscoveryOptions, NodeOptions},
+        SourceScopedAddressLookup,
+    };
+    use std::{
+        sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        },
+        time::Duration,
+    };
+
+    fn node_id(seed: u8) -> String {
+        let endpoint_id = SecretKey::from_bytes(&[seed; 32]).public();
+        iroh_http_core::base32_encode(endpoint_id.as_bytes())
+    }
+
+    fn resolves(lookup: &SourceScopedAddressLookup, node_id: &str) -> bool {
+        use iroh::address_lookup::AddressLookup as _;
+
+        let endpoint_id = node_id.parse().unwrap();
+        lookup.resolve(endpoint_id).is_some()
+    }
+
+    fn only(mut events: Vec<super::MobilePeerEvent>) -> super::MobilePeerEvent {
+        assert_eq!(events.len(), 1, "expected exactly one peer transition");
+        events.pop().unwrap()
+    }
 
     #[test]
     fn offline_endpoints_skip_native_dns_but_online_endpoints_do_not() {
@@ -2447,6 +3285,416 @@ mod mobile_dns_policy_tests {
             should_query_mobile_dns(&online_without_discovery),
             "online endpoints may still need DNS for relays or proxies"
         );
+    }
+
+    #[test]
+    fn mobile_generic_advertising_rejects_explicit_addresses() {
+        assert!(reject_mobile_explicit_addrs(&[]).is_ok());
+        let error = reject_mobile_explicit_addrs(&["192.168.1.2".to_string()])
+            .expect_err("native adapters cannot honour explicit A/AAAA records");
+        assert!(error.contains("desktop-only"));
+    }
+
+    #[test]
+    fn malformed_replacement_expires_the_old_peer_for_js_and_lookup() {
+        let lookup = SourceScopedAddressLookup::new("test-mobile-mdns");
+        let source = lookup.new_source();
+        let old_node = node_id(31);
+        let old_addrs = vec!["10.0.0.31:4433".to_string()];
+
+        assert_eq!(
+            apply_mobile_peer_event(
+                &source,
+                true,
+                "discovered",
+                "stable-instance",
+                &old_node,
+                &old_addrs,
+            )
+            .len(),
+            1
+        );
+        let event = only(apply_mobile_peer_event(
+            &source,
+            true,
+            "discovered",
+            "stable-instance",
+            "not-a-node-id",
+            &["10.0.0.99:4433".to_string()],
+        ));
+
+        assert_eq!(
+            event,
+            super::MobilePeerEvent {
+                is_active: false,
+                node_id: old_node.clone(),
+                addrs: Vec::new(),
+            }
+        );
+        assert!(!resolves(&lookup, &old_node));
+    }
+
+    #[test]
+    fn malformed_replacement_does_not_leak_another_source_into_js() {
+        let lookup = SourceScopedAddressLookup::new("test-mobile-mdns");
+        let replaced_source = lookup.new_source();
+        let overlapping_source = lookup.new_source();
+        let node = node_id(32);
+        let stale_addr = "10.0.0.32:4433".to_string();
+        let remaining_addr = "10.0.0.33:4433".to_string();
+
+        replaced_source
+            .upsert("stable-instance", &node, std::slice::from_ref(&stale_addr))
+            .unwrap();
+        overlapping_source
+            .upsert(
+                "other-instance",
+                &node,
+                std::slice::from_ref(&remaining_addr),
+            )
+            .unwrap();
+
+        let event = only(apply_mobile_peer_event(
+            &replaced_source,
+            true,
+            "discovered",
+            "stable-instance",
+            "not-a-node-id",
+            &["10.0.0.99:4433".to_string()],
+        ));
+
+        assert_eq!(
+            event,
+            super::MobilePeerEvent {
+                is_active: false,
+                node_id: node.clone(),
+                addrs: Vec::new(),
+            }
+        );
+        assert!(resolves(&lookup, &node));
+    }
+
+    #[test]
+    fn remaining_instance_without_a_dialable_path_is_still_active() {
+        let lookup = SourceScopedAddressLookup::new("test-mobile-mdns");
+        let replaced_source = lookup.new_source();
+        let node = node_id(33);
+
+        replaced_source
+            .upsert("stable-instance", &node, &["10.0.0.33:4433".to_string()])
+            .unwrap();
+        replaced_source
+            .upsert("pathless-instance", &node, &[])
+            .unwrap();
+
+        let event = only(apply_mobile_peer_event(
+            &replaced_source,
+            true,
+            "discovered",
+            "stable-instance",
+            "not-a-node-id",
+            &[],
+        ));
+
+        assert!(event.is_active);
+        assert_eq!(event.node_id, node);
+        assert!(event.addrs.is_empty());
+    }
+
+    #[test]
+    fn terminal_batch_updates_are_not_applied_or_emitted() {
+        let lookup = SourceScopedAddressLookup::new("test-mobile-mdns");
+        let source = lookup.new_source();
+        let old_node = node_id(34);
+        let terminal_node = node_id(35);
+        source
+            .upsert("old-instance", &old_node, &["10.0.0.34:4433".to_string()])
+            .unwrap();
+
+        let event = apply_mobile_peer_event(
+            &source,
+            false,
+            "discovered",
+            "terminal-batch-instance",
+            &terminal_node,
+            &["10.0.0.35:4433".to_string()],
+        );
+
+        assert!(event.is_empty());
+        assert!(resolves(&lookup, &old_node));
+        assert!(!resolves(&lookup, &terminal_node));
+        source.retire();
+        assert!(!resolves(&lookup, &old_node));
+    }
+
+    #[test]
+    fn node_identity_change_emits_old_expiry_before_new_active_union() {
+        let lookup = SourceScopedAddressLookup::new("test-mobile-mdns");
+        let source = lookup.new_source();
+        let old_node = node_id(36);
+        let new_node = node_id(37);
+        source
+            .upsert(
+                "stable-instance",
+                &old_node,
+                &["10.0.0.36:4433".to_string()],
+            )
+            .unwrap();
+
+        let events = apply_mobile_peer_event(
+            &source,
+            true,
+            "discovered",
+            "stable-instance",
+            &new_node,
+            &["10.0.0.37:4433".to_string()],
+        );
+
+        assert_eq!(
+            events,
+            [
+                super::MobilePeerEvent {
+                    is_active: false,
+                    node_id: old_node.clone(),
+                    addrs: Vec::new(),
+                },
+                super::MobilePeerEvent {
+                    is_active: true,
+                    node_id: new_node.clone(),
+                    addrs: vec!["10.0.0.37:4433".to_string()],
+                },
+            ]
+        );
+        assert!(!resolves(&lookup, &old_node));
+        assert!(resolves(&lookup, &new_node));
+    }
+
+    #[test]
+    fn node_identity_change_keeps_other_source_out_of_js_transition() {
+        let lookup = SourceScopedAddressLookup::new("test-mobile-mdns");
+        let changing_source = lookup.new_source();
+        let remaining_source = lookup.new_source();
+        let old_node = node_id(38);
+        let new_node = node_id(39);
+        changing_source
+            .upsert(
+                "stable-instance",
+                &old_node,
+                &["10.0.0.38:4433".to_string()],
+            )
+            .unwrap();
+        remaining_source
+            .upsert(
+                "remaining-instance",
+                &old_node,
+                &["10.0.0.40:4433".to_string()],
+            )
+            .unwrap();
+
+        let events = apply_mobile_peer_event(
+            &changing_source,
+            true,
+            "discovered",
+            "stable-instance",
+            &new_node,
+            &["10.0.0.39:4433".to_string()],
+        );
+
+        assert_eq!(events.len(), 2);
+        assert!(!events[0].is_active);
+        assert_eq!(events[0].node_id, old_node);
+        assert!(events[0].addrs.is_empty());
+        assert!(resolves(&lookup, &events[0].node_id));
+        assert!(events[1].is_active);
+        assert_eq!(events[1].node_id, new_node);
+        assert_eq!(events[1].addrs, ["10.0.0.39:4433"]);
+    }
+
+    #[test]
+    fn same_node_update_emits_one_source_local_active_union() {
+        let lookup = SourceScopedAddressLookup::new("test-mobile-mdns");
+        let changing_source = lookup.new_source();
+        let overlapping_source = lookup.new_source();
+        let node = node_id(40);
+        changing_source
+            .upsert("stable-instance", &node, &["10.0.0.41:4433".to_string()])
+            .unwrap();
+        overlapping_source
+            .upsert("other-instance", &node, &["10.0.0.42:4433".to_string()])
+            .unwrap();
+
+        let event = only(apply_mobile_peer_event(
+            &changing_source,
+            true,
+            "discovered",
+            "stable-instance",
+            &node,
+            &["10.0.0.43:4433".to_string()],
+        ));
+        assert!(event.is_active);
+        assert_eq!(event.node_id, node);
+        assert_eq!(event.addrs, ["10.0.0.43:4433"]);
+    }
+
+    #[tokio::test]
+    async fn refresh_cancellation_preserves_an_in_flight_native_receiver() {
+        let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (finish_tx, finish_rx) = tokio::sync::oneshot::channel();
+        let mut task = tokio::spawn(async move {
+            complete_mobile_call_before_cancellation(&cancel_rx, async move {
+                let _ = started_tx.send(());
+                finish_rx.await
+            })
+            .await
+        });
+
+        started_rx.await.unwrap();
+        cancel_tx.send(true).unwrap();
+        tokio::task::yield_now().await;
+        assert!(
+            !task.is_finished(),
+            "cancellation must not drop the in-flight native response receiver"
+        );
+
+        finish_tx.send(()).unwrap();
+        let (native_result, cancelled) = (&mut task).await.unwrap();
+        assert!(native_result.is_ok());
+        assert!(cancelled);
+    }
+
+    #[tokio::test]
+    async fn reload_start_waits_for_prior_native_cleanup() {
+        let label = "reload-waits-for-cleanup";
+        let barrier = Arc::new(MobileWebviewCleanupBarrier::default());
+        mobile_webview_cleanup_barriers()
+            .lock()
+            .unwrap()
+            .insert(label.to_string(), barrier.clone());
+        let mut start = tokio::spawn(async move {
+            await_mobile_webview_cleanup_with_timeout(label, Duration::from_secs(1)).await
+        });
+
+        tokio::task::yield_now().await;
+        assert!(
+            !start.is_finished(),
+            "new-generation start must wait for old native unregister"
+        );
+        barrier.finish();
+        assert!((&mut start).await.unwrap().is_ok());
+        mobile_webview_cleanup_barriers()
+            .lock()
+            .unwrap()
+            .remove(label);
+    }
+
+    #[tokio::test]
+    async fn reload_invalidates_waiting_peer_start_before_native_registration() {
+        let _ownership_guard = crate::discovery_ownership::ownership_test_lock()
+            .lock()
+            .await;
+        const ENDPOINT_HANDLE: u64 = u64::MAX - 73;
+        let label = "reload-invalidates-waiting-peer-start";
+        crate::discovery_ownership::activate_endpoint(ENDPOINT_HANDLE);
+        crate::discovery_ownership::advance_webview(label);
+        let owner = crate::discovery_ownership::begin_peer(ENDPOINT_HANDLE, label).unwrap();
+
+        let barrier = Arc::new(MobileWebviewCleanupBarrier::default());
+        mobile_webview_cleanup_barriers()
+            .lock()
+            .unwrap()
+            .insert(label.to_string(), barrier.clone());
+        let native_started = Arc::new(AtomicBool::new(false));
+        let task_native_started = native_started.clone();
+        let mut start = tokio::spawn(async move {
+            await_mobile_peer_start_barrier_with_timeout(label, &owner, Duration::from_secs(1))
+                .await?;
+            task_native_started.store(true, Ordering::SeqCst);
+            Ok::<(), String>(())
+        });
+
+        tokio::task::yield_now().await;
+        assert!(!start.is_finished());
+        crate::discovery_ownership::advance_webview(label);
+        barrier.finish();
+
+        let error = (&mut start)
+            .await
+            .unwrap()
+            .expect_err("the old page generation must be rejected before native start");
+        assert!(error.contains("REFUSED"));
+        assert!(error.contains("owner retired"));
+        assert!(!native_started.load(Ordering::SeqCst));
+
+        mobile_webview_cleanup_barriers()
+            .lock()
+            .unwrap()
+            .remove(label);
+        crate::discovery_ownership::retire_endpoint(ENDPOINT_HANDLE);
+        crate::discovery_ownership::retire_webview(label);
+    }
+
+    #[tokio::test]
+    async fn reload_invalidates_waiting_generic_start_before_native_registration() {
+        let _ownership_guard = crate::discovery_ownership::ownership_test_lock()
+            .lock()
+            .await;
+        let label = "reload-invalidates-waiting-generic-start";
+        crate::discovery_ownership::advance_webview(label);
+        let owner = crate::discovery_ownership::begin_webview(label).unwrap();
+
+        let barrier = Arc::new(MobileWebviewCleanupBarrier::default());
+        mobile_webview_cleanup_barriers()
+            .lock()
+            .unwrap()
+            .insert(label.to_string(), barrier.clone());
+        let native_started = Arc::new(AtomicBool::new(false));
+        let task_native_started = native_started.clone();
+        let mut start = tokio::spawn(async move {
+            await_mobile_generic_start_barrier_with_timeout(label, &owner, Duration::from_secs(1))
+                .await?;
+            task_native_started.store(true, Ordering::SeqCst);
+            Ok::<(), String>(())
+        });
+
+        tokio::task::yield_now().await;
+        assert!(!start.is_finished());
+        crate::discovery_ownership::advance_webview(label);
+        barrier.finish();
+
+        let error = (&mut start)
+            .await
+            .unwrap()
+            .expect_err("the old page generation must be rejected before native start");
+        assert!(error.contains("REFUSED"));
+        assert!(error.contains("WebView retired"));
+        assert!(!native_started.load(Ordering::SeqCst));
+
+        mobile_webview_cleanup_barriers()
+            .lock()
+            .unwrap()
+            .remove(label);
+        crate::discovery_ownership::retire_webview(label);
+    }
+
+    #[tokio::test]
+    async fn reload_start_fails_when_prior_native_cleanup_times_out() {
+        let label = "reload-cleanup-timeout";
+        mobile_webview_cleanup_barriers().lock().unwrap().insert(
+            label.to_string(),
+            Arc::new(MobileWebviewCleanupBarrier::default()),
+        );
+
+        let error = await_mobile_webview_cleanup_with_timeout(label, Duration::ZERO)
+            .await
+            .expect_err("pending unregister must fail closed at the deadline");
+
+        assert!(error.contains("REFUSED"));
+        assert!(error.contains("cleanup timed out"));
+        mobile_webview_cleanup_barriers()
+            .lock()
+            .unwrap()
+            .remove(label);
     }
 }
 

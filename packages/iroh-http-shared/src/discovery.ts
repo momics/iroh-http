@@ -56,7 +56,9 @@ export interface ServiceConfig {
   txt?: Record<string, string>;
   /**
    * Extra IP addresses to advertise. Local interface addresses are added
-   * automatically, so this is usually left empty.
+   * automatically, so this is usually left empty. Desktop accepts explicit
+   * addresses; iOS and Android reject a non-empty list because their native
+   * DNS-SD APIs own A/AAAA publication and cannot honour this field.
    */
   addrs?: string[];
   /** Transport protocol. Defaults to `"udp"`. */

@@ -427,8 +427,8 @@ class TauriAdapter extends IrohAdapter {
     };
   }
 
-  browsePeersClose(browseHandle: number): void {
-    void invoke(`${PLUGIN}|browse_peers_close`, {
+  browsePeersClose(browseHandle: number): Promise<void> {
+    return invoke<void>(`${PLUGIN}|browse_peers_close`, {
       browseHandle: Number(browseHandle),
     });
   }
@@ -440,8 +440,8 @@ class TauriAdapter extends IrohAdapter {
     });
   }
 
-  advertisePeerClose(advertiseHandle: number): void {
-    void invoke(`${PLUGIN}|advertise_peer_close`, {
+  advertisePeerClose(advertiseHandle: number): Promise<void> {
+    return invoke<void>(`${PLUGIN}|advertise_peer_close`, {
       advertiseHandle: Number(advertiseHandle),
     });
   }
@@ -461,8 +461,8 @@ class TauriAdapter extends IrohAdapter {
     });
   }
 
-  advertiseClose(advertiseHandle: number): void {
-    void invoke(`${PLUGIN}|advertise_close`, {
+  advertiseClose(advertiseHandle: number): Promise<void> {
+    return invoke<void>(`${PLUGIN}|advertise_close`, {
       advertiseHandle: Number(advertiseHandle),
     });
   }
@@ -485,8 +485,8 @@ class TauriAdapter extends IrohAdapter {
     });
   }
 
-  browseClose(browseHandle: number): void {
-    void invoke(`${PLUGIN}|browse_close`, {
+  browseClose(browseHandle: number): Promise<void> {
+    return invoke<void>(`${PLUGIN}|browse_close`, {
       browseHandle: Number(browseHandle),
     });
   }
