@@ -136,5 +136,9 @@ echo "  → test:interop:suite"
 npm run test:interop:suite --silent
 ok "interop suite headless (node + deno, #340)"
 
+echo "  → test:example"
+npm run test:example --silent
+ok "example peer registry"
+
 echo ""
 echo -e "${GREEN}${BOLD}All checks passed.${NC} Ready to push."

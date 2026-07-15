@@ -23,7 +23,7 @@ export interface RegistryPeer {
   label: string;
   /** Best-known platform (`android` / `ios` / `desktop` / `?`). */
   platform: string;
-  /** Union of dialable addresses (`ip:port` and/or relay URLs) seen so far. */
+  /** Current dialable addresses (`ip:port` and/or relay URLs). */
   addrs: string[];
   /** The source of the most recent update. */
   source: PeerSource;
@@ -42,7 +42,14 @@ export interface PeerUpsert {
 type Listener = (peers: RegistryPeer[]) => void;
 
 const peers = new Map<string, RegistryPeer>();
+const addressesBySource = new Map<string, Map<PeerSource, string[]>>();
 const listeners = new Set<Listener>();
+
+const authoritativeAddressSources = new Set<PeerSource>([
+  "discovery",
+  "generic",
+  "test",
+]);
 
 function shortId(nodeId: string): string {
   return nodeId.length > 16 ? `${nodeId.slice(0, 16)}…` : nodeId;
@@ -64,18 +71,31 @@ function emit(): void {
 }
 
 /**
- * Insert or merge a peer. Addresses are unioned (never lost), a concrete
- * platform overrides a placeholder `?`, and `lastSeen`/`source` reflect this
- * update. Returns the merged entry.
+ * Insert or merge a peer. DNS-SD/discovery observations replace the previous
+ * address snapshot from that source; manual and session addresses accumulate.
+ * A concrete platform overrides a placeholder `?`, and `lastSeen`/`source`
+ * reflect this update. Returns the merged entry.
  */
 export function upsertPeer(input: PeerUpsert): RegistryPeer {
   const nodeId = input.nodeId.trim();
   const existing = peers.get(nodeId);
 
-  const addrs = new Set(existing?.addrs ?? []);
-  for (const a of input.addrs ?? []) {
-    if (a) addrs.add(a);
+  let sourceAddrs = addressesBySource.get(nodeId);
+  if (!sourceAddrs) {
+    sourceAddrs = new Map();
+    addressesBySource.set(nodeId, sourceAddrs);
   }
+  if (input.addrs !== undefined) {
+    const next = input.addrs.filter(Boolean);
+    if (authoritativeAddressSources.has(input.source)) {
+      sourceAddrs.set(input.source, [...new Set(next)]);
+    } else {
+      sourceAddrs.set(input.source, [
+        ...new Set([...(sourceAddrs.get(input.source) ?? []), ...next]),
+      ]);
+    }
+  }
+  const addrs = [...new Set([...sourceAddrs.values()].flat())];
 
   const platform = input.platform && input.platform !== "?"
     ? input.platform
@@ -85,7 +105,7 @@ export function upsertPeer(input: PeerUpsert): RegistryPeer {
     nodeId,
     label: input.label ?? existing?.label ?? shortId(nodeId),
     platform,
-    addrs: [...addrs],
+    addrs,
     source: input.source,
     lastSeen: Date.now(),
   };
@@ -96,7 +116,9 @@ export function upsertPeer(input: PeerUpsert): RegistryPeer {
 
 /** Remove a peer (e.g. a discovery `isActive=false` expiry). */
 export function removePeer(nodeId: string): void {
-  if (peers.delete(nodeId.trim())) emit();
+  const key = nodeId.trim();
+  addressesBySource.delete(key);
+  if (peers.delete(key)) emit();
 }
 
 export function getPeers(): RegistryPeer[] {

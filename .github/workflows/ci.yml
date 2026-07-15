@@ -127,6 +127,9 @@ jobs:
       - name: Shared discovery lifecycle tests
         run: npm test --workspace=packages/iroh-http-shared
 
+      - name: Example peer-registry tests
+        run: npm run test:example
+
       # Clean example build (#350 F1): the Tauri example uses file: links to the
       # local packages. A clean `tsc` build must resolve PR-only APIs against the
       # freshly-built dist. This step is what catches the example importing

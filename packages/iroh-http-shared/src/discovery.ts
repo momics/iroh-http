@@ -234,12 +234,13 @@ export function isRelayUrl(s: string): boolean {
  * Reads the peer's public key from the `pk` TXT property, falling back to the
  * instance label. Returns `null` when neither yields a node id.
  *
- * Addresses are sanitised for the dialer (#346): the complete dialable
- * `address` TXT candidate (which carries its authoritative port) is surfaced
- * first, then any well-formed `ip:port` socket addresses from the resolved set. Bare,
- * port-less hosts (an iOS A-record resolves to a portless IP) and `:0`
- * addresses are dropped so they can never fail `parse_direct_addrs` and poison
- * the whole list.
+ * Addresses are sanitised for the dialer (#346): dialable `address` TXT
+ * candidates carry the authoritative QUIC endpoints. When present, they
+ * replace resolved SRV socket addresses, whose port can belong only to the
+ * DNS-SD carrier (the test service intentionally advertises port `1`). Without
+ * an authoritative TXT address, well-formed resolved `ip:port` addresses are
+ * used. Bare, port-less hosts and `:0` addresses are dropped so they can never
+ * fail `parse_direct_addrs` and poison the whole list.
  *
  * Relay URLs are preserved (the `relay` TXT entry and any relay-scheme entry in
  * `addrs`) so an off-LAN / NAT'd peer stays reachable via its home relay —
@@ -264,8 +265,11 @@ export function asIrohPeer(record: ServiceRecord): DiscoveredPeer | null {
   for (const a of (record.txt[TXT_KEY_ADDRESS] ?? "").split(",")) {
     push(a.trim());
   }
+  const hasAuthoritativeDirectAddr = addrs.some(isDialableSocketAddr);
   push(record.txt[TXT_KEY_RELAY]);
-  for (const a of record.addrs) push(a);
+  for (const a of record.addrs) {
+    if (!hasAuthoritativeDirectAddr || isRelayUrl(a)) push(a);
+  }
 
   return { nodeId, addrs, isActive: record.isActive };
 }
