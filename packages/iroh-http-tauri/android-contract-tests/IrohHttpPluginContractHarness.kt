@@ -51,6 +51,7 @@ private class FakeNsdManager(
     private val activeRegistrationListeners = mutableSetOf<RegistrationListener>()
     private val pendingUnregistrationListeners = mutableSetOf<RegistrationListener>()
     var failNextUnregister: Boolean = false
+    var unregisterDispatchFailuresRemaining: Int = 0
     var unregisterEntered: CountDownLatch? = null
     var unregisterRelease: CountDownLatch? = null
 
@@ -89,6 +90,10 @@ private class FakeNsdManager(
     override fun unregisterService(listener: RegistrationListener) {
         check(activeRegistrationListeners.contains(listener)) {
             "registration listener is not active"
+        }
+        if (unregisterDispatchFailuresRemaining > 0) {
+            unregisterDispatchFailuresRemaining -= 1
+            throw IllegalStateException("injected unregister dispatch failure")
         }
         if (failNextUnregister) {
             failNextUnregister = false
@@ -649,6 +654,16 @@ private fun peerAdvertiseArgs() = AdvertiseStartArgs().apply {
 
 private fun advertiseStopArgs(id: Long) = AdvertiseStopArgs().apply { advertiseId = id }
 
+private fun genericAdvertiseUpdateArgs(
+    id: Long,
+    port: Int = 9090,
+    txt: Map<String, String> = mapOf("k" to "updated")
+) = DnsSdAdvertiseUpdateArgs().apply {
+    advertiseId = id
+    this.port = port
+    this.txt = txt
+}
+
 private fun testAddressTxtByteBoundary() {
     // The TXT wire entry is `address=<value>`: seven key bytes plus `=` leave
     // exactly 247 UTF-8 bytes for the value.
@@ -763,6 +778,30 @@ private fun testAdvertisementAckUpdateAndRaces() {
     failedCall.listener.onServiceRegistered(failedCall.info)
     checkEquals(1, failed.completionCount, "registration failure completes start exactly once")
 
+    // Exhausting the bounded native retry rejects this caller but must retain
+    // the owner. A later stop can retry the same active listener and observes
+    // the terminal callback before reporting success.
+    val (retainedPlugin, retainedManager) = newPlugin()
+    val (retainedId, retainedRegistration) =
+        startPeerAdvertisement(retainedPlugin, retainedManager)
+    retainedManager.unregisterDispatchFailuresRemaining = 2
+    val failedDispatchStop = Invoke(advertiseStopArgs(retainedId))
+    retainedPlugin.advertise_peer_stop(failedDispatchStop)
+    checkEquals(1, failedDispatchStop.rejections.size, "peer stop surfaces exhausted dispatch retry")
+    checkThat(
+        retainedManager.isRegistrationListenerActive(retainedRegistration.listener),
+        "failed peer stop retains ownership of the active registration"
+    )
+    val retainedRetryStop = Invoke(advertiseStopArgs(retainedId))
+    retainedPlugin.advertise_peer_stop(retainedRetryStop)
+    checkEquals(0, retainedRetryStop.completionCount, "retrying peer stop waits for cleanup")
+    checkThat(
+        retainedManager.isUnregistrationPending(retainedRegistration.listener),
+        "retrying peer stop dispatches cleanup for the retained owner"
+    )
+    retainedManager.serviceUnregistered(retainedRegistration)
+    checkEquals(1, retainedRetryStop.resolutions.size, "retained peer owner closes after callback")
+
     val (id, initial) = startPeerAdvertisement(plugin, manager)
     val updateArgs = AdvertiseUpdateArgs().apply {
         advertiseId = id
@@ -798,10 +837,11 @@ private fun testAdvertisementAckUpdateAndRaces() {
     val stop = Invoke(advertiseStopArgs(id))
     plugin.advertise_peer_stop(stop)
     checkEquals(1, racingUpdate.rejections.size, "stop rejects in-flight update exactly once")
-    checkEquals(1, stop.completionCount, "stop resolves")
+    checkEquals(0, stop.completionCount, "stop waits for the in-flight unregister callback")
 
     val cleanupCallsBeforeFailure = manager.unregisteredListeners.size
     manager.unregistrationFailed(replacement, 17)
+    checkEquals(1, stop.rejections.size, "stop surfaces terminal unregistration failure")
     checkEquals(
         cleanupCallsBeforeFailure,
         manager.unregisteredListeners.size,
@@ -906,15 +946,115 @@ private fun testGenericAdvertiseContract() {
     val registration = manager.registrationCalls.single()
     registration.listener.onServiceRegistered(registration.info)
     val id = accepted.resolutions.single()!!["advertiseId"] as Long
+
+    val rejectedUpdate = Invoke(genericAdvertiseUpdateArgs(id).apply {
+        addrs = listOf("192.168.1.6")
+    })
+    plugin.advertise_update(rejectedUpdate)
+    checkEquals(1, rejectedUpdate.rejections.size, "generic update rejects explicit addrs")
+    checkEquals(0, manager.unregisteredListeners.size, "rejected generic update stays registered")
+
+    val update = Invoke(genericAdvertiseUpdateArgs(id))
+    plugin.advertise_update(update)
+    checkEquals(0, update.completionCount, "generic update waits for unregister callback")
+    checkThat(
+        manager.unregisteredListeners.last() === registration.listener,
+        "generic update unregisters the current listener"
+    )
+    manager.serviceUnregistered(registration)
+    val replacement = manager.registrationCalls.last()
+    checkEquals("instance", replacement.info.serviceName, "generic update preserves instance")
+    checkEquals("_demo._udp", replacement.info.serviceType, "generic update preserves service type")
+    checkEquals(9090, replacement.info.port, "generic update changes port")
+    checkEquals(
+        "updated",
+        replacement.info.attributes["k"]?.let { String(it, StandardCharsets.UTF_8) },
+        "generic update changes TXT"
+    )
+    checkEquals(0, update.completionCount, "generic update waits for replacement readiness")
+    replacement.listener.onServiceRegistered(replacement.info)
+    checkEquals(1, update.resolutions.size, "generic replacement readiness resolves update")
+
     val stop = Invoke(advertiseStopArgs(id))
+    val duplicateStop = Invoke(advertiseStopArgs(id))
     plugin.advertise_stop(stop)
-    plugin.advertise_stop(Invoke(advertiseStopArgs(id)))
-    checkEquals(1, stop.completionCount, "generic stop resolves")
+    plugin.advertise_stop(duplicateStop)
+    checkEquals(0, stop.completionCount, "generic stop waits for native unregistration")
+    checkEquals(0, duplicateStop.completionCount, "duplicate stop shares the cleanup barrier")
+    manager.serviceUnregistered(replacement)
+    checkEquals(1, stop.resolutions.size, "generic stop resolves after terminal callback")
+    checkEquals(1, duplicateStop.resolutions.size, "duplicate stop resolves after cleanup")
+
+    // A synchronous unregister exception means Android did not accept the
+    // cleanup request. The plugin keeps ownership, retries once internally,
+    // and still waits for the terminal callback before resolving stop.
+    val retryStart = Invoke(acceptedArgs)
+    plugin.advertise_start(retryStart)
+    val retryRegistration = manager.registrationCalls.last()
+    retryRegistration.listener.onServiceRegistered(retryRegistration.info)
+    val retryId = retryStart.resolutions.single()!!["advertiseId"] as Long
+    manager.failNextUnregister = true
+    val retryStop = Invoke(advertiseStopArgs(retryId))
+    plugin.advertise_stop(retryStop)
+    checkEquals(0, retryStop.completionCount, "generic stop survives unregister dispatch failure")
+    checkThat(
+        manager.isUnregistrationPending(retryRegistration.listener),
+        "generic stop retries an unaccepted unregister while retaining ownership"
+    )
+    manager.serviceUnregistered(retryRegistration)
+    checkEquals(1, retryStop.resolutions.size, "retried generic stop awaits terminal cleanup")
+
+    // Stop wins a race with an update that is already unregistering. The
+    // outer handle remains closed, no replacement is launched, and cleanup is
+    // not reported before Android's terminal callback.
+    val racingStart = Invoke(acceptedArgs)
+    plugin.advertise_start(racingStart)
+    val racingInitial = manager.registrationCalls.last()
+    racingInitial.listener.onServiceRegistered(racingInitial.info)
+    val racingId = racingStart.resolutions.single()!!["advertiseId"] as Long
+    val racingUpdate = Invoke(genericAdvertiseUpdateArgs(racingId, port = 9191))
+    plugin.advertise_update(racingUpdate)
+    val registrationsBeforeStop = manager.registrationCalls.size
+    val racingStop = Invoke(advertiseStopArgs(racingId))
+    plugin.advertise_stop(racingStop)
+    checkEquals(1, racingUpdate.rejections.size, "generic stop rejects in-flight update once")
+    checkEquals(0, racingStop.completionCount, "generic racing stop awaits terminal callback")
+    manager.serviceUnregistered(racingInitial)
+    checkEquals(registrationsBeforeStop, manager.registrationCalls.size, "generic stop prevents replacement")
+    checkEquals(1, racingStop.resolutions.size, "generic racing stop resolves after cleanup")
+
+    // A terminal unregistration failure is surfaced to every close waiter and
+    // never retries the invalid listener under either AOSP callback ordering.
+    val failureStart = Invoke(acceptedArgs)
+    plugin.advertise_start(failureStart)
+    val failureRegistration = manager.registrationCalls.last()
+    failureRegistration.listener.onServiceRegistered(failureRegistration.info)
+    val failureId = failureStart.resolutions.single()!!["advertiseId"] as Long
+    val failedStop = Invoke(advertiseStopArgs(failureId))
+    plugin.advertise_stop(failedStop)
+    checkEquals(0, failedStop.completionCount, "failed generic stop waits for callback")
+    manager.unregistrationFailed(failureRegistration, 44)
+    checkEquals(1, failedStop.rejections.size, "generic stop surfaces cleanup failure")
+
+    val updateFailureStart = Invoke(acceptedArgs)
+    plugin.advertise_start(updateFailureStart)
+    val updateFailureInitial = manager.registrationCalls.last()
+    updateFailureInitial.listener.onServiceRegistered(updateFailureInitial.info)
+    val updateFailureId = updateFailureStart.resolutions.single()!!["advertiseId"] as Long
+    val failedUpdate = Invoke(genericAdvertiseUpdateArgs(updateFailureId, port = 9292))
+    plugin.advertise_update(failedUpdate)
+    manager.serviceUnregistered(updateFailureInitial)
+    val failedReplacement = manager.registrationCalls.last()
+    manager.registrationFailed(failedReplacement, 45)
+    checkEquals(1, failedUpdate.rejections.size, "generic replacement failure rejects update")
+    val terminalStop = Invoke(advertiseStopArgs(updateFailureId))
+    plugin.advertise_stop(terminalStop)
+    checkEquals(1, terminalStop.resolutions.size, "terminal generic update still closes cleanly")
 }
 
 private fun testThreadedUpdateStopRace() {
     val (plugin, manager) = newPlugin()
-    val (id, _) = startPeerAdvertisement(plugin, manager)
+    val (id, initial) = startPeerAdvertisement(plugin, manager)
     val unregisterEntered = CountDownLatch(1)
     val unregisterRelease = CountDownLatch(1)
     manager.unregisterEntered = unregisterEntered
@@ -960,6 +1100,8 @@ private fun testThreadedUpdateStopRace() {
     failure.get()?.let { throw AssertionError("threaded update/stop race failed", it) }
     checkEquals(1, update.rejections.size, "stop rejects the racing update exactly once")
     checkEquals(0, update.resolutions.size, "racing update never resolves")
+    checkEquals(0, stop.completionCount, "racing stop waits for native cleanup")
+    manager.serviceUnregistered(initial)
     checkEquals(1, stop.completionCount, "racing stop resolves exactly once")
 }
 
@@ -1014,20 +1156,25 @@ private fun testAospListenerLifecycleAcrossApiEras() {
     val pendingReplacement = retryManager.registrationCalls.last()
     val successfulUnregistersBeforeStop = retryManager.unregisteredListeners.size
     retryManager.failNextUnregister = true
-    retryPlugin.advertise_peer_stop(Invoke(advertiseStopArgs(retryId)))
+    val retryStop = Invoke(advertiseStopArgs(retryId))
+    retryPlugin.advertise_peer_stop(retryStop)
     checkEquals(
         successfulUnregistersBeforeStop,
         retryManager.unregisteredListeners.size,
         "failed dispatch is not reported as an issued unregister"
     )
+    checkEquals(0, retryStop.completionCount, "late-registration stop retains its cleanup waiter")
+    retryManager.failNextUnregister = true
     pendingReplacement.listener.onServiceRegistered(pendingReplacement.info)
     checkEquals(
         successfulUnregistersBeforeStop + 1,
         retryManager.unregisteredListeners.size,
-        "late registration retries cleanup after the failed dispatch"
+        "late registration retries cleanup after both dispatch failures"
     )
+    checkEquals(0, retryStop.completionCount, "late-registration retry awaits terminal cleanup")
     retryManager.serviceUnregistered(pendingReplacement)
     checkEquals(1, retryUpdate.rejections.size, "stop rejects the pending update once")
+    checkEquals(1, retryStop.resolutions.size, "late-registration stop resolves after cleanup")
 
     // Conversely, a registration-failure callback is terminal in both AOSP
     // orderings. Stop must not pass its already-retired listener back to NSD.

@@ -14,6 +14,7 @@ private struct DiscoveryLifecycleContract {
         try browseStopRetiresCallbacks()
         try advertisementAcknowledgementsAndRaces()
         try advertisementUpdateFinishesBeforeStop()
+        try genericAdvertisementUpdatePreservesIdentity()
         print("iOS generic DNS-SD lifecycle contract passed")
     }
 
@@ -196,6 +197,41 @@ private struct DiscoveryLifecycleContract {
         try lifecycleRequire(
             advertisement.state == .closed,
             "late update/stop callback revived the advertisement"
+        )
+    }
+
+    private static func genericAdvertisementUpdatePreservesIdentity() throws {
+        try lifecycleRequire(
+            DiscoveryAdvertisementUpdatePolicy.rejection(
+                publishedPort: 8080,
+                proposedPort: 8080,
+                hasExplicitAddrs: false
+            ) == nil,
+            "TXT-only update on the published port was rejected"
+        )
+        try lifecycleRequire(
+            DiscoveryAdvertisementUpdatePolicy.rejection(
+                publishedPort: 8080,
+                proposedPort: 0,
+                hasExplicitAddrs: false
+            ) != nil,
+            "port-zero update was accepted"
+        )
+        try lifecycleRequire(
+            DiscoveryAdvertisementUpdatePolicy.rejection(
+                publishedPort: 8080,
+                proposedPort: 8080,
+                hasExplicitAddrs: true
+            ) != nil,
+            "explicit-address update was accepted"
+        )
+        try lifecycleRequire(
+            DiscoveryAdvertisementUpdatePolicy.rejection(
+                publishedPort: 8080,
+                proposedPort: 9090,
+                hasExplicitAddrs: false
+            ) != nil,
+            "immutable NetService port change was accepted"
         )
     }
 }

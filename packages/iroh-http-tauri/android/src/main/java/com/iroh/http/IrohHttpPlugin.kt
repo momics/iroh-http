@@ -77,6 +77,14 @@ class DnsSdAdvertiseStartArgs {
 }
 
 @InvokeArg
+class DnsSdAdvertiseUpdateArgs {
+    var advertiseId: Long = 0
+    var port: Int = 0
+    var addrs: List<String> = emptyList()
+    var txt: Map<String, String> = emptyMap()
+}
+
+@InvokeArg
 class DnsSdBrowseStartArgs {
     lateinit var serviceName: String
     var protocol: String = "udp"
@@ -87,6 +95,7 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
 
     private companion object {
         const val MAX_ADDRESS_TXT_VALUE_BYTES = 247
+        const val MAX_UNREGISTER_DISPATCH_ATTEMPTS = 2
     }
 
     private val nextBrowseId = AtomicLong(1)
@@ -163,13 +172,17 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
         var terminalError: String? = null,
         var generation: Long = 1,
         var pendingUpdate: AdvertisementUpdate? = null,
+        val pendingStops: MutableList<InvokeOnce> = mutableListOf(),
         // One unregister request is allowed per generation. AOSP keeps the
         // listener mapped while unregisterService() dispatches, then retires
         // it at the terminal callback boundary (after the callback on API 21,
         // before it on current Android). Registration failure retires it at
         // the analogous callback boundary too. Either way, a terminally
         // retired listener must never be retried or reused.
-        val retiredRegistrationGenerations: MutableSet<Long> = mutableSetOf()
+        val retiredRegistrationGenerations: MutableSet<Long> = mutableSetOf(),
+        // Unregister was accepted, but Android has not delivered its terminal
+        // callback yet. This is the native cleanup acknowledgement barrier.
+        val unregisteringGenerations: MutableSet<Long> = mutableSetOf()
     ) {
         lateinit var listener: NsdManager.RegistrationListener
         lateinit var info: NsdServiceInfo
@@ -958,7 +971,48 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
         if (generation in session.retiredRegistrationGenerations) return false
         session.manager.unregisterService(listener)
         session.retiredRegistrationGenerations.add(generation)
+        session.unregisteringGenerations.add(generation)
         return true
+    }
+
+    /**
+     * Retry a synchronous dispatch rejection once without surrendering native
+     * ownership. A thrown call was not accepted by NsdManager, so the listener
+     * remains eligible for another attempt.
+     */
+    private fun unregisterRegistrationWithRetry(
+        session: AdvertiseSession,
+        generation: Long,
+        listener: NsdManager.RegistrationListener
+    ): Throwable? {
+        var lastError: Throwable? = null
+        repeat(MAX_UNREGISTER_DISPATCH_ATTEMPTS) {
+            try {
+                unregisterRegistrationOnce(session, generation, listener)
+                return null
+            } catch (error: Throwable) {
+                lastError = error
+            }
+        }
+        return lastError
+    }
+
+    /** Complete every waiter only after the native registration is terminal. */
+    private fun finishAdvertisementStop(session: AdvertiseSession, error: String? = null) {
+        if (advertiseMap[session.id] === session) advertiseMap.remove(session.id)
+        val waiters = session.pendingStops.toList()
+        session.pendingStops.clear()
+        for (waiter in waiters) {
+            if (error == null) waiter.resolve() else waiter.reject(error)
+        }
+    }
+
+    /** Fail current waiters while retaining the native owner for a later retry. */
+    private fun failAdvertisementStopRetainingOwner(session: AdvertiseSession, error: String) {
+        session.terminalError = error
+        val waiters = session.pendingStops.toList()
+        session.pendingStops.clear()
+        for (waiter in waiters) waiter.reject(error)
     }
 
     private fun registrationListener(
@@ -967,16 +1021,18 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
     ): NsdManager.RegistrationListener = object : NsdManager.RegistrationListener {
         override fun onServiceRegistered(serviceInfo: NsdServiceInfo) {
             synchronized(session) {
-                if (
-                    advertiseMap[session.id] !== session ||
-                    session.state == NativeSessionState.CLOSED
-                ) {
+                if (advertiseMap[session.id] !== session) return
+                if (session.state == NativeSessionState.CLOSED) {
                     // A stop can win while Android is still completing an
                     // asynchronous register. Tear down that late registration
                     // instead of leaking a native service with no owner.
-                    try {
-                        unregisterRegistrationOnce(session, generation, this)
-                    } catch (_: Throwable) {}
+                    val error = unregisterRegistrationWithRetry(session, generation, this)
+                    if (error != null) {
+                        failAdvertisementStopRetainingOwner(
+                            session,
+                            "DNS-SD advertisement stop failed: ${error.message}"
+                        )
+                    }
                     return
                 }
                 if (session.generation != generation || session.listener !== this) return
@@ -1006,11 +1062,18 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
                 // current Android removes it before dispatching the callback.
                 // It is terminal on both and must not be passed to unregister.
                 session.retiredRegistrationGenerations.add(generation)
+                session.unregisteringGenerations.remove(generation)
                 if (
                     advertiseMap[session.id] !== session ||
                     session.generation != generation ||
                     session.listener !== this
                 ) return
+                if (session.state == NativeSessionState.CLOSED) {
+                    session.pendingUpdate?.invoke?.reject("DNS-SD advertisement is closed")
+                    session.pendingUpdate = null
+                    finishAdvertisementStop(session)
+                    return
+                }
                 val message = "DNS-SD registration failed: error $errorCode"
                 session.terminalError = message
                 val update = session.pendingUpdate
@@ -1020,7 +1083,7 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
                 ) {
                     session.pendingUpdate = null
                     session.state = NativeSessionState.FAILED
-                    update.invoke.reject("Peer advertisement update failed: error $errorCode")
+                    update.invoke.reject("DNS-SD advertisement update failed: error $errorCode")
                 } else if (session.state == NativeSessionState.STARTING) {
                     session.state = NativeSessionState.FAILED
                     advertiseMap.remove(session.id)
@@ -1035,11 +1098,16 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
         override fun onServiceUnregistered(serviceInfo: NsdServiceInfo) {
             synchronized(session) {
                 session.retiredRegistrationGenerations.add(generation)
+                session.unregisteringGenerations.remove(generation)
                 if (
                     advertiseMap[session.id] !== session ||
                     session.generation != generation ||
                     session.listener !== this
                 ) return
+                if (session.state == NativeSessionState.CLOSED) {
+                    finishAdvertisementStop(session)
+                    return
+                }
                 val update = session.pendingUpdate
                 if (
                     update != null &&
@@ -1070,7 +1138,7 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
                                 session.listener
                             )
                         } catch (_: Throwable) {}
-                        update.invoke.reject("Peer advertisement update failed: ${e.message}")
+                        update.invoke.reject("DNS-SD advertisement update failed: ${e.message}")
                     }
                 } else {
                     val message = "DNS-SD registration stopped unexpectedly"
@@ -1089,19 +1157,21 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
         override fun onUnregistrationFailed(serviceInfo: NsdServiceInfo, errorCode: Int) {
             synchronized(session) {
                 session.retiredRegistrationGenerations.add(generation)
+                session.unregisteringGenerations.remove(generation)
                 if (
                     advertiseMap[session.id] !== session ||
-                    session.state == NativeSessionState.CLOSED
-                ) {
-                    // AOSP has retired this listener mapping at the callback
-                    // boundary. Retrying it would throw and can never clean
-                    // up the native service.
-                    return
-                }
-                if (
                     session.generation != generation ||
                     session.listener !== this
                 ) return
+                if (session.state == NativeSessionState.CLOSED) {
+                    // AOSP has retired this listener mapping at the callback
+                    // boundary. Retrying it would throw and can never clean
+                    // up the native service.
+                    val message = "DNS-SD advertisement stop failed: error $errorCode"
+                    session.terminalError = message
+                    finishAdvertisementStop(session, message)
+                    return
+                }
                 val update = session.pendingUpdate
                 if (
                     update != null &&
@@ -1112,7 +1182,7 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
                     session.terminalError =
                         "DNS-SD unregistration failed: error $errorCode"
                     update.invoke.reject(
-                        "Peer advertisement update could not unregister old record: error $errorCode"
+                        "DNS-SD advertisement update could not unregister old record: error $errorCode"
                     )
                 } else {
                     session.state = NativeSessionState.FAILED
@@ -1177,27 +1247,32 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
     @Command
     fun advertise_peer_update(invoke: Invoke) {
         val args = invoke.parseArgs(AdvertiseUpdateArgs::class.java)
-        val completion = InvokeOnce(invoke)
         val session = advertiseMap[args.advertiseId]
-            ?: return completion.reject("Peer advertisement is closed")
+            ?: return invoke.reject("DNS-SD advertisement is closed")
         val peer = session.kind as? AdvertisementKind.Peer
-            ?: return completion.reject("Advertisement is not an iroh peer advertisement")
+            ?: return invoke.reject("Advertisement is not an iroh peer advertisement")
         val info = try {
             peerServiceInfo(peer.serviceName, peer.pk, args.relay, args.addresses)
         } catch (e: Throwable) {
-            return completion.reject("Failed to encode peer DNS-SD record: ${e.message}")
+            return invoke.reject("Failed to encode peer DNS-SD record: ${e.message}")
         }
+        updateAdvertisement(args.advertiseId, info, invoke)
+    }
 
+    private fun updateAdvertisement(advertiseId: Long, info: NsdServiceInfo, invoke: Invoke) {
+        val completion = InvokeOnce(invoke)
+        val session = advertiseMap[advertiseId]
+            ?: return completion.reject("DNS-SD advertisement is closed")
         synchronized(session) {
-            if (advertiseMap[args.advertiseId] !== session) {
-                return completion.reject("Peer advertisement is closed")
+            if (advertiseMap[advertiseId] !== session) {
+                return completion.reject("DNS-SD advertisement is closed")
             }
             if (session.state != NativeSessionState.ACTIVE) {
                 val reason = session.terminalError ?: "advertisement is not active"
-                return completion.reject("Peer advertisement update failed: $reason")
+                return completion.reject("DNS-SD advertisement update failed: $reason")
             }
             if (session.pendingUpdate != null) {
-                return completion.reject("Peer advertisement update already in progress")
+                return completion.reject("DNS-SD advertisement update already in progress")
             }
             val update = AdvertisementUpdate(info, completion)
             session.pendingUpdate = update
@@ -1213,39 +1288,74 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
                 if (session.pendingUpdate === update) session.pendingUpdate = null
                 session.state = NativeSessionState.FAILED
                 session.terminalError = "DNS-SD unregistration failed: ${e.message}"
-                completion.reject("Peer advertisement update failed: ${e.message}")
+                completion.reject("DNS-SD advertisement update failed: ${e.message}")
             }
         }
     }
 
     private fun stopAdvertisement(advertiseId: Long, invoke: Invoke) {
-        val session = advertiseMap[advertiseId]
-        if (session != null) {
-            synchronized(session) {
-                if (advertiseMap[advertiseId] === session) {
-                    advertiseMap.remove(advertiseId)
-                    val wasStarting = session.state == NativeSessionState.STARTING
+        val completion = InvokeOnce(invoke)
+        val session = advertiseMap[advertiseId] ?: return completion.resolve()
+        synchronized(session) {
+            if (advertiseMap[advertiseId] !== session) return completion.resolve()
+            session.pendingStops.add(completion)
+            val wasStarting = session.state == NativeSessionState.STARTING
+            val update = if (session.state == NativeSessionState.CLOSED) {
+                null
+            } else {
+                session.pendingUpdate.also {
                     session.state = NativeSessionState.CLOSED
                     if (wasStarting) {
-                        session.startInvoke.reject("DNS-SD advertisement stopped before becoming ready")
+                        session.startInvoke.reject(
+                            "DNS-SD advertisement stopped before becoming ready"
+                        )
                     }
-                    val update = session.pendingUpdate
                     session.pendingUpdate = null
-                    update?.invoke?.reject("Peer advertisement is closed")
-                    // An UNREGISTERING update has already issued this call.
-                    if (update?.phase != AdvertisementUpdatePhase.UNREGISTERING) {
-                        try {
-                            unregisterRegistrationOnce(
-                                session,
-                                session.generation,
-                                session.listener
-                            )
-                        } catch (_: Throwable) {}
-                    }
+                    it?.invoke?.reject("DNS-SD advertisement is closed")
+                }
+            }
+
+            // An UNREGISTERING update already dispatched the terminal call.
+            if (update?.phase == AdvertisementUpdatePhase.UNREGISTERING) return
+            if (session.generation in session.unregisteringGenerations) return
+            // A terminal listener has no native registration left to stop.
+            if (session.generation in session.retiredRegistrationGenerations) {
+                finishAdvertisementStop(session)
+                return
+            }
+
+            val registrationStillPending =
+                wasStarting || update?.phase == AdvertisementUpdatePhase.REGISTERING
+            val error = if (registrationStillPending) {
+                try {
+                    unregisterRegistrationOnce(
+                        session,
+                        session.generation,
+                        session.listener
+                    )
+                    null
+                } catch (error: Throwable) {
+                    error
+                }
+            } else {
+                unregisterRegistrationWithRetry(
+                    session,
+                    session.generation,
+                    session.listener
+                )
+            }
+            if (error != null) {
+                // A start or replacement registration still owes a readiness
+                // callback. Keep the stop pending so a late acknowledgement can
+                // retry cleanup with the now-confirmed native registration.
+                if (!registrationStillPending) {
+                    failAdvertisementStopRetainingOwner(
+                        session,
+                        "DNS-SD advertisement stop failed: ${error.message}"
+                    )
                 }
             }
         }
-        invoke.resolve()
     }
 
     @Command
@@ -1537,6 +1647,38 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
             return invoke.reject("Failed to encode DNS-SD record: ${e.message}")
         }
         startAdvertisement(manager, advertiseId, AdvertisementKind.Generic, info, invoke)
+    }
+
+    @Command
+    fun advertise_update(invoke: Invoke) {
+        val args = invoke.parseArgs(DnsSdAdvertiseUpdateArgs::class.java)
+        if (args.addrs.isNotEmpty()) {
+            return invoke.reject(
+                "Android generic DNS-SD advertising does not support explicit addrs"
+            )
+        }
+        if (args.port !in 1..65535) {
+            return invoke.reject("DNS-SD port must be between 1 and 65535")
+        }
+        val session = advertiseMap[args.advertiseId]
+            ?: return invoke.reject("DNS-SD advertisement is closed")
+        if (session.kind !is AdvertisementKind.Generic) {
+            return invoke.reject("Advertisement is not a generic DNS-SD advertisement")
+        }
+        val identity = synchronized(session) {
+            Pair(session.info.serviceName, session.info.serviceType)
+        }
+        val info = try {
+            NsdServiceInfo().apply {
+                serviceName = identity.first
+                serviceType = identity.second
+                setPort(args.port)
+                args.txt.forEach { (key, value) -> setAttribute(key, value) }
+            }
+        } catch (error: Throwable) {
+            return invoke.reject("Failed to encode DNS-SD record: ${error.message}")
+        }
+        updateAdvertisement(args.advertiseId, info, invoke)
     }
 
     @Command

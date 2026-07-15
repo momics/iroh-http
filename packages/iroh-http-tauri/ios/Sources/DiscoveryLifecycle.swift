@@ -217,6 +217,31 @@ enum DiscoveryAdvertisementStopDisposition: Equatable {
     case alreadyStopped
 }
 
+/// iOS `NetService` can change TXT on a live registration, but its published
+/// port and automatically selected interface addresses are immutable. Keeping
+/// this validation beside the lifecycle reducer makes an update either a pure
+/// TXT mutation or an explicit rejection that preserves service identity.
+enum DiscoveryAdvertisementUpdatePolicy {
+    static func rejection(
+        publishedPort: UInt16,
+        proposedPort: UInt16,
+        hasExplicitAddrs: Bool
+    ) -> String? {
+        if hasExplicitAddrs {
+            return "iOS DNS-SD advertisement cannot publish explicit addrs; "
+                + "omit addrs to advertise the device's current interface addresses"
+        }
+        if proposedPort == 0 {
+            return "Cannot update a generic DNS-SD service to port 0"
+        }
+        if proposedPort != publishedPort {
+            return "iOS DNS-SD advertisement port cannot change from \(publishedPort) "
+                + "to \(proposedPort); close and restart the advertisement"
+        }
+        return nil
+    }
+}
+
 /// Deterministic readiness/terminal reducer for one native advertisement.
 final class DiscoveryAdvertisementLifecycle {
     let id: UInt64

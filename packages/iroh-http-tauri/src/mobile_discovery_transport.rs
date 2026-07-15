@@ -9,7 +9,8 @@ use serde::Deserialize;
 use tokio::sync::{mpsc, oneshot, Notify};
 
 use iroh_http_discovery::engine::{
-    BoxFuture, BrowseHandle, RawEvent, ServiceRecord, TransportError,
+    AdvertisementHandle, AdvertisementUpdate, BoxFuture, BrowseHandle, RawEvent, ServiceRecord,
+    TransportError,
 };
 
 pub(crate) type NativeFuture<T> = Pin<Box<dyn Future<Output = T> + Send + 'static>>;
@@ -104,6 +105,15 @@ pub(crate) trait NativeBrowseApi: Clone + Send + Sync + 'static {
     fn stop(&self, browse_id: u64) -> NativeFuture<Result<(), String>>;
 }
 
+pub(crate) trait NativeAdvertisementApi: Clone + Send + Sync + 'static {
+    fn update(
+        &self,
+        advertise_id: u64,
+        update: AdvertisementUpdate,
+    ) -> NativeFuture<Result<(), String>>;
+    fn stop(&self, advertise_id: u64) -> NativeFuture<Result<(), String>>;
+}
+
 enum BrowseCommand {
     Next(oneshot::Sender<Result<Option<RawEvent>, TransportError>>),
     Close,
@@ -157,6 +167,84 @@ impl CloseOutcome {
 pub(crate) struct NativeBrowseHandle {
     commands: Mutex<BrowseCommands>,
     closed: Arc<CloseOutcome>,
+}
+
+enum AdvertisementCommand {
+    Update(
+        AdvertisementUpdate,
+        oneshot::Sender<Result<(), TransportError>>,
+    ),
+    Close,
+}
+
+struct AdvertisementCommands {
+    closing: bool,
+    sender: mpsc::UnboundedSender<AdvertisementCommand>,
+}
+
+pub(crate) struct NativeAdvertisementHandle {
+    commands: Mutex<AdvertisementCommands>,
+    closed: Arc<CloseOutcome>,
+}
+
+impl NativeAdvertisementHandle {
+    pub(crate) fn new(api: impl NativeAdvertisementApi, advertise_id: u64) -> Self {
+        let (sender, receiver) = mpsc::unbounded_channel();
+        let closed = Arc::new(CloseOutcome::new());
+        tokio::spawn(run_advertisement_actor(
+            api,
+            advertise_id,
+            receiver,
+            Arc::clone(&closed),
+        ));
+        Self {
+            commands: Mutex::new(AdvertisementCommands {
+                closing: false,
+                sender,
+            }),
+            closed,
+        }
+    }
+}
+
+impl AdvertisementHandle for NativeAdvertisementHandle {
+    fn update(&self, update: AdvertisementUpdate) -> BoxFuture<'_, Result<(), TransportError>> {
+        let (reply, response) = oneshot::channel();
+        let commands = self
+            .commands
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if commands.closing
+            || commands
+                .sender
+                .send(AdvertisementCommand::Update(update, reply))
+                .is_err()
+        {
+            return Box::pin(async { Err(TransportError::new("advertisement is closed")) });
+        }
+        Box::pin(async move {
+            response
+                .await
+                .unwrap_or_else(|_| Err(TransportError::new("advertisement is closed")))
+        })
+    }
+
+    fn request_close(&self) {
+        let mut commands = self
+            .commands
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !commands.closing {
+            commands.closing = true;
+            if commands.sender.send(AdvertisementCommand::Close).is_err() {
+                self.closed.complete(Ok(()));
+            }
+        }
+    }
+
+    fn closed(&self) -> BoxFuture<'_, Result<(), TransportError>> {
+        Box::pin(self.closed.wait())
+    }
 }
 
 impl NativeBrowseHandle {
@@ -299,13 +387,51 @@ async fn run_browse_actor(
     close_native_browse(&api, browse_id, &closed).await;
 }
 
+async fn run_advertisement_actor(
+    api: impl NativeAdvertisementApi,
+    advertise_id: u64,
+    mut commands: mpsc::UnboundedReceiver<AdvertisementCommand>,
+    closed: Arc<CloseOutcome>,
+) {
+    while let Some(command) = commands.recv().await {
+        match command {
+            AdvertisementCommand::Update(update, reply) => {
+                match api.update(advertise_id, update).await {
+                    Ok(()) => {
+                        let _ = reply.send(Ok(()));
+                    }
+                    Err(error) => {
+                        let error = TransportError::new(error);
+                        close_native_advertisement(&api, advertise_id, &closed).await;
+                        let _ = reply.send(Err(error));
+                        return;
+                    }
+                }
+            }
+            AdvertisementCommand::Close => {
+                close_native_advertisement(&api, advertise_id, &closed).await;
+                return;
+            }
+        }
+    }
+    close_native_advertisement(&api, advertise_id, &closed).await;
+}
+
 async fn close_native_browse(api: &impl NativeBrowseApi, browse_id: u64, closed: &CloseOutcome) {
     closed.complete(api.stop(browse_id).await.map_err(TransportError::new));
 }
 
+async fn close_native_advertisement(
+    api: &impl NativeAdvertisementApi,
+    advertise_id: u64,
+    closed: &CloseOutcome,
+) {
+    closed.complete(api.stop(advertise_id).await.map_err(TransportError::new));
+}
+
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     use iroh_http_discovery::engine::RawEvent;
     use tokio::sync::{Notify, Semaphore};
@@ -612,5 +738,174 @@ mod tests {
         assert!(
             matches!(next.await.unwrap(), Err(error) if error.to_string() == "native poll failed")
         );
+    }
+
+    #[derive(Clone)]
+    struct FakeNativeAdvertisement {
+        updates: Arc<Mutex<Vec<AdvertisementUpdate>>>,
+        update_entered: Arc<Notify>,
+        update_release: Arc<Semaphore>,
+        block_update: Arc<AtomicBool>,
+        fail_update: Arc<AtomicBool>,
+        stop_entered: Arc<Notify>,
+        stop_release: Arc<Semaphore>,
+        block_stop: Arc<AtomicBool>,
+        fail_stop: Arc<AtomicBool>,
+        stops: Arc<AtomicUsize>,
+    }
+
+    impl FakeNativeAdvertisement {
+        fn new() -> Self {
+            Self {
+                updates: Arc::new(Mutex::new(Vec::new())),
+                update_entered: Arc::new(Notify::new()),
+                update_release: Arc::new(Semaphore::new(0)),
+                block_update: Arc::new(AtomicBool::new(false)),
+                fail_update: Arc::new(AtomicBool::new(false)),
+                stop_entered: Arc::new(Notify::new()),
+                stop_release: Arc::new(Semaphore::new(0)),
+                block_stop: Arc::new(AtomicBool::new(false)),
+                fail_stop: Arc::new(AtomicBool::new(false)),
+                stops: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+    }
+
+    impl NativeAdvertisementApi for FakeNativeAdvertisement {
+        fn update(
+            &self,
+            _advertise_id: u64,
+            update: AdvertisementUpdate,
+        ) -> NativeFuture<Result<(), String>> {
+            let updates = Arc::clone(&self.updates);
+            let entered = Arc::clone(&self.update_entered);
+            let release = Arc::clone(&self.update_release);
+            let block = Arc::clone(&self.block_update);
+            let fail = Arc::clone(&self.fail_update);
+            Box::pin(async move {
+                updates
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .push(update);
+                entered.notify_waiters();
+                if block.load(Ordering::Acquire) {
+                    release.acquire().await.unwrap().forget();
+                }
+                if fail.load(Ordering::Acquire) {
+                    Err("native update failed".to_string())
+                } else {
+                    Ok(())
+                }
+            })
+        }
+
+        fn stop(&self, _advertise_id: u64) -> NativeFuture<Result<(), String>> {
+            let stops = Arc::clone(&self.stops);
+            let entered = Arc::clone(&self.stop_entered);
+            let release = Arc::clone(&self.stop_release);
+            let block = Arc::clone(&self.block_stop);
+            let fail = Arc::clone(&self.fail_stop);
+            Box::pin(async move {
+                stops.fetch_add(1, Ordering::AcqRel);
+                entered.notify_waiters();
+                if block.load(Ordering::Acquire) {
+                    release.acquire().await.unwrap().forget();
+                }
+                if fail.load(Ordering::Acquire) {
+                    Err("native stop failed".to_string())
+                } else {
+                    Ok(())
+                }
+            })
+        }
+    }
+
+    fn advertisement_update(port: u16, revision: &str) -> AdvertisementUpdate {
+        AdvertisementUpdate {
+            port,
+            addrs: Vec::new(),
+            txt: vec![("revision".to_string(), revision.to_string())],
+        }
+    }
+
+    #[tokio::test]
+    async fn advertisement_close_waits_for_a_cancelled_native_update() {
+        let native = FakeNativeAdvertisement::new();
+        native.block_update.store(true, Ordering::Release);
+        let session = Arc::new(
+            iroh_http_discovery::engine::AdvertisementSession::with_initial(
+                NativeAdvertisementHandle::new(native.clone(), 20),
+                advertisement_update(8080, "one"),
+            ),
+        );
+        let update_entered = native.update_entered.notified();
+        let update = tokio::spawn({
+            let session = Arc::clone(&session);
+            async move { session.update(advertisement_update(8081, "two")).await }
+        });
+        update_entered.await;
+
+        update.abort();
+        assert!(matches!(update.await, Err(error) if error.is_cancelled()));
+        session.close();
+        assert_eq!(native.stops.load(Ordering::Acquire), 0);
+        native.update_release.add_permits(1);
+        session.wait_closed().await.unwrap();
+        assert_eq!(native.stops.load(Ordering::Acquire), 1);
+        assert_eq!(
+            native
+                .updates
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .as_slice(),
+            &[advertisement_update(8081, "two")]
+        );
+    }
+
+    #[tokio::test]
+    async fn advertisement_update_error_waits_for_native_cleanup() {
+        let native = FakeNativeAdvertisement::new();
+        native.fail_update.store(true, Ordering::Release);
+        native.block_stop.store(true, Ordering::Release);
+        let session = Arc::new(iroh_http_discovery::engine::AdvertisementSession::new(
+            NativeAdvertisementHandle::new(native.clone(), 21),
+        ));
+        let stop_entered = native.stop_entered.notified();
+        let mut update = tokio::spawn({
+            let session = Arc::clone(&session);
+            async move { session.update(advertisement_update(8080, "bad")).await }
+        });
+        stop_entered.await;
+
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), &mut update)
+                .await
+                .is_err()
+        );
+        native.stop_release.add_permits(1);
+        assert!(
+            matches!(update.await.unwrap(), Err(error) if error.to_string() == "native update failed")
+        );
+        session.wait_closed().await.unwrap();
+        assert_eq!(native.stops.load(Ordering::Acquire), 1);
+    }
+
+    #[tokio::test]
+    async fn advertisement_keeps_primary_update_and_cached_cleanup_errors_distinct() {
+        let native = FakeNativeAdvertisement::new();
+        native.fail_update.store(true, Ordering::Release);
+        native.fail_stop.store(true, Ordering::Release);
+        let session = iroh_http_discovery::engine::AdvertisementSession::new(
+            NativeAdvertisementHandle::new(native, 22),
+        );
+
+        assert!(matches!(
+            session.update(advertisement_update(8080, "bad")).await,
+            Err(error) if error.to_string() == "native update failed"
+        ));
+        assert!(matches!(
+            session.wait_closed().await,
+            Err(error) if error.to_string() == "native stop failed"
+        ));
     }
 }

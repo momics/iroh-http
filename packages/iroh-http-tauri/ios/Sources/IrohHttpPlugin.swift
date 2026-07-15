@@ -47,6 +47,13 @@ struct DnsSdAdvertiseStartArgs: Decodable {
     let txt: [String: String]
 }
 
+struct DnsSdAdvertiseUpdateArgs: Decodable {
+    let advertiseId: UInt64
+    let port: UInt16
+    let addrs: [String]
+    let txt: [String: String]
+}
+
 struct DnsSdBrowseStartArgs: Decodable {
     let serviceName: String
     let `protocol`: String
@@ -145,6 +152,24 @@ private enum AdvertisementKind {
     case peer(pk: String)
     case generic
 
+    var updateDisplayName: String {
+        switch self {
+        case .peer:
+            return "Peer"
+        case .generic:
+            return "DNS-SD"
+        }
+    }
+
+    var txtRecordDescription: String {
+        switch self {
+        case .peer:
+            return "peer"
+        case .generic:
+            return "generic DNS-SD"
+        }
+    }
+
     func matches(_ expected: AdvertisementStopKind) -> Bool {
         switch (self, expected) {
         case (.peer, .peer), (.generic, .generic):
@@ -206,6 +231,7 @@ private final class AdvertiseSession {
     let service: NetService
     let registrationDelegate: NetServiceRegistrationDelegate
     let kind: AdvertisementKind
+    let port: UInt16
     let startInvoke: InvokeOnce
     let lifecycle: DiscoveryAdvertisementLifecycle
     var pendingStopCompletions: [InvokeOnce] = []
@@ -215,12 +241,14 @@ private final class AdvertiseSession {
         service: NetService,
         registrationDelegate: NetServiceRegistrationDelegate,
         kind: AdvertisementKind,
+        port: UInt16,
         startInvoke: InvokeOnce
     ) {
         self.id = id
         self.service = service
         self.registrationDelegate = registrationDelegate
         self.kind = kind
+        self.port = port
         self.startInvoke = startInvoke
         self.lifecycle = DiscoveryAdvertisementLifecycle(id: id, callbackGeneration: id)
     }
@@ -518,6 +546,7 @@ class IrohHttpPlugin: Plugin {
         invoke: Invoke,
         advertiseId: UInt64,
         kind: AdvertisementKind,
+        port: UInt16,
         txtData: Data,
         makeService: @escaping () -> NetService
     ) {
@@ -544,6 +573,7 @@ class IrohHttpPlugin: Plugin {
                 service: service,
                 registrationDelegate: registrationDelegate,
                 kind: kind,
+                port: port,
                 startInvoke: startInvoke
             )
             service.delegate = registrationDelegate
@@ -609,6 +639,72 @@ class IrohHttpPlugin: Plugin {
         teardownAdvertisementService(session) {
             for completion in completions {
                 completion.resolve()
+            }
+        }
+    }
+
+    /// Apply a TXT-only mutation to an existing native registration. Both
+    /// public advertisement adapters share this serialization point so a stop
+    /// cannot overtake the main-thread NetService update.
+    private func updateAdvertisementTxt(
+        _ session: AdvertiseSession,
+        advertiseId: UInt64,
+        encodingFailurePrefix: String,
+        makeTxtData: () throws -> Data,
+        completion: InvokeOnce
+    ) {
+        let displayName = session.kind.updateDisplayName
+        guard session.lifecycle.state == .active else {
+            if case .failed(let message) = session.lifecycle.state {
+                completion.reject("\(displayName) advertisement failed: \(message)")
+            } else {
+                completion.reject("\(displayName) advertisement is not active")
+            }
+            return
+        }
+
+        let txtData: Data
+        do {
+            txtData = try makeTxtData()
+        } catch {
+            completion.reject("\(encodingFailurePrefix): \(error.localizedDescription)")
+            return
+        }
+        guard session.lifecycle.beginUpdate(generation: advertiseId) else {
+            completion.reject("\(displayName) advertisement update is already in progress")
+            return
+        }
+
+        DispatchQueue.main.async {
+            dispatchPrecondition(condition: .onQueue(DispatchQueue.main))
+            let didUpdate = session.service.setTXTRecord(txtData)
+            self.queue.async {
+                guard self.advertiseSessions[advertiseId] === session else {
+                    completion.reject("\(displayName) advertisement is closed")
+                    if session.lifecycle.finishUpdate(generation: advertiseId) {
+                        self.finishDeferredAdvertisementStop(session)
+                    }
+                    return
+                }
+                if session.lifecycle.state != .active {
+                    let reason: String
+                    if case .failed(let message) = session.lifecycle.state {
+                        reason = message
+                    } else {
+                        reason = "not active"
+                    }
+                    completion.reject("\(displayName) advertisement failed: \(reason)")
+                } else if didUpdate {
+                    completion.resolve()
+                } else {
+                    completion.reject(
+                        "NetService rejected the updated "
+                            + "\(session.kind.txtRecordDescription) TXT record"
+                    )
+                }
+                if session.lifecycle.finishUpdate(generation: advertiseId) {
+                    self.finishDeferredAdvertisementStop(session)
+                }
             }
         }
     }
@@ -857,6 +953,7 @@ class IrohHttpPlugin: Plugin {
             invoke: invoke,
             advertiseId: advertiseId,
             kind: .peer(pk: args.pk),
+            port: 1,
             txtData: txtData,
             makeService: {
                 NetService(
@@ -882,57 +979,16 @@ class IrohHttpPlugin: Plugin {
                 completion.reject("Advertisement handle is not an iroh peer advertisement")
                 return
             }
-            guard session.lifecycle.state == .active else {
-                if case .failed(let message) = session.lifecycle.state {
-                    completion.reject(
-                        "Peer advertisement failed: \(message)"
-                    )
-                } else {
-                    completion.reject("Peer advertisement is not active")
-                }
-                return
-            }
 
-            let txtData: Data
-            do {
-                txtData = try self.peerTxtData(pk: pk, relay: args.relay, addresses: args.addresses)
-            } catch {
-                completion.reject("Failed to encode peer DNS-SD TXT: \(error.localizedDescription)")
-                return
-            }
-            guard session.lifecycle.beginUpdate(generation: args.advertiseId) else {
-                completion.reject("Peer advertisement update is already in progress")
-                return
-            }
-
-            DispatchQueue.main.async {
-                let didUpdate = session.service.setTXTRecord(txtData)
-                self.queue.async {
-                    guard self.advertiseSessions[args.advertiseId] === session else {
-                        completion.reject("Peer advertisement is closed")
-                        if session.lifecycle.finishUpdate(generation: args.advertiseId) {
-                            self.finishDeferredAdvertisementStop(session)
-                        }
-                        return
-                    }
-                    if session.lifecycle.state != .active {
-                        let reason: String
-                        if case .failed(let message) = session.lifecycle.state {
-                            reason = message
-                        } else {
-                            reason = "not active"
-                        }
-                        completion.reject("Peer advertisement failed: \(reason)")
-                    } else if didUpdate {
-                        completion.resolve()
-                    } else {
-                        completion.reject("NetService rejected the updated peer TXT record")
-                    }
-                    if session.lifecycle.finishUpdate(generation: args.advertiseId) {
-                        self.finishDeferredAdvertisementStop(session)
-                    }
-                }
-            }
+            self.updateAdvertisementTxt(
+                session,
+                advertiseId: args.advertiseId,
+                encodingFailurePrefix: "Failed to encode peer DNS-SD TXT",
+                makeTxtData: {
+                    try self.peerTxtData(pk: pk, relay: args.relay, addresses: args.addresses)
+                },
+                completion: completion
+            )
         }
     }
 
@@ -1156,6 +1212,7 @@ class IrohHttpPlugin: Plugin {
             invoke: invoke,
             advertiseId: advertiseId,
             kind: .generic,
+            port: args.port,
             txtData: txtData,
             makeService: {
                 NetService(
@@ -1166,6 +1223,47 @@ class IrohHttpPlugin: Plugin {
                 )
             }
         )
+    }
+
+    @objc public func advertise_update(_ invoke: Invoke) throws {
+        let args = try invoke.parseArgs(DnsSdAdvertiseUpdateArgs.self)
+        let completion = InvokeOnce(invoke)
+
+        if let rejection = DiscoveryAdvertisementUpdatePolicy.rejection(
+            publishedPort: args.port,
+            proposedPort: args.port,
+            hasExplicitAddrs: !args.addrs.isEmpty
+        ) {
+            completion.reject(rejection)
+            return
+        }
+
+        queue.async {
+            guard let session = self.advertiseSessions[args.advertiseId] else {
+                completion.reject("DNS-SD advertisement is closed")
+                return
+            }
+            guard case .generic = session.kind else {
+                completion.reject("Advertisement handle is not a generic DNS-SD advertisement")
+                return
+            }
+            if let rejection = DiscoveryAdvertisementUpdatePolicy.rejection(
+                publishedPort: session.port,
+                proposedPort: args.port,
+                hasExplicitAddrs: false
+            ) {
+                completion.reject(rejection)
+                return
+            }
+
+            self.updateAdvertisementTxt(
+                session,
+                advertiseId: args.advertiseId,
+                encodingFailurePrefix: "Failed to encode generic DNS-SD TXT",
+                makeTxtData: { try self.encodeTxtData(args.txt) },
+                completion: completion
+            )
+        }
     }
 
     @objc public func advertise_stop(_ invoke: Invoke) throws {

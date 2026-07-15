@@ -15,7 +15,8 @@ use tauri::{
 pub use crate::mobile_discovery_transport::{
     DnsSdBrowsePollResponse, MobileServiceRecord, MobileSessionStatus,
 };
-use crate::mobile_discovery_transport::{NativeBrowseApi, NativeFuture};
+use crate::mobile_discovery_transport::{NativeAdvertisementApi, NativeBrowseApi, NativeFuture};
+use iroh_http_discovery::engine::AdvertisementUpdate;
 
 // ---------------------------------------------------------------------------
 // iOS native binding
@@ -288,6 +289,15 @@ struct DnsSdAdvertiseStartPayload<'a> {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+struct DnsSdAdvertiseUpdatePayload<'a> {
+    advertise_id: u64,
+    port: u16,
+    addrs: &'a [String],
+    txt: &'a std::collections::HashMap<String, String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct DnsSdBrowseStartPayload<'a> {
     service_name: &'a str,
     protocol: &'a str,
@@ -323,6 +333,28 @@ impl<R: Runtime> MobileMdns<R> {
             .await
             .map_err(|e| e.to_string())?;
         Ok(resp.advertise_id)
+    }
+
+    /// Update the mutable port/TXT snapshot without changing service identity.
+    pub async fn advertise_update(
+        &self,
+        advertise_id: u64,
+        port: u16,
+        addrs: &[String],
+        txt: &std::collections::HashMap<String, String>,
+    ) -> Result<(), String> {
+        self.0
+            .run_mobile_plugin_async::<()>(
+                "advertise_update",
+                DnsSdAdvertiseUpdatePayload {
+                    advertise_id,
+                    port,
+                    addrs,
+                    txt,
+                },
+            )
+            .await
+            .map_err(|error| error.to_string())
     }
 
     /// Stop a generic DNS-SD advertisement.
@@ -377,5 +409,31 @@ impl<R: Runtime> NativeBrowseApi for MobileMdns<R> {
     fn stop(&self, browse_id: u64) -> NativeFuture<Result<(), String>> {
         let mdns = self.clone();
         Box::pin(async move { mdns.browse_stop(browse_id).await })
+    }
+}
+
+impl<R: Runtime> NativeAdvertisementApi for MobileMdns<R> {
+    fn update(
+        &self,
+        advertise_id: u64,
+        update: AdvertisementUpdate,
+    ) -> NativeFuture<Result<(), String>> {
+        let mdns = self.clone();
+        Box::pin(async move {
+            if !update.addrs.is_empty() {
+                return Err(
+                    "native mobile DNS-SD advertisements do not support explicit addresses"
+                        .to_string(),
+                );
+            }
+            let txt = update.txt.into_iter().collect();
+            mdns.advertise_update(advertise_id, update.port, &[], &txt)
+                .await
+        })
+    }
+
+    fn stop(&self, advertise_id: u64) -> NativeFuture<Result<(), String>> {
+        let mdns = self.clone();
+        Box::pin(async move { mdns.advertise_stop(advertise_id).await })
     }
 }
