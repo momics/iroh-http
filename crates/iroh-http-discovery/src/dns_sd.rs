@@ -25,13 +25,18 @@ use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
 
 use crate::{
     engine::{
-        service_type, AdvertisementHandle, AdvertisementSession as EngineAdvertisementSession,
+        AdvertisementHandle, AdvertisementSession as EngineAdvertisementSession,
         AdvertisementUpdate, BoxFuture, BrowseHandle, RawEvent, TransportError,
     },
     DiscoveryError,
 };
 
 pub use crate::engine::{BrowseConfig, Protocol, ServiceConfig, ServiceRecord};
+
+fn service_type(service_name: &str, protocol: Protocol) -> Result<String, DiscoveryError> {
+    crate::engine::service_type(service_name, protocol)
+        .map_err(|error| DiscoveryError::InvalidServiceName(error.to_string()))
+}
 
 const DAEMON_COMMAND_RETRIES: usize = 100;
 

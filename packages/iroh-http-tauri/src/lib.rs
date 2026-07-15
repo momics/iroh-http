@@ -1,7 +1,6 @@
 #![deny(unsafe_code)]
 
 mod commands;
-#[cfg(all(feature = "discovery", not(mobile)))]
 mod discovery_handles;
 mod discovery_ownership;
 mod state;

@@ -1,7 +1,6 @@
 use std::net::{IpAddr, SocketAddr};
 
-#[cfg(any(feature = "mdns", test))]
-use crate::DiscoveryError;
+use super::TransportError;
 
 /// Transport protocol component of a DNS-SD service type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -50,8 +49,7 @@ impl BrowseConfig {
 }
 
 impl Protocol {
-    #[cfg(any(feature = "mdns", test))]
-    pub(crate) fn label(self) -> &'static str {
+    fn label(self) -> &'static str {
         match self {
             Self::Udp => "_udp",
             Self::Tcp => "_tcp",
@@ -60,21 +58,15 @@ impl Protocol {
 }
 
 /// Validate a bare service name and return its fully qualified local type.
-#[cfg(any(feature = "mdns", test))]
-pub(crate) fn service_type(
-    service_name: &str,
-    protocol: Protocol,
-) -> Result<String, DiscoveryError> {
+pub fn service_type(service_name: &str, protocol: Protocol) -> Result<String, TransportError> {
     if service_name.is_empty() {
-        return Err(DiscoveryError::InvalidServiceName(
-            "service name must not be empty".into(),
-        ));
+        return Err(TransportError::new("service name must not be empty"));
     }
     if !service_name
         .chars()
         .all(|character| character.is_ascii_alphanumeric() || character == '-')
     {
-        return Err(DiscoveryError::InvalidServiceName(format!(
+        return Err(TransportError::new(format!(
             "{service_name:?} must contain only ASCII letters, digits, and '-'"
         )));
     }
@@ -204,9 +196,6 @@ mod tests {
             service_type("web", Protocol::Tcp),
             Ok(value) if value == "_web._tcp.local."
         ));
-        assert!(matches!(
-            service_type("bad.name", Protocol::Udp),
-            Err(DiscoveryError::InvalidServiceName(_))
-        ));
+        assert!(matches!(service_type("bad.name", Protocol::Udp), Err(_)));
     }
 }

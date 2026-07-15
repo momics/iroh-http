@@ -185,11 +185,10 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
         var state: NativeSessionState = NativeSessionState.STARTING,
         var terminalError: String? = null,
         val pendingRecords: MutableList<JSObject> = mutableListOf(),
-        // name → snapshot signature (txt + addrs). A Map, not a Set, so a later
-        // TXT/addr change (peer rebinds to a new port, re-advertises a new
-        // `address`) re-emits instead of being suppressed forever — parity with
-        // the iOS DnsSdBrowseSession snapshot (#350 review W2).
-        val knownInstances: MutableMap<String, String> = mutableMapOf(),
+        // Instances that have produced at least one resolved record. This is
+        // presence bookkeeping for removals, not record de-duplication: generic
+        // browse exposes every platform announcement, including identical ones.
+        val knownInstances: MutableSet<String> = mutableSetOf(),
         val presenceGenerations: MutableMap<String, Long> = mutableMapOf(),
         var nextPresenceGeneration: Long = 1
     )
@@ -1353,9 +1352,15 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
                         dnsSdBrowseMap[browseId] !== session ||
                         session.state != NativeSessionState.ACTIVE
                     ) return
-                    val current = session.nextPresenceGeneration++
-                    session.presenceGenerations[instanceName] = current
-                    current
+                    // One generation represents one continuous presence epoch.
+                    // Repeated announcements while the instance remains present
+                    // must all resolve and surface; loss removes the epoch so a
+                    // late callback cannot revive a later reappearance.
+                    session.presenceGenerations[instanceName] ?: run {
+                        val current = session.nextPresenceGeneration++
+                        session.presenceGenerations[instanceName] = current
+                        current
+                    }
                 }
                 enqueueResolve(
                     ResolveOwner.Generic(session, instanceName, generation),
@@ -1389,31 +1394,13 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
                                 ?.let { addrs.put(it) }
                         }
 
-                        // #350 review W2: re-emit only when the record actually
-                        // changed. A stable signature over the sorted TXT and the
-                        // resolved addrs lets a rebind/re-advertise surface again.
-                        // #350 F29: length-prefix every field (netstring style)
-                        // so the snapshot is injective — a delimiter-joined form
-                        // lets TXT {a:"b;c=d"} and {a:"b",c:"d"} collide and
-                        // suppresses a real update.
-                        fun StringBuilder.field(s: String) {
-                            append(s.length).append(':').append(s)
-                        }
-                        val signature = buildString {
-                            resolved.attributes?.toSortedMap()?.forEach { (k, v) ->
-                                field(k)
-                                field(if (v != null) String(v, StandardCharsets.UTF_8) else "")
-                            }
-                            append('|')
-                            for (i in 0 until addrs.length()) field(addrs.getString(i))
-                        }
                         synchronized(session) {
                             if (
                                 dnsSdBrowseMap[browseId] !== session ||
                                 session.state != NativeSessionState.ACTIVE ||
                                 session.presenceGenerations[name] != generation
                             ) return
-                            if (session.knownInstances.put(name, signature) == signature) return
+                            session.knownInstances.add(name)
 
                             val record = JSObject()
                             record.put("isActive", true)
@@ -1441,7 +1428,7 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
                         session.state != NativeSessionState.ACTIVE
                     ) return
                     session.presenceGenerations.remove(name)
-                    if (session.knownInstances.remove(name) == null) return
+                    if (!session.knownInstances.remove(name)) return
                     val record = JSObject()
                     record.put("isActive", false)
                     record.put("serviceType", session.serviceType)

@@ -15,7 +15,7 @@ xcrun swiftc \
 
 xcrun swiftc \
   -warnings-as-errors \
-  "$here/DiscoveryLifecycleModel.swift" \
+  "$here/../Sources/DiscoveryLifecycle.swift" \
   "$here/DiscoveryLifecycleContract.swift" \
   -o "$lifecycle_binary"
 "$lifecycle_binary"

@@ -1233,7 +1233,7 @@ pub fn generate_secret_key() -> Result<String, String> {
 #[cfg(any(test, mobile, all(feature = "discovery", not(mobile))))]
 use std::sync::{Mutex, OnceLock};
 
-#[cfg(all(feature = "discovery", not(mobile)))]
+#[cfg(any(mobile, all(feature = "discovery", not(mobile))))]
 use crate::discovery_handles::DiscoveryHandleMap;
 #[cfg(any(mobile, all(feature = "discovery", not(mobile))))]
 use crate::discovery_ownership::DiscoveryKind;
@@ -1243,7 +1243,6 @@ use crate::discovery_ownership::{self, TrackedDiscovery};
 use std::sync::Arc;
 #[cfg(mobile)]
 use tokio::sync::Mutex as TokioMutex;
-
 #[cfg(all(feature = "discovery", not(mobile)))]
 type BrowseHandle = Arc<iroh_http_discovery::BrowseSession>;
 
@@ -1625,7 +1624,7 @@ enum MobileDiscoveryRetirement {
         refresh: Option<tauri::async_runtime::JoinHandle<()>>,
     },
     GenericAdvertise(u64),
-    GenericBrowse(u64),
+    GenericBrowse(Option<Arc<iroh_http_discovery::engine::BrowseSession>>),
 }
 
 #[cfg(mobile)]
@@ -1650,14 +1649,14 @@ fn prepare_mobile_discovery_retirement(session: TrackedDiscovery) -> MobileDisco
             MobileDiscoveryRetirement::GenericAdvertise(session.handle)
         }
         DiscoveryKind::GenericBrowse => {
-            if let Some(browse) = take_mobile_generic_session(session.handle, None) {
-                browse
-                    .buffer
-                    .lock()
-                    .unwrap_or_else(|error| error.into_inner())
-                    .clear();
+            let browse = mobile_generic_browse_slab()
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .remove(session.handle);
+            if let Some(browse) = &browse {
+                browse.close();
             }
-            MobileDiscoveryRetirement::GenericBrowse(session.handle)
+            MobileDiscoveryRetirement::GenericBrowse(browse)
         }
     }
 }
@@ -1686,9 +1685,9 @@ async fn complete_mobile_discovery_retirement<R: tauri::Runtime>(
                 let _ = state.advertise_stop(handle).await;
             }
         }
-        MobileDiscoveryRetirement::GenericBrowse(handle) => {
-            if let Some(state) = state {
-                let _ = state.browse_stop(handle).await;
+        MobileDiscoveryRetirement::GenericBrowse(browse) => {
+            if let Some(browse) = browse {
+                let _ = browse.wait_closed().await;
             }
         }
     }
@@ -2580,61 +2579,11 @@ fn generic_browse_slab() -> &'static Mutex<DiscoveryHandleMap<GenericBrowseHandl
 }
 
 #[cfg(mobile)]
-struct MobileGenericBrowseSession {
-    next: TokioMutex<()>,
-    buffer: Mutex<std::collections::VecDeque<crate::mobile_mdns::MobileServiceRecord>>,
-    terminal: Mutex<Option<MobileBrowseTerminal>>,
-}
-
-#[cfg(mobile)]
-fn mobile_generic_browse_sessions(
-) -> &'static Mutex<std::collections::HashMap<u64, Arc<MobileGenericBrowseSession>>> {
-    static S: OnceLock<Mutex<std::collections::HashMap<u64, Arc<MobileGenericBrowseSession>>>> =
+fn mobile_generic_browse_slab(
+) -> &'static Mutex<DiscoveryHandleMap<Arc<iroh_http_discovery::engine::BrowseSession>>> {
+    static S: OnceLock<Mutex<DiscoveryHandleMap<Arc<iroh_http_discovery::engine::BrowseSession>>>> =
         OnceLock::new();
-    S.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
-}
-
-#[cfg(mobile)]
-fn mobile_generic_session_is_current(
-    handle: u64,
-    expected: &Arc<MobileGenericBrowseSession>,
-) -> bool {
-    mobile_generic_browse_sessions()
-        .lock()
-        .unwrap_or_else(|error| error.into_inner())
-        .get(&handle)
-        .is_some_and(|current| Arc::ptr_eq(current, expected))
-}
-
-#[cfg(mobile)]
-fn take_mobile_generic_session(
-    handle: u64,
-    expected: Option<&Arc<MobileGenericBrowseSession>>,
-) -> Option<Arc<MobileGenericBrowseSession>> {
-    let mut sessions = mobile_generic_browse_sessions()
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
-    if expected.is_some_and(|expected| {
-        !sessions
-            .get(&handle)
-            .is_some_and(|current| Arc::ptr_eq(current, expected))
-    }) {
-        return None;
-    }
-    sessions.remove(&handle)
-}
-
-#[cfg(mobile)]
-fn service_record_from_mobile(r: crate::mobile_mdns::MobileServiceRecord) -> ServiceRecordPayload {
-    ServiceRecordPayload {
-        is_active: r.is_active,
-        service_type: r.service_type,
-        instance_name: r.instance_name,
-        host: r.host,
-        port: r.port,
-        addrs: r.addrs,
-        txt: r.txt,
-    }
+    S.get_or_init(|| Mutex::new(DiscoveryHandleMap::default()))
 }
 
 /// A generic DNS-SD service to advertise, mirroring the shared `ServiceConfig`.
@@ -2681,11 +2630,11 @@ pub struct ServiceRecordPayload {
     pub txt: std::collections::HashMap<String, String>,
 }
 
-#[cfg(all(feature = "discovery", not(mobile)))]
-fn parse_protocol(p: Option<&str>) -> Result<iroh_http_discovery::Protocol, String> {
+#[cfg(any(mobile, all(feature = "discovery", not(mobile))))]
+fn parse_protocol(p: Option<&str>) -> Result<iroh_http_discovery::engine::Protocol, String> {
     match p.unwrap_or("udp") {
-        "udp" => Ok(iroh_http_discovery::Protocol::Udp),
-        "tcp" => Ok(iroh_http_discovery::Protocol::Tcp),
+        "udp" => Ok(iroh_http_discovery::engine::Protocol::Udp),
+        "tcp" => Ok(iroh_http_discovery::engine::Protocol::Tcp),
         other => Err(format_error_json(
             "INVALID_INPUT",
             format!("invalid protocol: {other:?}"),
@@ -2869,37 +2818,42 @@ pub async fn browse<R: tauri::Runtime>(
     let owner = discovery_ownership::begin_webview(webview.label())
         .ok_or_else(|| format_error_json("INVALID_HANDLE", "WebView discovery owner is closed"))?;
     await_mobile_generic_start_barrier(webview.label(), &owner).await?;
-    let protocol = protocol.as_deref().unwrap_or("udp");
-    let browse_id = state
-        .browse_start(&service_name, protocol)
+    let protocol = parse_protocol(protocol.as_deref())?;
+    let protocol_label = match protocol {
+        iroh_http_discovery::engine::Protocol::Udp => "udp",
+        iroh_http_discovery::engine::Protocol::Tcp => "tcp",
+    };
+    let service_type = iroh_http_discovery::engine::service_type(&service_name, protocol)
+        .map_err(|error| format_error_json("INVALID_INPUT", error))?;
+    let native_id = state
+        .browse_start(&service_name, protocol_label)
         .await
         .map_err(|e| format_error_json("REFUSED", e))?;
-    let session = Arc::new(MobileGenericBrowseSession {
-        next: TokioMutex::new(()),
-        buffer: Mutex::new(std::collections::VecDeque::new()),
-        terminal: Mutex::new(None),
-    });
-    if let Some(replaced) = mobile_generic_browse_sessions()
+    let session = Arc::new(iroh_http_discovery::engine::BrowseSession::new(
+        crate::mobile_discovery_transport::NativeBrowseHandle::new(
+            state.inner().clone(),
+            native_id,
+            service_type,
+        ),
+    ));
+    let handle = mobile_generic_browse_slab()
         .lock()
         .unwrap_or_else(|error| error.into_inner())
-        .insert(browse_id, session)
-    {
-        replaced
-            .buffer
+        .insert(Arc::clone(&session))
+        .map_err(|error| format_error_json("REFUSED", error))?;
+    if discovery_ownership::track_generic(owner, DiscoveryKind::GenericBrowse, handle).is_err() {
+        mobile_generic_browse_slab()
             .lock()
             .unwrap_or_else(|error| error.into_inner())
-            .clear();
-        discovery_ownership::untrack(DiscoveryKind::GenericBrowse, browse_id);
-    }
-    if discovery_ownership::track_generic(owner, DiscoveryKind::GenericBrowse, browse_id).is_err() {
-        take_mobile_generic_session(browse_id, None);
-        let _ = state.browse_stop(browse_id).await;
+            .remove(handle);
+        session.close();
+        let _ = session.wait_closed().await;
         return Err(format_error_json(
             "REFUSED",
             "WebView retired while DNS-SD browse was starting",
         ));
     }
-    Ok(browse_id)
+    Ok(handle)
 }
 
 /// Poll the next record from a generic DNS-SD browse session.
@@ -2954,95 +2908,45 @@ pub async fn browse_next(_browse_handle: u64) -> Result<Option<ServiceRecordPayl
 #[cfg(mobile)]
 pub async fn browse_next<R: tauri::Runtime>(
     _app: tauri::AppHandle<R>,
-    state: tauri::State<'_, crate::mobile_mdns::MobileMdns<R>>,
+    _state: tauri::State<'_, crate::mobile_mdns::MobileMdns<R>>,
     browse_handle: u64,
 ) -> Result<Option<ServiceRecordPayload>, String> {
-    let session = mobile_generic_browse_sessions()
+    let session = mobile_generic_browse_slab()
         .lock()
         .unwrap_or_else(|error| error.into_inner())
-        .get(&browse_handle)
+        .get(browse_handle)
         .cloned();
     let Some(session) = session else {
         return Ok(None);
     };
-    let _next = session.next.lock().await;
-
-    loop {
-        if !mobile_generic_session_is_current(browse_handle, &session) {
-            return Ok(None);
-        }
-
-        if let Some(record) = session
-            .buffer
+    let event = session.next().await;
+    if event.as_ref().is_err() || event.as_ref().is_ok_and(|event| event.is_none()) {
+        let removed = mobile_generic_browse_slab()
             .lock()
             .unwrap_or_else(|error| error.into_inner())
-            .pop_front()
-        {
-            return Ok(Some(service_record_from_mobile(record)));
-        }
-
-        if let Some(terminal) = session
-            .terminal
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .take()
-        {
-            if take_mobile_generic_session(browse_handle, Some(&session)).is_some() {
-                discovery_ownership::untrack(DiscoveryKind::GenericBrowse, browse_handle);
-            }
-            return match terminal {
-                MobileBrowseTerminal::Closed => Ok(None),
-                MobileBrowseTerminal::Failed(error) => Err(format_error_json("REFUSED", error)),
-            };
-        }
-
-        let response = match state.browse_poll(browse_handle).await {
-            Ok(response) => response,
-            Err(error) => {
-                let _ = state.browse_stop(browse_handle).await;
-                *session
-                    .terminal
-                    .lock()
-                    .unwrap_or_else(|poison| poison.into_inner()) =
-                    Some(MobileBrowseTerminal::Failed(error));
-                continue;
-            }
-        };
-        use crate::mobile_mdns::MobileSessionStatus;
-        // A terminal response is authoritative for the browse generation.
-        // Do not expose records from that final batch after the session has
-        // already ceased owning them.
-        if response.status == MobileSessionStatus::Active {
-            session
-                .buffer
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .extend(response.records);
-        }
-        let terminal = match response.status {
-            MobileSessionStatus::Active => None,
-            MobileSessionStatus::Closed => Some(MobileBrowseTerminal::Closed),
-            MobileSessionStatus::Failed => {
-                Some(MobileBrowseTerminal::Failed(response.error.unwrap_or_else(
-                    || "native DNS-SD browse failed".to_string(),
-                )))
-            }
-        };
-        if let Some(terminal) = terminal {
-            let _ = state.browse_stop(browse_handle).await;
-            *session
-                .terminal
-                .lock()
-                .unwrap_or_else(|error| error.into_inner()) = Some(terminal);
-        } else if session
-            .buffer
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .is_empty()
-        {
-            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            .remove_if(browse_handle, |current| Arc::ptr_eq(current, &session))
+            .is_some();
+        if removed {
+            discovery_ownership::untrack(DiscoveryKind::GenericBrowse, browse_handle);
         }
     }
+    let event = event.map_err(|error| format_error_json("REFUSED", error))?;
+    Ok(event.map(|event| {
+        let record = iroh_http_discovery::engine::ServiceRecord::from(event);
+        ServiceRecordPayload {
+            is_active: record.is_active,
+            service_type: record.service_type,
+            instance_name: record.instance_name,
+            host: record.host,
+            port: record.port,
+            addrs: record
+                .addrs
+                .into_iter()
+                .map(|address| address.to_string())
+                .collect(),
+            txt: record.txt.into_iter().collect(),
+        }
+    }))
 }
 
 /// Close a generic DNS-SD browse session.
@@ -3067,20 +2971,24 @@ pub fn browse_close(_browse_handle: u64) {
 #[cfg(mobile)]
 pub async fn browse_close<R: tauri::Runtime>(
     _app: tauri::AppHandle<R>,
-    state: tauri::State<'_, crate::mobile_mdns::MobileMdns<R>>,
+    _state: tauri::State<'_, crate::mobile_mdns::MobileMdns<R>>,
     browse_handle: u64,
 ) -> Result<(), String> {
     if discovery_ownership::untrack(DiscoveryKind::GenericBrowse, browse_handle).is_none() {
         return Ok(());
     }
-    if let Some(session) = take_mobile_generic_session(browse_handle, None) {
-        session
-            .buffer
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .clear();
+    let session = mobile_generic_browse_slab()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .remove(browse_handle);
+    if let Some(session) = session {
+        session.close();
+        if let Err(error) = session.wait_closed().await {
+            // Preserve the stable void close contract while still fencing the
+            // native resource before a later WebView generation can restart it.
+            tracing::warn!(%error, "iroh-http-tauri: generic mobile browse cleanup failed");
+        }
     }
-    let _ = state.browse_stop(browse_handle).await;
     Ok(())
 }
 

@@ -15,6 +15,4 @@ pub use session::{AdvertisementSession, BrowseSession};
 pub use transport::{
     AdvertisementHandle, AdvertisementUpdate, BoxFuture, BrowseHandle, TransportError,
 };
-#[cfg(feature = "mdns")]
-pub(crate) use types::service_type;
-pub use types::{BrowseConfig, Protocol, RawEvent, ServiceConfig, ServiceRecord};
+pub use types::{service_type, BrowseConfig, Protocol, RawEvent, ServiceConfig, ServiceRecord};

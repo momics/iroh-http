@@ -7,6 +7,7 @@ import android.net.nsd.NsdServiceInfo
 import app.tauri.plugin.Invoke
 import app.tauri.plugin.JSObject
 import org.json.JSONArray
+import org.json.JSONObject
 import java.net.InetAddress
 import java.nio.charset.StandardCharsets
 import java.util.concurrent.CountDownLatch
@@ -415,9 +416,88 @@ private fun testPeerPresenceGenerationsAndPluralTxt() {
     )
 }
 
-private fun testGenericPresenceGeneration() {
+private fun testGenericBrowseRecordsPresenceAndRepeatedUpserts() {
     val (plugin, manager) = newPlugin()
     val (id, listener) = startGenericBrowse(plugin, manager)
+
+    val advertised = NsdServiceInfo().apply { serviceName = "generic-printer" }
+    fun resolvedAdvertisement() = NsdServiceInfo().apply {
+        serviceName = "generic-printer"
+        host = InetAddress.getByName("192.168.1.8")
+        setPort(8080)
+        setAttribute("pk", "a".repeat(52))
+        setAttribute("address", "192.168.1.8:4433")
+        setAttribute("relay", "https://relay.example")
+        setAttribute("note", "office")
+    }
+
+    // Queue the same presence twice before either resolve completes. Android
+    // serializes resolveService on older API levels; both announcements still
+    // belong to the same presence epoch and must become observable upserts.
+    listener.onServiceFound(advertised)
+    listener.onServiceFound(advertised)
+    checkEquals(1, manager.resolveCalls.size, "generic resolves are serialized")
+    manager.resolveCalls.last().listener.onServiceResolved(resolvedAdvertisement())
+    checkEquals(2, manager.resolveCalls.size, "second generic resolve starts after first callback")
+    manager.resolveCalls.last().listener.onServiceResolved(resolvedAdvertisement())
+    val firstPoll = Invoke(pollArgs(id))
+    plugin.browse_poll(firstPoll)
+    val firstRecords = firstPoll.resolutions.single()!!["records"] as JSONArray
+    checkEquals(2, firstRecords.length(), "queued generic announcements emit two active records")
+    val active = firstRecords[0] as JSObject
+    checkEquals(true, active["isActive"], "generic record is active")
+    checkEquals(
+        "_demo._udp",
+        active["serviceType"],
+        "native record uses the shorthand Rust canonicalizes at the adapter seam"
+    )
+    checkEquals("generic-printer", active["instanceName"], "generic record keeps instance")
+    checkEquals("192.168.1.8", active["host"], "generic record keeps resolved host")
+    checkEquals(8080, active["port"], "generic record keeps SRV port")
+    checkEquals(
+        listOf("192.168.1.8:8080"),
+        (active["addrs"] as JSONArray).toList(),
+        "generic record pairs its resolved host with the SRV port"
+    )
+    val txt = active["txt"] as JSObject
+    checkEquals("a".repeat(52), txt["pk"], "generic record keeps pk TXT")
+    checkEquals("192.168.1.8:4433", txt["address"], "generic record keeps address TXT")
+    checkEquals("https://relay.example", txt["relay"], "generic record keeps relay TXT")
+    checkEquals("office", txt["note"], "generic record keeps arbitrary TXT")
+
+    // A later platform announcement is likewise observable even when its
+    // resolved snapshot is identical.
+    listener.onServiceFound(advertised)
+    manager.resolveCalls.last().listener.onServiceResolved(resolvedAdvertisement())
+    val repeatedPoll = Invoke(pollArgs(id))
+    plugin.browse_poll(repeatedPoll)
+    checkEquals(
+        1,
+        (repeatedPoll.resolutions.single()!!["records"] as JSONArray).length(),
+        "identical generic announcements remain repeated upserts"
+    )
+
+    listener.onServiceLost(advertised)
+    val removalPoll = Invoke(pollArgs(id))
+    plugin.browse_poll(removalPoll)
+    val removalRecords = removalPoll.resolutions.single()!!["records"] as JSONArray
+    checkEquals(1, removalRecords.length(), "generic loss emits one removal")
+    val removal = removalRecords[0] as JSObject
+    checkEquals(false, removal["isActive"], "generic removal is inactive")
+    checkEquals(
+        "_demo._udp",
+        removal["serviceType"],
+        "native removal uses the shorthand Rust canonicalizes at the adapter seam"
+    )
+    checkEquals("generic-printer", removal["instanceName"], "generic removal keeps instance")
+    checkEquals(0, removal["port"], "generic removal clears the port")
+    checkEquals(0, (removal["addrs"] as JSONArray).length(), "generic removal clears addrs")
+    checkEquals(JSONObject.NULL, removal["host"], "generic removal clears host")
+    val removalTxt = removal["txt"] as JSObject
+    for (key in listOf("pk", "address", "relay", "note")) {
+        checkEquals(null, removalTxt[key], "generic removal clears $key TXT")
+    }
+
     val pending = NsdServiceInfo().apply { serviceName = "late-generic" }
     listener.onServiceFound(pending)
     val resolve = manager.resolveCalls.last().listener
@@ -978,7 +1058,7 @@ private fun testAospListenerLifecycleAcrossApiEras() {
 fun main() {
     testBrowseReadinessAndTerminalConsumption()
     testPeerPresenceGenerationsAndPluralTxt()
-    testGenericPresenceGeneration()
+    testGenericBrowseRecordsPresenceAndRepeatedUpserts()
     testPeerInstanceIdentityAndLateHandleCallbacks()
     testRetiredResolveQueuesDoNotStarveNewSessions()
     testAddressTxtByteBoundary()

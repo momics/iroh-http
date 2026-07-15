@@ -12,7 +12,10 @@ use tauri::{
     AppHandle, Runtime,
 };
 
-pub use crate::mobile_discovery_transport::MobileServiceRecord;
+pub use crate::mobile_discovery_transport::{
+    DnsSdBrowsePollResponse, MobileServiceRecord, MobileSessionStatus,
+};
+use crate::mobile_discovery_transport::{NativeBrowseApi, NativeFuture};
 
 // ---------------------------------------------------------------------------
 // iOS native binding
@@ -101,14 +104,6 @@ struct AdvertiseStopPayload {
 }
 
 // ── Incoming responses ───────────────────────────────────────────────────────
-
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum MobileSessionStatus {
-    Active,
-    Closed,
-    Failed,
-}
 
 #[derive(Deserialize)]
 struct BrowseStartResponse {
@@ -300,15 +295,6 @@ struct DnsSdBrowseStartPayload<'a> {
 
 // ── Incoming responses ───────────────────────────────────────────────────────
 
-#[derive(Debug, Deserialize)]
-pub struct DnsSdBrowsePollResponse {
-    pub status: MobileSessionStatus,
-    #[serde(default)]
-    pub records: Vec<MobileServiceRecord>,
-    #[serde(default)]
-    pub error: Option<String>,
-}
-
 impl<R: Runtime> MobileMdns<R> {
     /// Advertise a generic DNS-SD service. Returns an `advertise_id` handle.
     #[allow(clippy::too_many_arguments)]
@@ -379,5 +365,17 @@ impl<R: Runtime> MobileMdns<R> {
             .run_mobile_plugin_async::<()>("browse_stop", BrowseStopPayload { browse_id })
             .await
             .map_err(|e| e.to_string())
+    }
+}
+
+impl<R: Runtime> NativeBrowseApi for MobileMdns<R> {
+    fn poll(&self, browse_id: u64) -> NativeFuture<Result<DnsSdBrowsePollResponse, String>> {
+        let mdns = self.clone();
+        Box::pin(async move { mdns.browse_poll(browse_id).await })
+    }
+
+    fn stop(&self, browse_id: u64) -> NativeFuture<Result<(), String>> {
+        let mdns = self.clone();
+        Box::pin(async move { mdns.browse_stop(browse_id).await })
     }
 }

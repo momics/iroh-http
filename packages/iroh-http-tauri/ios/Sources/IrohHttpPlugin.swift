@@ -207,8 +207,8 @@ private final class AdvertiseSession {
     let registrationDelegate: NetServiceRegistrationDelegate
     let kind: AdvertisementKind
     let startInvoke: InvokeOnce
-    var state: NativeSessionState = .starting
-    var terminalError: String?
+    let lifecycle: DiscoveryAdvertisementLifecycle
+    var pendingStopCompletions: [InvokeOnce] = []
 
     init(
         id: UInt64,
@@ -222,16 +222,8 @@ private final class AdvertiseSession {
         self.registrationDelegate = registrationDelegate
         self.kind = kind
         self.startInvoke = startInvoke
+        self.lifecycle = DiscoveryAdvertisementLifecycle(id: id, callbackGeneration: id)
     }
-}
-
-/// Snapshot of the resolved portion of a generic DNS-SD record, used to detect
-/// when a known instance's TXT/addrs actually change so `browse_start` can
-/// re-emit — instead of a one-shot "seen it once" dedup that would otherwise
-/// never re-surface updates (unlike desktop, which re-announces on change).
-private struct DnsSdRecordSnapshot: Equatable {
-    let txt: [String: String]
-    let addrs: [String]
 }
 
 /// A generic DNS-SD browse session. Unlike `BrowseSession` (which reduces every
@@ -241,16 +233,14 @@ private final class DnsSdBrowseSession {
     let browser: NWBrowser
     let serviceType: String
     let startInvoke: InvokeOnce
-    var state: NativeSessionState = .starting
-    var terminalError: String?
-    var pendingRecords: [[String: Any]] = []
-    var knownInstances: [String: DnsSdRecordSnapshot] = [:]
+    let lifecycle: DiscoveryBrowseLifecycle
 
     init(id: UInt64, browser: NWBrowser, serviceType: String, startInvoke: InvokeOnce) {
         self.id = id
         self.browser = browser
         self.serviceType = serviceType
         self.startInvoke = startInvoke
+        self.lifecycle = DiscoveryBrowseLifecycle(id: id, callbackGeneration: id)
     }
 }
 
@@ -463,32 +453,38 @@ class IrohHttpPlugin: Plugin {
     }
 
     private func advertisementDidPublish(_ advertiseId: UInt64) {
-        guard let session = advertiseSessions[advertiseId], session.state == .starting else { return }
-        session.state = .active
-        session.startInvoke.resolve(["advertiseId": advertiseId])
+        guard let session = advertiseSessions[advertiseId] else { return }
+        if session.lifecycle.nativePublished(generation: advertiseId) {
+            session.startInvoke.resolve(["advertiseId": advertiseId])
+        }
     }
 
     /// Stop a published service on the same main/default run loop where it was
     /// created. Every terminal path removes that sole implicit schedule and
     /// clears the assign/weak delegate reference.
-    private func teardownAdvertisementService(_ session: AdvertiseSession) {
+    private func teardownAdvertisementService(
+        _ session: AdvertiseSession,
+        completion: (() -> Void)? = nil
+    ) {
         DispatchQueue.main.async {
             dispatchPrecondition(condition: .onQueue(DispatchQueue.main))
             session.service.stop()
             session.service.remove(from: RunLoop.main, forMode: .default)
             session.service.delegate = nil
+            if let completion = completion {
+                self.queue.async(execute: completion)
+            }
         }
     }
 
     private func advertisementDidFail(_ advertiseId: UInt64, message: String) {
         guard
             let session = advertiseSessions[advertiseId],
-            session.state != .closed,
-            session.state != .failed
+            session.lifecycle.state != .closed
         else { return }
-        let failedBeforeReady = session.state == .starting
-        session.state = .failed
-        session.terminalError = message
+        if case .failed = session.lifecycle.state { return }
+        let failedBeforeReady = session.lifecycle.state == .starting
+        session.lifecycle.nativeFailure(generation: advertiseId, message: message)
         if failedBeforeReady {
             session.startInvoke.reject("Failed to publish DNS-SD service: \(message)")
             // No handle escaped from a rejected start, so retaining this entry
@@ -502,12 +498,16 @@ class IrohHttpPlugin: Plugin {
 
     private func advertisementDidStop(_ advertiseId: UInt64) {
         guard let session = advertiseSessions[advertiseId] else { return }
-        switch session.state {
+        let stateBeforeStop = session.lifecycle.state
+        session.lifecycle.nativeStopped(generation: advertiseId)
+        switch stateBeforeStop {
         case .starting:
-            advertisementDidFail(advertiseId, message: "registration stopped before it was published")
+            session.startInvoke.reject(
+                "Failed to publish DNS-SD service: registration stopped before it was published"
+            )
+            advertiseSessions.removeValue(forKey: advertiseId)
+            teardownAdvertisementService(session)
         case .active:
-            session.state = .failed
-            session.terminalError = "registration stopped unexpectedly"
             teardownAdvertisementService(session)
         case .closed, .failed:
             break
@@ -574,23 +574,42 @@ class IrohHttpPlugin: Plugin {
         expectedKind: AdvertisementStopKind,
         invoke: Invoke
     ) {
+        let completion = InvokeOnce(invoke)
         queue.async {
             guard let session = self.advertiseSessions[advertiseId] else {
-                invoke.resolve()
+                completion.resolve()
                 return
             }
             guard session.kind.matches(expectedKind) else {
-                invoke.reject(expectedKind.mismatchMessage)
+                completion.reject(expectedKind.mismatchMessage)
+                return
+            }
+            let wasStarting = session.lifecycle.state == .starting
+            let disposition = session.lifecycle.requestStop()
+            if disposition == .afterUpdate {
+                session.pendingStopCompletions.append(completion)
                 return
             }
             self.advertiseSessions.removeValue(forKey: advertiseId)
-            let wasStarting = session.state == .starting
-            session.state = .closed
             if wasStarting {
                 session.startInvoke.reject("DNS-SD advertisement was closed before becoming ready")
             }
-            self.teardownAdvertisementService(session)
-            invoke.resolve()
+            self.teardownAdvertisementService(session) {
+                completion.resolve()
+            }
+        }
+    }
+
+    private func finishDeferredAdvertisementStop(_ session: AdvertiseSession) {
+        if advertiseSessions[session.id] === session {
+            advertiseSessions.removeValue(forKey: session.id)
+        }
+        let completions = session.pendingStopCompletions
+        session.pendingStopCompletions = []
+        teardownAdvertisementService(session) {
+            for completion in completions {
+                completion.resolve()
+            }
         }
     }
 
@@ -863,10 +882,10 @@ class IrohHttpPlugin: Plugin {
                 completion.reject("Advertisement handle is not an iroh peer advertisement")
                 return
             }
-            guard session.state == .active else {
-                if session.state == .failed {
+            guard session.lifecycle.state == .active else {
+                if case .failed(let message) = session.lifecycle.state {
                     completion.reject(
-                        "Peer advertisement failed: \(session.terminalError ?? "unknown native failure")"
+                        "Peer advertisement failed: \(message)"
                     )
                 } else {
                     completion.reject("Peer advertisement is not active")
@@ -881,24 +900,36 @@ class IrohHttpPlugin: Plugin {
                 completion.reject("Failed to encode peer DNS-SD TXT: \(error.localizedDescription)")
                 return
             }
+            guard session.lifecycle.beginUpdate(generation: args.advertiseId) else {
+                completion.reject("Peer advertisement update is already in progress")
+                return
+            }
 
             DispatchQueue.main.async {
                 let didUpdate = session.service.setTXTRecord(txtData)
                 self.queue.async {
                     guard self.advertiseSessions[args.advertiseId] === session else {
                         completion.reject("Peer advertisement is closed")
+                        if session.lifecycle.finishUpdate(generation: args.advertiseId) {
+                            self.finishDeferredAdvertisementStop(session)
+                        }
                         return
                     }
-                    guard session.state == .active else {
-                        completion.reject(
-                            "Peer advertisement failed: \(session.terminalError ?? "not active")"
-                        )
-                        return
-                    }
-                    if didUpdate {
+                    if session.lifecycle.state != .active {
+                        let reason: String
+                        if case .failed(let message) = session.lifecycle.state {
+                            reason = message
+                        } else {
+                            reason = "not active"
+                        }
+                        completion.reject("Peer advertisement failed: \(reason)")
+                    } else if didUpdate {
                         completion.resolve()
                     } else {
                         completion.reject("NetService rejected the updated peer TXT record")
+                    }
+                    if session.lifecycle.finishUpdate(generation: args.advertiseId) {
+                        self.finishDeferredAdvertisementStop(session)
                     }
                 }
             }
@@ -958,15 +989,13 @@ class IrohHttpPlugin: Plugin {
         guard dnsSdBrowseSessions[session.id] === session else { return }
         switch state {
         case .ready:
-            guard session.state == .starting else { return }
-            session.state = .active
-            session.startInvoke.resolve(["browseId": session.id])
+            if session.lifecycle.nativeReady(generation: session.id) {
+                session.startInvoke.resolve(["browseId": session.id])
+            }
         case .failed(let error):
-            guard session.state != .failed, session.state != .closed else { return }
-            let failedBeforeReady = session.state == .starting
+            let failedBeforeReady = session.lifecycle.state == .starting
             let message = error.localizedDescription
-            session.state = .failed
-            session.terminalError = message
+            session.lifecycle.nativeFailure(generation: session.id, message: message)
             if case .dns(let code) = error, code == -65569 {
                 // Quiet expected duplicate/teardown failures in logs only.
             } else {
@@ -978,12 +1007,11 @@ class IrohHttpPlugin: Plugin {
                 dnsSdBrowseSessions.removeValue(forKey: session.id)
             }
         case .cancelled:
-            if session.state == .starting {
-                session.state = .closed
+            let cancelledBeforeReady = session.lifecycle.state == .starting
+            session.lifecycle.nativeCancelled(generation: session.id)
+            if cancelledBeforeReady {
                 session.startInvoke.reject("DNS-SD browse closed before becoming ready")
                 dnsSdBrowseSessions.removeValue(forKey: session.id)
-            } else if session.state == .active {
-                session.state = .closed
             }
         default:
             break
@@ -995,63 +1023,44 @@ class IrohHttpPlugin: Plugin {
     /// Note: `NWBrowser` surfaces the instance name, service type and TXT record
     /// but does *not* resolve the target host, port or IP addresses — that would
     /// require opening an `NWConnection` per result. iOS records are therefore
-    /// metadata-only (`host = nil`, `port = 0`, `addrs = []`); a `relay`/`address`
-    /// TXT entry, if present, is surfaced through `addrs` as a best effort.
+    /// metadata-only (`host = nil`, `port = 0`, `addrs = []`). Reserved peer
+    /// properties such as `relay` and `address` remain ordinary TXT entries.
     private func handleDnsSdBrowseResults(
         session: DnsSdBrowseSession, results: Set<NWBrowser.Result>
     ) {
-        guard session.state == .starting || session.state == .active else { return }
-        var current: Set<String> = []
+        guard
+            session.lifecycle.state == .starting || session.lifecycle.state == .active
+        else { return }
+        var records: [DiscoveryDnsSdRecord] = []
 
         for result in results {
-            guard case .service(let name, let type, _, _) = result.endpoint else { continue }
-            current.insert(name)
+            guard case .service(let name, _, _, _) = result.endpoint else { continue }
 
             var txt: [String: String] = [:]
             if case .bonjour(let txtRecord) = result.metadata {
                 txt = decodeTxtRecord(txtRecord)
             }
+            records.append(
+                DiscoveryDnsSdRecord(
+                    serviceType: session.serviceType,
+                    instanceName: name,
+                    txt: txt
+                )
+            )
+        }
 
-            var addrs: [String] = []
-            if let addr = txt["address"], !addr.isEmpty { addrs.append(addr) }
-            if let relay = txt["relay"], !relay.isEmpty { addrs.append(relay) }
-
-            let snapshot = DnsSdRecordSnapshot(txt: txt, addrs: addrs)
-            if session.knownInstances[name] == snapshot { continue }
-            let isReemit = session.knownInstances[name] != nil
-            session.knownInstances[name] = snapshot
+        let changes = session.lifecycle.nativeSnapshot(
+            generation: session.id,
+            records: records
+        )
+        for change in changes where change.record.isActive {
             // #334: greppable trace of the re-emit dedup. A known instance whose
-            // TXT/addrs changed re-surfaces here (`event=reemit`) instead of
+            // TXT changed re-surfaces here (`event=reemit`) instead of
             // being suppressed forever by a one-shot Set. `rev` mirrors the
             // example app's mutate counter when present.
             NSLog(
-                "IROH_DNSSD_CHECK reemit instance=\(name) event=\(isReemit ? "reemit" : "new") rev=\(txt["rev"] ?? "-")"
+                "IROH_DNSSD_CHECK reemit instance=\(change.record.instanceName) event=\(change.isUpdate ? "reemit" : "new") rev=\(change.record.txt["rev"] ?? "-")"
             )
-
-            session.pendingRecords.append([
-                "isActive": true,
-                "serviceType": type,
-                "instanceName": name,
-                "host": NSNull(),
-                "port": 0,
-                "addrs": addrs,
-                "txt": txt,
-            ])
-        }
-
-        // Emit inactive records for instances that vanished.
-        let expired = Set(session.knownInstances.keys).subtracting(current).sorted()
-        for name in expired {
-            session.knownInstances.removeValue(forKey: name)
-            session.pendingRecords.append([
-                "isActive": false,
-                "serviceType": session.serviceType,
-                "instanceName": name,
-                "host": NSNull(),
-                "port": 0,
-                "addrs": [String](),
-                "txt": [String: String](),
-            ])
         }
     }
 
@@ -1065,15 +1074,25 @@ class IrohHttpPlugin: Plugin {
                 ])
                 return
             }
-            let records = session.pendingRecords
-            session.pendingRecords = []
+            let poll = session.lifecycle.poll()
+            let records: [[String: Any]] = poll.records.map { record in
+                [
+                    "isActive": record.isActive,
+                    "serviceType": record.serviceType,
+                    "instanceName": record.instanceName,
+                    "host": NSNull(),
+                    "port": 0,
+                    "addrs": [String](),
+                    "txt": record.txt,
+                ]
+            }
             var payload: [String: Any] = [
-                "status": session.state.pollValue,
+                "status": poll.status,
                 "records": records,
             ]
-            if let error = session.terminalError { payload["error"] = error }
+            if let error = poll.error { payload["error"] = error }
             invoke.resolve(payload)
-            if session.state == .closed || session.state == .failed {
+            if poll.status == "closed" || poll.status == "failed" {
                 self.dnsSdBrowseSessions.removeValue(forKey: args.browseId)
             }
         }
@@ -1083,8 +1102,8 @@ class IrohHttpPlugin: Plugin {
         let args = try invoke.parseArgs(BrowseStopArgs.self)
         queue.async {
             if let session = self.dnsSdBrowseSessions.removeValue(forKey: args.browseId) {
-                let wasStarting = session.state == .starting
-                session.state = .closed
+                let wasStarting = session.lifecycle.state == .starting
+                session.lifecycle.stop()
                 if wasStarting {
                     session.startInvoke.reject("DNS-SD browse closed before becoming ready")
                 }
