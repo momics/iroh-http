@@ -21,8 +21,8 @@ import {
   TXT_KEY_RELAY,
 } from "@momics/iroh-http-tauri";
 import {
-  isRelayUrl,
   type IrohSession,
+  isRelayUrl,
   type NodeOptions,
 } from "@momics/iroh-http-shared";
 // @ts-ignore — .mjs from the shared cross-runtime compliance suite (pure WHATWG).
