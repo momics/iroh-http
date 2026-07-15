@@ -665,6 +665,30 @@ mod tests {
         assert_eq!(handle.0.close_count.load(Ordering::Acquire), 1);
     }
 
+    #[tokio::test]
+    async fn cancelled_successful_update_is_reconciled_and_deduplicated() {
+        let handle = FakeAdvertisement::new(false, true);
+        let session = Arc::new(AdvertisementSession::new(handle.clone()));
+        let update = AdvertisementUpdate {
+            port: 8443,
+            addrs: vec!["192.168.1.3".parse().unwrap()],
+            txt: vec![("version".to_string(), "2".to_string())],
+        };
+        let entered = handle.0.entered.notified();
+        let task = tokio::spawn({
+            let session = Arc::clone(&session);
+            let update = update.clone();
+            async move { session.update(update).await }
+        });
+        entered.await;
+
+        task.abort();
+        assert!(matches!(task.await, Err(error) if error.is_cancelled()));
+        handle.0.release.add_permits(1);
+        assert!(!session.update(update).await.unwrap());
+        assert_eq!(handle.0.completed.load(Ordering::Acquire), 1);
+    }
+
     #[allow(dead_code)]
     async fn assert_box_future_is_send() {
         fn require_send(_: impl Send) {}

@@ -37,7 +37,7 @@ use std::{
 };
 
 #[cfg(feature = "mdns")]
-use futures::stream::BoxStream;
+use futures::{stream::BoxStream, FutureExt};
 
 #[cfg(feature = "mdns")]
 use iroh::{
@@ -791,12 +791,25 @@ pub fn advertise_peer(
     // and ports. mdns-sd's unconstrained auto-expansion could add an unbound
     // family, so it stays disabled for the peer specialization.
     let mut session = dns_sd::advertise_selected_addrs(config, false)?;
-    let updater = session.updater();
-    let refresh_updater = updater.clone();
+    let engine_session = session.engine_session();
+    let refresh_session = Arc::clone(&engine_session);
     let service_name = service_name.to_string();
     let closed = ep.closed();
-    let refresh = async move {
-        while let Ok(node_addr) = watcher.updated().await {
+    let refresh = move |cancel: futures::channel::oneshot::Receiver<()>| async move {
+        let cancel = cancel.fuse();
+        let closed = closed.fuse();
+        futures::pin_mut!(cancel, closed);
+        loop {
+            let updated = watcher.updated().fuse();
+            futures::pin_mut!(updated);
+            let node_addr = futures::select_biased! {
+                _ = cancel => return false,
+                _ = closed => return true,
+                node_addr = updated => match node_addr {
+                    Ok(node_addr) => node_addr,
+                    Err(_) => return true,
+                },
+            };
             let config = match peer_service_config(
                 &service_name,
                 &instance,
@@ -809,7 +822,7 @@ pub fn advertise_peer(
                     continue;
                 }
             };
-            if let Err(error) = refresh_updater.update(config) {
+            if let Err(error) = dns_sd::update_advertisement(&refresh_session, &config).await {
                 tracing::warn!(%error, "iroh-http-discovery: peer advertisement refresh failed");
                 // A live handle must never silently represent stale TXT. Ending
                 // the worker runs its unregister finalizer; a caller can then
@@ -817,12 +830,13 @@ pub fn advertise_peer(
                 break;
             }
         }
+        true
     };
-    let finish = updater.clone();
-    let worker = dns_sd::spawn_refresh_until_closed(closed, refresh, move || {
+    let finish = Arc::clone(&engine_session);
+    let worker = dns_sd::spawn_refresh_worker(refresh, move || {
         // Endpoint close and unexpected watcher termination both retract the
         // registration even if the caller keeps the session object alive.
-        finish.unregister();
+        finish.close();
     })?;
     session.set_refresh_worker(worker);
     // Close may race registration and worker installation. Reject when close

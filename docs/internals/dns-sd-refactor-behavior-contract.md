@@ -118,7 +118,7 @@ cannot restart a session or emit records from it.
 | Native closed/failed poll | A missing handle is `closed`, not an empty active batch. A failed session reports its error once and terminates. Records in an authoritative terminal batch are not applied or emitted. | Android terminal-consumption harness; Tauri `terminal_batch_updates_are_not_applied_or_emitted`; `unexpected_pump_terminal_wakes_and_closes_the_session` in `dns_sd.rs`. |
 | Explicit `return()`, abort, or terminal null | Close is invoked at most once, active async close is awaited, later `next()` is done, and close failure is surfaced once. A poll/start error remains primary if cleanup also fails. | `terminal null is sticky and closes exactly once`, `return waits for an active asynchronous native close`, `next after abort between records awaits asynchronous close`, `poll failure remains primary when cleanup also fails`, and `return reports a native close failure only once`. |
 | Endpoint closes while peer browse is pending | Pending `next()` wakes, its source is retired, and future lookup results are empty. | `endpoint_close_wakes_peer_next_and_retires_its_source` in discovery `lib.rs`. |
-| Endpoint address/relay changes during peer advertise | Re-register the same service identity/outer handle with the new snapshot. Stop the refresh worker before unregistering. | `changed_advertisement_rebuilds_the_record_and_deduplicates_snapshots`, Android update/race tests, and the interop `discovery-rebind-reemit` case. |
+| Endpoint address/relay changes during peer advertise | Re-register the same service identity/outer handle with the new mutable SRV port, address, and TXT snapshot. Stop the refresh worker after any started update finishes and before unregistering. | `changed_advertisement_rebuilds_mutable_srv_and_record_data`, `advertisement_session_deduplicates_its_initial_mutable_snapshot`, `refresh_cancellation_joins_after_an_in_flight_update`, Android update/race tests, and the interop `discovery-rebind-reemit` case. |
 
 ## Identity and ownership invariants
 
@@ -132,6 +132,10 @@ cannot restart a session or emit records from it.
   erase a newer replacement or a contribution owned by another browse.
 - Each JavaScript iterator owns one native browse. Each advertisement owns one
   registration and, for peer advertisements, one endpoint-watch refresh task.
+- An advertisement's service name, protocol, and instance label are its stable
+  DNS-SD identity. Its SRV port, addresses, and TXT properties are the mutable
+  snapshot; peer refresh may change the chosen SRV port when the endpoint's
+  eligible listener/interface family changes.
 - Peer sessions are owned by endpoint plus invoking WebView in Tauri. Generic
   sessions are owned by the invoking WebView. Endpoint replacement/close
   retires only that endpoint's peer sessions; WebView advance/destruction

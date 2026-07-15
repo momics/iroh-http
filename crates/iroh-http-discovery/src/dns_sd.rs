@@ -16,16 +16,18 @@ use std::{
     net::{IpAddr, SocketAddr, SocketAddrV6},
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc, Mutex,
+        Arc, Condvar, Mutex,
     },
     thread,
 };
 
-use futures::FutureExt;
 use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
 
 use crate::{
-    engine::{service_type, BoxFuture, BrowseHandle, RawEvent, TransportError},
+    engine::{
+        service_type, AdvertisementHandle, AdvertisementSession as EngineAdvertisementSession,
+        AdvertisementUpdate, BoxFuture, BrowseHandle, RawEvent, TransportError,
+    },
     DiscoveryError,
 };
 
@@ -46,13 +48,26 @@ fn retry_daemon_command<T>(mut command: impl FnMut() -> mdns_sd::Result<T>) -> m
     }
 }
 
-fn retire_after_enqueue<T, E>(
-    current: &mut Option<ServiceConfig>,
-    enqueue: impl FnOnce() -> Result<T, E>,
-) -> Result<T, E> {
-    let response = enqueue()?;
-    current.take();
-    Ok(response)
+fn stop_after_unregister<U, S>(
+    unregister: impl FnMut() -> mdns_sd::Result<U>,
+    shutdown: impl FnMut() -> mdns_sd::Result<S>,
+) -> mdns_sd::Result<()> {
+    let unregistered = retry_daemon_command(unregister);
+    let stopped = if matches!(unregistered, Err(mdns_sd::Error::DaemonShutdown)) {
+        Ok(())
+    } else {
+        retry_daemon_command(shutdown).map(|_| ()).or_else(|error| {
+            if error == mdns_sd::Error::DaemonShutdown {
+                Ok(())
+            } else {
+                Err(error)
+            }
+        })
+    };
+    match unregistered {
+        Ok(_) | Err(mdns_sd::Error::DaemonShutdown) => stopped,
+        Err(error) => Err(error),
+    }
 }
 
 // ── Service-type helpers ─────────────────────────────────────────────────────
@@ -171,69 +186,137 @@ fn service_info(
     })
 }
 
-fn register_changed(
-    current: &mut Option<ServiceConfig>,
-    next: ServiceConfig,
-    enable_addr_auto: bool,
-    register: impl FnOnce(ServiceInfo) -> Result<(), DiscoveryError>,
-) -> Result<bool, DiscoveryError> {
-    if current.as_ref() == Some(&next) {
-        return Ok(false);
+fn advertisement_update(config: &ServiceConfig) -> AdvertisementUpdate {
+    AdvertisementUpdate {
+        port: config.port,
+        addrs: config.addrs.clone(),
+        txt: config.txt.clone(),
     }
-    register(service_info(&next, enable_addr_auto)?)?;
-    *current = Some(next);
-    Ok(true)
 }
 
-#[derive(Clone)]
-pub(crate) struct AdvertiseUpdater {
+struct MdnsAdvertisementState {
+    close_result: Option<Result<(), TransportError>>,
+}
+
+struct MdnsAdvertisement {
+    shared: Arc<MdnsAdvertisementShared>,
+}
+
+struct MdnsAdvertisementShared {
     daemon: ServiceDaemon,
     fullname: String,
-    current: Arc<Mutex<Option<ServiceConfig>>>,
+    base: ServiceConfig,
+    operation: Mutex<()>,
+    state: Mutex<MdnsAdvertisementState>,
     enable_addr_auto: bool,
+    closing: AtomicBool,
+    closed: tokio::sync::Notify,
+    closed_blocking: Condvar,
 }
 
-impl AdvertiseUpdater {
-    pub(crate) fn update(&self, next: ServiceConfig) -> Result<bool, DiscoveryError> {
-        let mut current = self
-            .current
+impl MdnsAdvertisementShared {
+    fn cleanup(&self) {
+        let _operation = self
+            .operation
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        if current.is_none() {
-            return Ok(false);
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        if state.close_result.is_some() {
+            return;
         }
-        register_changed(&mut current, next, self.enable_addr_auto, |info| {
-            if info.get_fullname() != self.fullname {
-                return Err(DiscoveryError::Setup(
-                    "cannot change an active DNS-SD advertisement identity".to_string(),
+        let result = stop_after_unregister(
+            || self.daemon.unregister(&self.fullname),
+            || self.daemon.shutdown(),
+        )
+        .map_err(|error| {
+            if error != mdns_sd::Error::DaemonShutdown {
+                tracing::warn!(%error, "iroh-http-discovery: could not enqueue DNS-SD unregister");
+            }
+            TransportError::new(error.to_string())
+        });
+        state.close_result = Some(result);
+        self.closed_blocking.notify_all();
+        self.closed.notify_waiters();
+    }
+
+    fn wait_closed_blocking(&self) {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        while state.close_result.is_none() {
+            state = self
+                .closed_blocking
+                .wait(state)
+                .unwrap_or_else(|error| error.into_inner());
+        }
+    }
+}
+
+impl AdvertisementHandle for MdnsAdvertisement {
+    fn update(&self, update: AdvertisementUpdate) -> BoxFuture<'_, Result<(), TransportError>> {
+        Box::pin(async move {
+            if self.shared.closing.load(Ordering::Acquire) {
+                return Err(TransportError::new("advertisement is closed"));
+            }
+            let _operation = self
+                .shared
+                .operation
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if self.shared.closing.load(Ordering::Acquire) {
+                return Err(TransportError::new("advertisement is closed"));
+            }
+            let next = ServiceConfig {
+                port: update.port,
+                addrs: update.addrs,
+                txt: update.txt,
+                ..self.shared.base.clone()
+            };
+            let info = service_info(&next, self.shared.enable_addr_auto)
+                .map_err(|error| TransportError::new(error.to_string()))?;
+            if info.get_fullname() != self.shared.fullname {
+                return Err(TransportError::new(
+                    "cannot change an active DNS-SD advertisement identity",
                 ));
             }
-            self.daemon
+            self.shared
+                .daemon
                 .register(info)
-                .map_err(|error| DiscoveryError::Setup(error.to_string()))
+                .map_err(|error| TransportError::new(error.to_string()))?;
+            Ok(())
         })
     }
 
-    pub(crate) fn unregister(&self) {
-        let mut current = self
-            .current
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        if current.is_none() {
+    fn request_close(&self) {
+        if self.shared.closing.swap(true, Ordering::AcqRel) {
             return;
         }
-        match retire_after_enqueue(&mut current, || {
-            retry_daemon_command(|| self.daemon.unregister(&self.fullname))
-        }) {
-            Ok(_) => {}
-            Err(mdns_sd::Error::DaemonShutdown) => {
-                // A stopped daemon cannot still advertise the record.
-                current.take();
-            }
-            Err(error) => {
-                tracing::warn!(%error, "iroh-http-discovery: could not enqueue DNS-SD unregister; retaining state for retry");
-            }
+        let shared = Arc::clone(&self.shared);
+        let cleanup = Arc::clone(&shared);
+        if let Err(error) = thread::Builder::new()
+            .name("iroh-http-mdns-cleanup".to_string())
+            .spawn(move || cleanup.cleanup())
+        {
+            tracing::warn!(%error, "iroh-http-discovery: could not start cleanup worker; cleaning up inline");
+            shared.cleanup();
         }
+    }
+
+    fn closed(&self) -> BoxFuture<'_, Result<(), TransportError>> {
+        Box::pin(async move {
+            loop {
+                let notified = self.shared.closed.notified();
+                if let Some(result) = self
+                    .shared
+                    .state
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .close_result
+                    .clone()
+                {
+                    return result;
+                }
+                notified.await;
+            }
+        })
     }
 }
 
@@ -243,9 +326,19 @@ impl AdvertiseUpdater {
 /// session's mDNS daemon down. A peer-specialized session can also own a refresh
 /// worker; drop cancels and joins that worker before unregistering.
 pub struct AdvertiseSession {
-    daemon: ServiceDaemon,
-    updater: AdvertiseUpdater,
+    session: Arc<EngineAdvertisementSession>,
+    cleanup: Arc<MdnsAdvertisementShared>,
     refresh_worker: Option<RefreshWorker>,
+}
+
+pub(crate) async fn update_advertisement(
+    session: &EngineAdvertisementSession,
+    next: &ServiceConfig,
+) -> Result<bool, DiscoveryError> {
+    session
+        .update(advertisement_update(next))
+        .await
+        .map_err(|error| DiscoveryError::Setup(error.to_string()))
 }
 
 pub(crate) struct RefreshWorker {
@@ -268,32 +361,29 @@ impl RefreshWorker {
     }
 }
 
-pub(crate) fn spawn_refresh_until_closed<C, R, F>(
-    closed: C,
+pub(crate) fn spawn_refresh_worker<R, RF, F>(
     refresh: R,
     on_finish: F,
 ) -> Result<RefreshWorker, DiscoveryError>
 where
-    C: Future<Output = ()> + Send + 'static,
-    R: Future<Output = ()> + Send + 'static,
+    R: FnOnce(futures::channel::oneshot::Receiver<()>) -> RF + Send + 'static,
+    RF: Future<Output = bool> + Send + 'static,
     F: FnOnce() + Send + 'static,
 {
     let (cancel, cancel_rx) = futures::channel::oneshot::channel();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| {
+            DiscoveryError::Setup(format!("cannot create peer advertisement runtime: {error}"))
+        })?;
     let thread = thread::Builder::new()
         .name("iroh-http-mdns-refresh".to_string())
         .spawn(move || {
-            futures::executor::block_on(async move {
-                let cancel = cancel_rx.fuse();
-                let closed = closed.fuse();
-                let refresh = refresh.fuse();
-                futures::pin_mut!(cancel, closed, refresh);
-                futures::select_biased! {
-                    _ = cancel => {}
-                    _ = closed => {}
-                    _ = refresh => {}
-                }
-            });
-            on_finish();
+            let terminal = runtime.block_on(refresh(cancel_rx));
+            if terminal {
+                on_finish();
+            }
         })
         .map_err(|error| {
             DiscoveryError::Setup(format!("cannot start peer advertisement refresh: {error}"))
@@ -305,8 +395,8 @@ where
 }
 
 impl AdvertiseSession {
-    pub(crate) fn updater(&self) -> AdvertiseUpdater {
-        self.updater.clone()
+    pub(crate) fn engine_session(&self) -> Arc<EngineAdvertisementSession> {
+        Arc::clone(&self.session)
     }
 
     pub(crate) fn set_refresh_worker(&mut self, worker: RefreshWorker) {
@@ -320,8 +410,8 @@ impl Drop for AdvertiseSession {
         if let Some(mut worker) = self.refresh_worker.take() {
             worker.cancel();
         }
-        self.updater.unregister();
-        let _ = retry_daemon_command(|| self.daemon.shutdown());
+        self.session.close();
+        self.cleanup.wait_closed_blocking();
     }
 }
 
@@ -363,16 +453,25 @@ fn advertise_inner(
         let _ = retry_daemon_command(|| daemon.shutdown());
         return Err(DiscoveryError::Setup(error.to_string()));
     }
-
-    let updater = AdvertiseUpdater {
-        daemon: daemon.clone(),
-        fullname: fullname.clone(),
-        current: Arc::new(Mutex::new(Some(config))),
-        enable_addr_auto,
-    };
-    Ok(AdvertiseSession {
+    let initial = advertisement_update(&config);
+    let cleanup = Arc::new(MdnsAdvertisementShared {
         daemon,
-        updater,
+        fullname,
+        base: config,
+        operation: Mutex::new(()),
+        state: Mutex::new(MdnsAdvertisementState { close_result: None }),
+        enable_addr_auto,
+        closing: AtomicBool::new(false),
+        closed: tokio::sync::Notify::new(),
+        closed_blocking: Condvar::new(),
+    });
+    let adapter = MdnsAdvertisement {
+        shared: Arc::clone(&cleanup),
+    };
+    let session = Arc::new(EngineAdvertisementSession::with_initial(adapter, initial));
+    Ok(AdvertiseSession {
+        session,
+        cleanup,
         refresh_worker: None,
     })
 }
@@ -538,6 +637,8 @@ pub(crate) fn controlled_test_browse() -> (BrowseSession, futures::channel::ones
 
 #[cfg(test)]
 mod tests {
+    use futures::FutureExt;
+
     use super::*;
 
     #[test]
@@ -640,7 +741,7 @@ mod tests {
     }
 
     #[test]
-    fn changed_advertisement_rebuilds_the_record_and_deduplicates_snapshots() {
+    fn changed_advertisement_rebuilds_mutable_srv_and_record_data() {
         let initial = ServiceConfig {
             service_name: "iroh-http".to_string(),
             instance_name: "peer".to_string(),
@@ -650,58 +751,43 @@ mod tests {
             protocol: Protocol::Udp,
         };
         let updated = ServiceConfig {
+            port: 8443,
             addrs: vec!["192.168.1.3".parse().unwrap(), "fd00::3".parse().unwrap()],
             txt: vec![(
                 "address".to_string(),
                 "192.168.1.3:4433,[fd00::3]:4433".to_string(),
             )],
-            ..initial.clone()
+            ..initial
         };
-        let mut current = Some(initial);
-        let mut registered = Vec::new();
+        let update = advertisement_update(&updated);
+        let info = service_info(&updated, true).unwrap();
 
-        assert!(
-            register_changed(&mut current, updated.clone(), true, |info| {
-                registered.push(info);
-                Ok(())
-            })
-            .unwrap()
-        );
-        assert_eq!(registered.len(), 1);
+        assert_eq!(update.port, 8443);
+        assert_eq!(update.addrs, updated.addrs);
+        assert_eq!(update.txt, updated.txt);
+        assert_eq!(info.get_port(), 8443);
         assert_eq!(
-            registered[0].get_property_val_str("address"),
+            info.get_property_val_str("address"),
             Some("192.168.1.3:4433,[fd00::3]:4433")
-        );
-        assert!(!register_changed(&mut current, updated, true, |info| {
-            registered.push(info);
-            Ok(())
-        })
-        .unwrap());
-        assert_eq!(
-            registered.len(),
-            1,
-            "an unchanged snapshot is not re-announced"
         );
     }
 
     #[test]
-    fn failed_unregister_enqueue_keeps_registration_state_for_retry() {
-        let config = ServiceConfig {
-            service_name: "iroh-http".to_string(),
-            instance_name: "peer".to_string(),
-            port: 4433,
-            addrs: vec!["192.168.1.2".parse().unwrap()],
-            txt: Vec::new(),
-            protocol: Protocol::Udp,
-        };
-        let mut current = Some(config);
+    fn failed_unregister_still_shuts_the_daemon_down() {
+        let shutdowns = std::cell::Cell::new(0);
 
-        let first = retire_after_enqueue(&mut current, || Err::<(), _>("queue full"));
-        assert_eq!(first, Err("queue full"));
-        assert!(current.is_some(), "a failed enqueue remains retryable");
+        let result = stop_after_unregister(
+            || Err::<(), _>(mdns_sd::Error::Msg("unregister failed".to_string())),
+            || {
+                shutdowns.set(shutdowns.get() + 1);
+                Ok(())
+            },
+        );
 
-        retire_after_enqueue(&mut current, || Ok::<_, &str>(())).unwrap();
-        assert!(current.is_none(), "successful retry retires the state");
+        assert!(
+            matches!(result, Err(mdns_sd::Error::Msg(message)) if message == "unregister failed")
+        );
+        assert_eq!(shutdowns.get(), 1);
     }
 
     #[tokio::test]
@@ -764,14 +850,22 @@ mod tests {
         let (started_tx, started_rx) = mpsc::channel();
         let (closed_drop_tx, closed_drop_rx) = mpsc::channel();
         let (finished_tx, finished_rx) = mpsc::channel();
-        let mut closed_worker = spawn_refresh_until_closed(
-            async move {
-                let _ = close_rx.await;
-            },
-            async move {
-                started_tx.send(()).unwrap();
-                let _notify = DropNotify(Some(closed_drop_tx));
-                pending::<()>().await;
+        let mut closed_worker = spawn_refresh_worker(
+            move |cancel| async move {
+                let cancel = cancel.fuse();
+                let closed = close_rx.fuse();
+                let refresh = async move {
+                    started_tx.send(()).unwrap();
+                    let _notify = DropNotify(Some(closed_drop_tx));
+                    pending::<()>().await;
+                }
+                .fuse();
+                futures::pin_mut!(cancel, closed, refresh);
+                futures::select_biased! {
+                    _ = cancel => false,
+                    _ = closed => true,
+                    _ = refresh => true,
+                }
             },
             move || finished_tx.send(()).unwrap(),
         )
@@ -784,12 +878,20 @@ mod tests {
 
         let (abort_started_tx, abort_started_rx) = mpsc::channel();
         let (abort_drop_tx, abort_drop_rx) = mpsc::channel();
-        let mut cancelled_worker = spawn_refresh_until_closed(
-            pending::<()>(),
-            async move {
-                abort_started_tx.send(()).unwrap();
-                let _notify = DropNotify(Some(abort_drop_tx));
-                pending::<()>().await;
+        let mut cancelled_worker = spawn_refresh_worker(
+            move |cancel| async move {
+                let cancel = cancel.fuse();
+                let refresh = async move {
+                    abort_started_tx.send(()).unwrap();
+                    let _notify = DropNotify(Some(abort_drop_tx));
+                    pending::<()>().await;
+                }
+                .fuse();
+                futures::pin_mut!(cancel, refresh);
+                futures::select_biased! {
+                    _ = cancel => false,
+                    _ = refresh => true,
+                }
             },
             || {},
         )
@@ -801,14 +903,46 @@ mod tests {
         abort_drop_rx.recv_timeout(Duration::from_secs(1)).unwrap();
 
         let (refresh_finished_tx, refresh_finished_rx) = mpsc::channel();
-        let mut terminal_worker =
-            spawn_refresh_until_closed(pending::<()>(), futures::future::ready(()), move || {
-                refresh_finished_tx.send(()).unwrap()
-            })
-            .unwrap();
+        let mut terminal_worker = spawn_refresh_worker(
+            |_| futures::future::ready(true),
+            move || refresh_finished_tx.send(()).unwrap(),
+        )
+        .unwrap();
         refresh_finished_rx
             .recv_timeout(Duration::from_secs(1))
             .expect("refresh termination must run the unregister finalizer");
         terminal_worker.cancel();
+    }
+
+    #[test]
+    fn refresh_cancellation_joins_after_an_in_flight_update() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = futures::channel::oneshot::channel();
+        let worker = spawn_refresh_worker(
+            move |cancel| async move {
+                started_tx.send(()).unwrap();
+                let _ = release_rx.await;
+                let _ = cancel.await;
+                false
+            },
+            || panic!("caller cancellation is not a terminal refresh"),
+        )
+        .unwrap();
+        started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+
+        let (joined_tx, joined_rx) = mpsc::channel();
+        thread::spawn(move || {
+            let mut worker = worker;
+            worker.cancel();
+            joined_tx.send(()).unwrap();
+        });
+        assert!(joined_rx.recv_timeout(Duration::from_millis(20)).is_err());
+        release_tx.send(()).unwrap();
+        joined_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("worker must join after the in-flight update finishes");
     }
 }
