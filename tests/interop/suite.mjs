@@ -66,6 +66,12 @@ function directAddrsOf(peer, isDialableSocketAddr) {
   );
 }
 
+/** Relay URL advertised out-of-band by the selected peer. */
+function relayUrlOf(peer) {
+  if (!peer || !Array.isArray(peer.addrs)) return null;
+  return peer.addrs.find((addr) => /^(https?|relay):\/\//i.test(addr)) ?? null;
+}
+
 /**
  * Build the grouped suite for a given runtime context.
  *
@@ -78,8 +84,13 @@ function directAddrsOf(peer, isDialableSocketAddr) {
  * @param {object}  ctx.selfLoopbackCase  ADR-015 baseline case.
  * @param {Function} ctx.runCases   `harness.mjs#runCases`.
  * @param {object}  ctx.handler     Compliance request handler (for serve-stop).
+ * @param {Function} [ctx.createIsolatedNode] Creates a fresh IrohNode from an
+ *                        isolation request `{ purpose, nodeOptions }` for
+ *                        connection/lifecycle probes that must not reuse the
+ *                        app's serving node or its warmed connection pool.
  * @param {object}  ctx.helpers     `{ TXT_KEY_ADDRESS, TXT_KEY_RELAY, isDialableSocketAddr }`.
  * @param {boolean} ctx.isServing   Whether a local service is already bound (testing mode).
+ * @param {boolean} ctx.mdnsCapable Whether generic DNS-SD is available.
  * @returns {Array<{ id: string, name: string, tests: Array }>}
  */
 export function buildSuite(ctx) {
@@ -106,6 +117,7 @@ export function buildSuite(ctx) {
   } = helpers;
 
   const peerDirect = directAddrsOf(peer, isDialableSocketAddr);
+  const peerRelayUrl = relayUrlOf(peer);
 
   // ── discovery ──────────────────────────────────────────────────────────────
   const discoveryTests = [
@@ -341,6 +353,7 @@ export function buildSuite(ctx) {
           const res = await fetch(`httpi://${peer.nodeId}/hello`, {
             method: "GET",
             directAddrs: peerDirect,
+            ...(peerRelayUrl ? { relayUrl: peerRelayUrl } : {}),
           });
           status = res.status;
           await res.arrayBuffer();
@@ -364,9 +377,10 @@ export function buildSuite(ctx) {
             skip: true,
             latencyMs,
             transport,
-            detail: `HTTP ${status} via ${
-              peerDirect[0]
-            } — transport undetermined (peerStats unavailable); cannot confirm direct`,
+            detail:
+              `HTTP ${status}; ${peerDirect.length} advertised direct address hint${
+                peerDirect.length === 1 ? "" : "s"
+              } supplied — transport undetermined (peerStats unavailable); cannot confirm direct`,
           };
         }
         const ok = fetchOk && transport === "direct";
@@ -375,7 +389,9 @@ export function buildSuite(ctx) {
           latencyMs,
           transport,
           detail:
-            `HTTP ${status} via ${peerDirect[0]} — transport=${transport}` +
+            `HTTP ${status}; ${peerDirect.length} advertised direct address hint${
+              peerDirect.length === 1 ? "" : "s"
+            } supplied — measured transport=${transport}` +
             (transport === "relay"
               ? " (reached over RELAY, not direct ✗)"
               : ""),
@@ -399,15 +415,41 @@ export function buildSuite(ctx) {
             detail: "no peer selected",
           };
         }
+        if (!peerRelayUrl) {
+          return {
+            ok: false,
+            skip: true,
+            latencyMs: 0,
+            detail: "peer advertised no relay URL",
+          };
+        }
         const t = now();
         let status = null;
+        let transport = "unknown";
+        let probeNode = node;
+        let isolated = false;
         try {
-          // Omit directAddrs so the stack must fall back to relay routing.
-          const res = await fetch(`httpi://${peer.nodeId}/hello`, {
+          // A fresh endpoint has no connection to reuse from direct-dial. DNS
+          // is disabled and the peer's advertised relay URL is supplied
+          // explicitly, so no direct discovery or direct hint can enter the
+          // probe.
+          if (ctx.createIsolatedNode) {
+            probeNode = await ctx.createIsolatedNode({
+              purpose: "relay-fallback",
+              nodeOptions: { discovery: { dns: false } },
+            });
+            isolated = true;
+          }
+          const probeFetch = isolated
+            ? (url, init) => probeNode.fetch(url, init)
+            : fetch;
+          const res = await probeFetch(`httpi://${peer.nodeId}/hello`, {
             method: "GET",
+            relayUrl: peerRelayUrl,
           });
           status = res.status;
           await res.arrayBuffer();
+          transport = await detectTransport(probeNode, peer.nodeId);
         } catch (e) {
           return {
             ok: false,
@@ -415,27 +457,24 @@ export function buildSuite(ctx) {
             transport: "unknown",
             detail: `fetch failed: ${e}`,
           };
+        } finally {
+          if (isolated) await probeNode.close().catch(() => {});
         }
         const latencyMs = round(now() - t);
-        const transport = await detectTransport(node, peer.nodeId);
         const fetchOk = status != null && status < 500;
-        // F8: this case only proves relay fallback if the measured transport is
-        // actually "relay". Because a prior direct-dial in the same run may have
-        // warmed a pooled direct connection that this fetch reuses, omitting
-        // directAddrs does NOT guarantee relay routing. A direct/unknown result
-        // is therefore inconclusive — skip rather than falsely pass a relay
-        // claim. (A truly relay-only client — fresh node, direct discovery
-        // disabled — is tracked as a follow-up; the single shared harness node
-        // cannot isolate it.)
+        // Only measured relay proves this release gate. Iroh may upgrade an
+        // explicitly relay-bootstrapped connection to direct before this
+        // post-fetch peerStats snapshot, so direct/unknown remains inconclusive
+        // and requires a network-isolated rerun.
         if (fetchOk && transport !== "relay") {
           return {
             ok: false,
             skip: true,
             latencyMs,
             transport,
-            detail:
-              `HTTP ${status} — transport=${transport}; relay not exercised ` +
-              "(reused/available direct path — cannot confirm relay fallback in a shared-node harness)",
+            detail: isolated
+              ? `HTTP ${status}; fresh endpoint measured transport=${transport} — relay fallback not exercised`
+              : `HTTP ${status}; shared endpoint measured transport=${transport} — relay fallback inconclusive`,
           };
         }
         return {
@@ -472,7 +511,13 @@ export function buildSuite(ctx) {
         let caseResult = null;
         try {
           await runCases({
-            fetch: (url, init) => fetch(url, init),
+            fetch: (url, init) =>
+              fetch(url, {
+                ...init,
+                ...(!againstSelf && peerRelayUrl
+                  ? { relayUrl: peerRelayUrl }
+                  : {}),
+              }),
             serverId,
             directAddrs: againstSelf || !peerDirect.length
               ? undefined
@@ -519,13 +564,13 @@ export function buildSuite(ctx) {
       group: "serve-stop",
       name: "serve → reachable → stop → refused",
       async run() {
-        if (isServing) {
+        if (isServing && !ctx.createIsolatedNode) {
           return {
             ok: false,
             skip: true,
             latencyMs: 0,
             detail:
-              "a local service is already bound (testing mode). Disable testing mode to run the standalone serve→stop lifecycle.",
+              "a local service is already bound and no isolated-node factory is available",
           };
         }
         if (!ctx.handler) {
@@ -541,48 +586,70 @@ export function buildSuite(ctx) {
         let reachable = false;
         let refused = false;
         let handle = null;
+        let probeNode = node;
+        let isolated = false;
         try {
-          handle = node.serve({ signal: ac.signal }, ctx.handler);
-          const res = await fetch(`httpi://${self.nodeId}/hello`, {
+          if (isServing) {
+            probeNode = await ctx.createIsolatedNode({
+              purpose: "serve-stop",
+              nodeOptions: { disableNetworking: true },
+            });
+            isolated = true;
+          }
+          const probeId = isolated
+            ? probeNode.publicKey.toString()
+            : self.nodeId;
+          const probeFetch = isolated
+            ? (url, init) => probeNode.fetch(url, init)
+            : fetch;
+          handle = probeNode.serve({ signal: ac.signal }, ctx.handler);
+          const res = await probeFetch(`httpi://${probeId}/hello`, {
             method: "GET",
           });
           reachable = res.status < 500;
           await res.arrayBuffer();
-        } catch (e) {
+          // Deterministically await the serve loop's shutdown contract. Clear
+          // the timeout immediately when shutdown finishes so headless runners
+          // do not stay alive for an unnecessary five seconds.
           ac.abort();
+          let stopTimer;
+          try {
+            const finished = handle?.finished ?? Promise.resolve();
+            await Promise.race([
+              finished,
+              new Promise((_r, reject) => {
+                stopTimer = setTimeout(
+                  () => reject(new Error("serve stop timed out")),
+                  5000,
+                );
+              }),
+            ]);
+          } catch {
+            /* probe reachability regardless */
+          } finally {
+            clearTimeout(stopTimer);
+          }
+          try {
+            await probeFetch(`httpi://${probeId}/hello`, { method: "GET" });
+          } catch {
+            refused = true;
+          }
+          return {
+            ok: reachable && refused,
+            latencyMs: round(now() - t),
+            detail:
+              `reachable-while-serving=${reachable} refused-after-stop=${refused}`,
+          };
+        } catch (e) {
           return {
             ok: false,
             latencyMs: round(now() - t),
             detail: `serve/reach failed: ${e}`,
           };
+        } finally {
+          ac.abort();
+          if (isolated) await probeNode.close().catch(() => {});
         }
-        // F20: deterministically await the serve loop's own shutdown contract
-        // (ServeHandle.finished) instead of sleeping a fixed 300ms and hoping the
-        // loop has drained. Bound the wait so a stuck stop can't hang the suite.
-        ac.abort();
-        try {
-          const finished = handle?.finished ?? Promise.resolve();
-          await Promise.race([
-            finished,
-            new Promise((_r, reject) =>
-              setTimeout(() => reject(new Error("serve stop timed out")), 5000)
-            ),
-          ]);
-        } catch {
-          /* fall through: probe reachability regardless */
-        }
-        try {
-          await fetch(`httpi://${self.nodeId}/hello`, { method: "GET" });
-        } catch {
-          refused = true;
-        }
-        const latencyMs = round(now() - t);
-        return {
-          ok: reachable && refused,
-          latencyMs,
-          detail:
-            `reachable-while-serving=${reachable} refused-after-stop=${refused}`,
-        };
       },
     },
   ];
@@ -600,7 +667,12 @@ export function buildSuite(ctx) {
  * Execute a built suite, invoking `onResult` after each test. Emits a stable,
  * greppable `IROH_INTEROP_CASE …` line per test (mirrors `IROH_DNSSD_CHECK`).
  *
- * @returns {Promise<{ groups: Array, results: Array, summary: object }>}
+ * @param {Array} groups
+ * @param {object} options
+ * @param {Function} [options.onResult]
+ * @param {Function} [options.log]
+ * @param {number} [options.deadlineMs]
+ * @returns {Promise<{ groups: Array, results: Array, summary: { total: number, completed: number, pass: number, fail: number, skip: number, transport: { direct: number, relay: number, unknown: number } } }>}
  */
 export async function runSuite(
   groups,
@@ -613,6 +685,16 @@ export async function runSuite(
   let relay = 0;
   let transportTotal = 0;
   const flat = [];
+  const total = groups.reduce((sum, group) => sum + group.tests.length, 0);
+
+  const currentSummary = () => ({
+    total,
+    completed: flat.length,
+    pass,
+    fail,
+    skip,
+    transport: { direct, relay, unknown: transportTotal - direct - relay },
+  });
 
   for (const group of groups) {
     for (const test of group.tests) {
@@ -647,10 +729,10 @@ export async function runSuite(
       if (outcome === "pass") pass += 1;
       else if (outcome === "fail") fail += 1;
       else skip += 1;
-      // F27: only tests that actually measured a transport contribute to the
-      // transport rollup — compliance/serve-stop/discovery cases carry no
-      // transport and must not inflate the "unknown" bucket.
-      if (typeof res.transport === "string") {
+      // Only completed transport probes contribute evidence. A skipped relay
+      // probe may still observe a reused direct path, but that observation does
+      // not prove the release criterion and must not inflate the summary.
+      if (outcome !== "skip" && typeof res.transport === "string") {
         transportTotal += 1;
         if (res.transport === "direct") direct += 1;
         else if (res.transport === "relay") relay += 1;
@@ -677,19 +759,20 @@ export async function runSuite(
       if (log) log(line);
       else if (typeof console !== "undefined") console.log(line);
 
-      onResult?.({ phase: "result", group: group.id, test, result: record });
+      onResult?.({
+        phase: "result",
+        group: group.id,
+        test,
+        result: record,
+        progress: { completed: flat.length, total },
+        summary: currentSummary(),
+      });
     }
   }
 
   return {
     groups,
     results: flat,
-    summary: {
-      total: flat.length,
-      pass,
-      fail,
-      skip,
-      transport: { direct, relay, unknown: transportTotal - direct - relay },
-    },
+    summary: currentSummary(),
   };
 }

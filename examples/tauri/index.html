@@ -406,11 +406,24 @@
             <p id="suite-target" class="hint"></p>
           </div>
 
-          <div id="suite-summary" class="suite-summary hidden">
+          <div
+            id="suite-summary"
+            class="suite-summary hidden"
+            aria-live="polite"
+            aria-busy="false"
+          >
             <span class="pill pill-pass" id="suite-sum-pass">0 pass</span>
             <span class="pill pill-fail" id="suite-sum-fail">0 fail</span>
             <span class="pill pill-skip" id="suite-sum-skip">0 skip</span>
+            <span class="suite-run-status" id="suite-run-status">Idle</span>
             <span class="suite-mix" id="suite-sum-mix"></span>
+            <progress
+              id="suite-progress"
+              class="suite-progress"
+              max="1"
+              value="0"
+              aria-label="Suite progress"
+            ></progress>
           </div>
 
           <div id="suite-groups" class="suite-groups"></div>
