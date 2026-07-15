@@ -8,6 +8,9 @@ mod state;
 
 pub mod mobile_address_lookup;
 
+#[cfg(any(mobile, all(test, feature = "discovery")))]
+mod mobile_discovery_transport;
+
 #[cfg(test)]
 mod tests;
 

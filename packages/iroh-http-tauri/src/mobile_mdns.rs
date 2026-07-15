@@ -12,6 +12,8 @@ use tauri::{
     AppHandle, Runtime,
 };
 
+pub use crate::mobile_discovery_transport::MobileServiceRecord;
+
 // ---------------------------------------------------------------------------
 // iOS native binding
 // ---------------------------------------------------------------------------
@@ -297,24 +299,6 @@ struct DnsSdBrowseStartPayload<'a> {
 }
 
 // ── Incoming responses ───────────────────────────────────────────────────────
-
-/// A single generic DNS-SD record polled from the native layer.
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MobileServiceRecord {
-    /// `true` when the service appeared, `false` when it went away.
-    pub is_active: bool,
-    pub service_type: String,
-    pub instance_name: String,
-    #[serde(default)]
-    pub host: Option<String>,
-    #[serde(default)]
-    pub port: u16,
-    #[serde(default)]
-    pub addrs: Vec<String>,
-    #[serde(default)]
-    pub txt: std::collections::HashMap<String, String>,
-}
 
 #[derive(Debug, Deserialize)]
 pub struct DnsSdBrowsePollResponse {
