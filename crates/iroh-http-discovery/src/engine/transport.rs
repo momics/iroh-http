@@ -23,9 +23,11 @@ impl fmt::Display for TransportError {
 
 impl Error for TransportError {}
 
-/// Mutable advertisement data. Service and instance identity cannot change.
+/// Mutable advertisement data. Service and instance identity cannot change,
+/// while the SRV port, address set, and TXT data may follow a live service.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AdvertisementUpdate {
+    pub port: u16,
     pub addrs: Vec<IpAddr>,
     pub txt: Vec<(String, String)>,
 }

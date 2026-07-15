@@ -45,7 +45,7 @@ impl<T: Clone> InFlight<T> {
 }
 
 type BrowseOutcome = Result<Option<RawEvent>, TransportError>;
-type UpdateOutcome = Result<(), TransportError>;
+type UpdateOutcome = (AdvertisementUpdate, Result<(), TransportError>);
 
 fn clear_operation<T>(slot: &StdMutex<Option<Arc<InFlight<T>>>>, completed: &Arc<InFlight<T>>) {
     let mut slot = slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -173,20 +173,34 @@ pub struct AdvertisementSession {
     handle: Arc<dyn AdvertisementHandle>,
     update_gate: Mutex<()>,
     update_operation: StdMutex<Option<Arc<InFlight<UpdateOutcome>>>>,
+    current_update: StdMutex<Option<AdvertisementUpdate>>,
     closed: AtomicBool,
 }
 
 impl AdvertisementSession {
     pub fn new(handle: impl AdvertisementHandle) -> Self {
+        Self::from_parts(handle, None)
+    }
+
+    /// Create a session whose transport already published `initial`.
+    pub fn with_initial(handle: impl AdvertisementHandle, initial: AdvertisementUpdate) -> Self {
+        Self::from_parts(handle, Some(initial))
+    }
+
+    fn from_parts(
+        handle: impl AdvertisementHandle,
+        current_update: Option<AdvertisementUpdate>,
+    ) -> Self {
         Self {
             handle: Arc::new(handle),
             update_gate: Mutex::new(()),
             update_operation: StdMutex::new(None),
+            current_update: StdMutex::new(current_update),
             closed: AtomicBool::new(false),
         }
     }
 
-    pub async fn update(&self, update: AdvertisementUpdate) -> Result<(), TransportError> {
+    pub async fn update(&self, update: AdvertisementUpdate) -> Result<bool, TransportError> {
         let _guard = self.update_gate.lock().await;
         let previous = {
             self.update_operation
@@ -195,15 +209,28 @@ impl AdvertisementSession {
                 .clone()
         };
         if let Some(previous) = previous {
-            let result = previous.wait().await;
+            let (completed_update, result) = previous.wait().await;
             clear_operation(&self.update_operation, &previous);
             if let Err(error) = result {
                 self.close();
                 return Err(error);
             }
+            *self
+                .current_update
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(completed_update);
         }
         if self.closed.load(Ordering::Acquire) {
             return Err(TransportError::new("advertisement is closed"));
+        }
+        if self
+            .current_update
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            == Some(&update)
+        {
+            return Ok(false);
         }
         let operation = Arc::new(InFlight::new());
         *self
@@ -212,15 +239,26 @@ impl AdvertisementSession {
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Arc::clone(&operation));
         let task_operation = Arc::clone(&operation);
         let handle = Arc::clone(&self.handle);
+        let task_update = update.clone();
         tokio::spawn(async move {
-            task_operation.complete(handle.update(update).await);
+            let result = handle.update(task_update.clone()).await;
+            task_operation.complete((task_update, result));
         });
-        let result = operation.wait().await;
+        let (completed_update, result) = operation.wait().await;
         clear_operation(&self.update_operation, &operation);
-        if result.is_err() {
-            self.close();
+        match result {
+            Ok(()) => {
+                *self
+                    .current_update
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(completed_update);
+                Ok(true)
+            }
+            Err(error) => {
+                self.close();
+                Err(error)
+            }
         }
-        result
     }
 
     pub fn close(&self) {
@@ -524,10 +562,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn advertisement_session_deduplicates_its_initial_mutable_snapshot() {
+        let handle = FakeAdvertisement::new(false, false);
+        let initial = AdvertisementUpdate {
+            port: 4433,
+            addrs: vec!["192.168.1.2".parse().unwrap()],
+            txt: vec![("path".to_string(), "/health".to_string())],
+        };
+        let session = AdvertisementSession::with_initial(handle.clone(), initial.clone());
+
+        assert!(!session.update(initial).await.unwrap());
+        assert_eq!(handle.0.completed.load(Ordering::Acquire), 0);
+    }
+
+    #[tokio::test]
     async fn advertisement_update_failure_closes_and_cleanup_is_awaitable() {
         let handle = FakeAdvertisement::new(true, false);
         let session = AdvertisementSession::new(handle.clone());
         let update = AdvertisementUpdate {
+            port: 4433,
             addrs: Vec::new(),
             txt: Vec::new(),
         };
@@ -557,6 +610,7 @@ mod tests {
             async move {
                 session
                     .update(AdvertisementUpdate {
+                        port: 4433,
                         addrs: Vec::new(),
                         txt: Vec::new(),
                     })
