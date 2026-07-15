@@ -23,6 +23,7 @@ import java.net.Inet6Address
 import java.net.NetworkInterface
 import java.nio.charset.StandardCharsets
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 
@@ -75,11 +76,16 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
         const val MAX_BROWSE_STOP_DISPATCH_ATTEMPTS = 2
         const val INITIAL_STOP_RETRY_DELAY_MILLIS = 25L
         const val MAX_STOP_RETRY_DELAY_MILLIS = 1_000L
+        const val RESOLVE_TIMEOUT_MILLIS = 5_000L
+        const val MAX_RESOLVER_ROTATIONS = 4
     }
 
     private val nextBrowseId = AtomicLong(1)
     private val nextAdvertiseId = AtomicLong(1)
-    private val stopRetryHandler = Handler(Looper.getMainLooper())
+    private val lifecycleHandler = Handler(Looper.getMainLooper())
+    private val resolverRecoveryExecutor = Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, "iroh-http-nsd-recovery").apply { isDaemon = true }
+    }
 
     private enum class NativeSessionState(val pollValue: String) {
         STARTING("active"),
@@ -391,13 +397,20 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
     // this queue so resolves across handles are serialized too.
     private data class ResolveRequest(
         val owner: ResolveOwner,
-        val manager: NsdManager,
+        var manager: NsdManager,
         val serviceInfo: NsdServiceInfo,
-        val listener: NsdManager.ResolveListener
+        val listener: NsdManager.ResolveListener,
+        val completed: AtomicBoolean = AtomicBoolean(false),
+        var timeoutTask: Runnable? = null
     )
 
     private val resolveQueue = java.util.ArrayDeque<ResolveRequest>()
     private var resolveInProgress = false
+    private var activeResolve: ResolveRequest? = null
+    private var resolverManager: NsdManager? = null
+    private var resolverRotationCount = 0
+    /** Process-lifetime terminal state: legacy NsdManager clients cannot be closed. */
+    private var resolverTerminalError: String? = null
 
     private fun enqueueResolve(
         owner: ResolveOwner,
@@ -431,18 +444,151 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
         }
     }
 
-    private fun drainResolveQueue() {
-        var next: ResolveRequest? = null
-        while (next == null) {
-            val candidate = synchronized(resolveQueue) {
-                resolveQueue.pollFirst().also { polled ->
-                    if (polled == null) resolveInProgress = false
+    /**
+     * Retire queued duplicates for a vanished presence. Its active native
+     * resolve retains the single-flight slot until callback or watchdog: loss
+     * is normal DNS-SD churn and is not proof that the resolver client stalled.
+     */
+    private fun retireResolveRequest(owner: ResolveOwner) {
+        synchronized(resolveQueue) {
+            val iterator = resolveQueue.iterator()
+            while (iterator.hasNext()) {
+                if (iterator.next().owner == owner) iterator.remove()
+            }
+        }
+    }
+
+    private fun claimResolve(request: ResolveRequest): Boolean {
+        if (!request.completed.compareAndSet(false, true)) return false
+        request.timeoutTask?.let { lifecycleHandler.removeCallbacks(it) }
+        request.timeoutTask = null
+        return true
+    }
+
+    private fun finishClaimedResolve(request: ResolveRequest, callback: (() -> Unit)? = null) {
+        try {
+            callback?.invoke()
+        } finally {
+            synchronized(resolveQueue) {
+                if (activeResolve === request) activeResolve = null
+            }
+            drainResolveQueue()
+        }
+    }
+
+    private fun completeResolve(request: ResolveRequest, callback: (() -> Unit)? = null) {
+        if (!claimResolve(request)) return
+        finishClaimedResolve(request, callback)
+    }
+
+    /**
+     * Replace a legacy resolver client whose native single-flight slot may be
+     * poisoned. A configuration context owns a separate system-service cache,
+     * so Android creates a new NsdManager client instead of returning the
+     * instance whose unresolved request can no longer be cancelled on API 21–33.
+     */
+    private fun freshResolverManager(): NsdManager? = try {
+        activity
+            .createConfigurationContext(activity.resources.configuration)
+            .getSystemService(Context.NSD_SERVICE) as? NsdManager
+    } catch (error: Throwable) {
+        Log.w("iroh-http-mdns", "failed to create fresh resolver client: ${error.message}")
+        null
+    }
+
+    private fun abandonResolve(request: ResolveRequest) {
+        if (!claimResolve(request)) return
+        resolverRecoveryExecutor.execute {
+            val canRotate = synchronized(resolveQueue) {
+                resolverRotationCount < MAX_RESOLVER_ROTATIONS
+            }
+            val replacement = if (canRotate) freshResolverManager() else null
+            val installed = synchronized(resolveQueue) {
+                if (resolverManager !== request.manager || replacement == null) {
+                    false
+                } else {
+                    resolverManager = replacement
+                    resolverRotationCount += 1
+                    true
                 }
             }
-            if (candidate == null) return
-            if (isCurrentResolveOwner(candidate.owner)) next = candidate
+            if (installed) {
+                finishClaimedResolve(request)
+            } else {
+                failResolverSessions(
+                    if (canRotate) {
+                        "Android DNS-SD resolver recovery could not create a fresh client"
+                    } else {
+                        "Android DNS-SD resolver recovery exhausted after " +
+                            "$MAX_RESOLVER_ROTATIONS recovery rotations; restart the app"
+                    }
+                )
+            }
         }
-        val request = next
+    }
+
+    private fun failResolverSessions(message: String) {
+        val sessions = synchronized(resolveQueue) {
+            resolverTerminalError = message
+            val affected = dnsSdBrowseMap.values.toSet()
+            resolveQueue.clear()
+            activeResolve = null
+            resolveInProgress = false
+            affected
+        }
+        Log.e("iroh-http-mdns", message)
+        sessions.forEach { session ->
+            synchronized(session) {
+                if (
+                    dnsSdBrowseMap[session.id] === session &&
+                    (session.state == NativeSessionState.STARTING ||
+                        session.state == NativeSessionState.ACTIVE)
+                ) {
+                    val failedBeforeReady = session.state == NativeSessionState.STARTING
+                    session.terminalError = message
+                    if (failedBeforeReady) {
+                        // The native discovery was admitted before exhaustion,
+                        // but Rust has not received its handle yet. Fence that
+                        // start until Android acknowledges listener cleanup.
+                        session.state = NativeSessionState.CLOSED
+                        session.pendingStartFailure = message
+                        retireResolveRequests(session)
+                        val cleanupError = dispatchBrowseStopWithRetry(session)
+                        if (cleanupError != null) {
+                            session.stopDeferredUntilReady = true
+                            session.terminalError =
+                                "$message; cleanup: ${cleanupError.message}"
+                        }
+                    } else {
+                        session.state = NativeSessionState.FAILED
+                    }
+                }
+            }
+        }
+    }
+
+    private fun drainResolveQueue() {
+        var request: ResolveRequest
+        while (true) {
+            val next = synchronized(resolveQueue) {
+                resolveQueue.pollFirst().also { candidate ->
+                    activeResolve = candidate
+                    if (candidate == null) resolveInProgress = false
+                }
+            }
+            if (next == null) return
+            if (isCurrentResolveOwner(next.owner)) {
+                request = next
+                break
+            }
+            next.completed.set(true)
+            synchronized(resolveQueue) {
+                if (activeResolve === next) activeResolve = null
+            }
+        }
+        request.manager = synchronized(resolveQueue) {
+            resolverManager ?: request.manager.also { resolverManager = it }
+        }
         val manager = request.manager
         val serviceInfo = request.serviceInfo
         val listener = request.listener
@@ -455,10 +601,8 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
             "IROH_DNSSD_CHECK",
             "resolve dequeue instance=${serviceInfo.serviceName} depth=$depth",
         )
-        val completed = AtomicBoolean(false)
         fun finish(callback: () -> Unit) {
-            if (!completed.compareAndSet(false, true)) return
-            try { callback() } finally { drainResolveQueue() }
+            completeResolve(request, callback)
         }
         val wrapped = object : NsdManager.ResolveListener {
             override fun onServiceResolved(resolved: NsdServiceInfo) {
@@ -476,8 +620,25 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
                 finish { listener.onResolveFailed(serviceInfo, errorCode) }
             }
         }
+        val timeoutTask = Runnable {
+            if (request.completed.get()) return@Runnable
+            Log.w(
+                "iroh-http-mdns",
+                "resolve timed out for ${serviceInfo.serviceName}; rotating resolver client"
+            )
+            abandonResolve(request)
+        }
+        request.timeoutTask = timeoutTask
+        lifecycleHandler.postDelayed(timeoutTask, RESOLVE_TIMEOUT_MILLIS)
         try {
-            manager.resolveService(serviceInfo, wrapped)
+            if (request.completed.get() || !isCurrentResolveOwner(request.owner)) {
+                completeResolve(request)
+                return
+            }
+            synchronized(resolveQueue) {
+                if (request.completed.get()) return
+                manager.resolveService(serviceInfo, wrapped)
+            }
         } catch (e: Throwable) {
             Log.w(
                 "iroh-http-mdns",
@@ -567,7 +728,7 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
             "advertise ${session.id} unregister dispatch failed; retrying in " +
                 "${delayMillis}ms: ${error.message}"
         )
-        stopRetryHandler.postDelayed({
+        lifecycleHandler.postDelayed({
             synchronized(session) {
                 session.stopRetryScheduled = false
                 if (
@@ -964,7 +1125,7 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
             "browse ${session.id} stop dispatch failed; retrying in " +
                 "${delayMillis}ms: ${error.message}"
         )
-        stopRetryHandler.postDelayed({
+        lifecycleHandler.postDelayed({
             synchronized(session) {
                 session.stopRetryScheduled = false
                 if (
@@ -1203,32 +1364,50 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
             override fun onServiceLost(serviceInfo: NsdServiceInfo) {
                 val session = dnsSdBrowseMap[browseId] ?: return
                 val name = serviceInfo.serviceName
+                var retiredOwner: ResolveOwner? = null
                 synchronized(session) {
                     if (
                         dnsSdBrowseMap[browseId] !== session ||
                         session.state != NativeSessionState.ACTIVE
                     ) return
-                    session.presenceGenerations.remove(name)
-                    if (!session.knownInstances.remove(name)) return
-                    val record = JSObject()
-                    record.put("isActive", false)
-                    record.put("serviceType", session.serviceType)
-                    record.put("instanceName", name)
-                    record.put("host", JSONObject.NULL)
-                    record.put("port", 0)
-                    record.put("addrs", JSONArray())
-                    record.put("txt", JSObject())
-                    session.pendingRecords.add(record)
+                    session.presenceGenerations.remove(name)?.let { generation ->
+                        retiredOwner = ResolveOwner(session, name, generation)
+                    }
+                    if (session.knownInstances.remove(name)) {
+                        val record = JSObject()
+                        record.put("isActive", false)
+                        record.put("serviceType", session.serviceType)
+                        record.put("instanceName", name)
+                        record.put("host", JSONObject.NULL)
+                        record.put("port", 0)
+                        record.put("addrs", JSONArray())
+                        record.put("txt", JSObject())
+                        session.pendingRecords.add(record)
+                    }
                 }
+                retiredOwner?.let { retireResolveRequest(it) }
             }
         }
 
         val session = DnsSdBrowseSession(browseId, manager, listener, serviceType, startInvoke)
-        dnsSdBrowseMap[browseId] = session
+        val dispatchError = synchronized(resolveQueue) {
+            resolverTerminalError?.let { terminalError ->
+                session.state = NativeSessionState.FAILED
+                session.terminalError = terminalError
+                session.readinessPending = false
+                session.startInvoke.reject(terminalError)
+                return
+            }
+            dnsSdBrowseMap[browseId] = session
+            try {
+                manager.discoverServices(serviceType, NsdManager.PROTOCOL_DNS_SD, listener)
+                null
+            } catch (error: Throwable) {
+                error
+            }
+        }
 
-        try {
-            manager.discoverServices(serviceType, NsdManager.PROTOCOL_DNS_SD, listener)
-        } catch (e: Throwable) {
+        dispatchError?.let { e ->
             synchronized(session) {
                 val message = "Discovery failed: ${e.message}"
                 if (e is IllegalArgumentException) {

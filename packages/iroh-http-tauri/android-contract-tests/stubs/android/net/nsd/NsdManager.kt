@@ -67,5 +67,6 @@ open class NsdManager {
 
     companion object {
         const val PROTOCOL_DNS_SD: Int = 1
+        const val FAILURE_ALREADY_ACTIVE: Int = 3
     }
 }

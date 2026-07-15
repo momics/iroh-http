@@ -776,6 +776,12 @@ const genericLog = document.querySelector<HTMLElement>("#generic-log")!;
 let genericAdvertiseAbort: AbortController | null = null;
 let genericBrowseAbort: AbortController | null = null;
 
+function genericDemoInstance(): string {
+  return `Front Desk Printer (${detectPlatform()}-${
+    node.publicKey.toString().slice(0, 6)
+  })`;
+}
+
 genericAdvertiseBtn.addEventListener("click", async () => {
   if (genericAdvertiseAbort) {
     genericAdvertiseAbort.abort();
@@ -786,11 +792,12 @@ genericAdvertiseBtn.addEventListener("click", async () => {
   }
 
   const serviceName = genericServiceInput.value.trim() || "demo-printer";
+  const instanceName = genericDemoInstance();
   genericAdvertiseAbort = new AbortController();
   genericAdvertiseBtn.textContent = "Stop advertising";
   setStatus(
     genericStatus,
-    `Advertising "Front Desk Printer" on _${serviceName}._tcp`,
+    `Advertising "${instanceName}" on _${serviceName}._tcp`,
     "ok",
   );
 
@@ -799,10 +806,15 @@ genericAdvertiseBtn.addEventListener("click", async () => {
     // protocol — this is not an iroh node.
     await node.advertise({
       serviceName,
-      instanceName: "Front Desk Printer",
+      instanceName,
       port: 9100,
       protocol: "tcp",
-      txt: { model: "LaserJet 9000", color: "true", pdl: "application/pdf" },
+      txt: {
+        model: "LaserJet 9000",
+        color: "true",
+        pdl: "application/pdf",
+        platform: detectPlatform(),
+      },
       signal: genericAdvertiseAbort.signal,
     });
   } catch { /* aborted or error */ }

@@ -7,6 +7,7 @@ out="${TMPDIR:-/tmp}/iroh-http-android-contract-tests.jar"
 
 kotlinc \
   "$here/stubs/android/content/Context.kt" \
+  "$here/stubs/android/content/res/Resources.kt" \
   "$here/stubs/android/app/Activity.kt" \
   "$here/stubs/android/net/Network.kt" \
   "$here/stubs/android/net/nsd/NsdManager.kt" \

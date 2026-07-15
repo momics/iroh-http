@@ -2,8 +2,10 @@ package com.iroh.http
 
 import android.app.Activity
 import android.content.Context
+import android.content.res.Configuration
 import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
+import android.os.Handler
 import app.tauri.plugin.Invoke
 import app.tauri.plugin.JSObject
 import org.json.JSONArray
@@ -12,6 +14,7 @@ import java.net.InetAddress
 import java.nio.charset.StandardCharsets
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
 
@@ -44,7 +47,8 @@ private class FakeNsdManager(
 
     val discoveryCalls = mutableListOf<DiscoveryCall>()
     val stoppedDiscoveryListeners = mutableListOf<DiscoveryListener>()
-    val resolveCalls = mutableListOf<ResolveCall>()
+    val resolveCalls = CopyOnWriteArrayList<ResolveCall>()
+    val recoveryManagers = CopyOnWriteArrayList<FakeNsdManager>()
     val registrationCalls = mutableListOf<RegistrationCall>()
     val unregisteredListeners = mutableListOf<RegistrationListener>()
     private val activeDiscoveryTypes = mutableMapOf<DiscoveryListener, String>()
@@ -59,6 +63,7 @@ private class FakeNsdManager(
     var stopDiscoveryDispatchFailuresRemaining: Int = 0
     var unregisterEntered: CountDownLatch? = null
     var unregisterRelease: CountDownLatch? = null
+    private var nativeResolveActive: Boolean = false
 
     override fun discoverServices(
         serviceType: String,
@@ -86,8 +91,27 @@ private class FakeNsdManager(
     }
 
     override fun resolveService(serviceInfo: NsdServiceInfo, listener: ResolveListener) {
-        resolveCalls.add(ResolveCall(serviceInfo, listener))
+        if (nativeResolveActive) {
+            listener.onResolveFailed(serviceInfo, NsdManager.FAILURE_ALREADY_ACTIVE)
+            return
+        }
+        nativeResolveActive = true
+        val terminalListener = object : ResolveListener {
+            override fun onServiceResolved(resolved: NsdServiceInfo) {
+                nativeResolveActive = false
+                listener.onServiceResolved(resolved)
+            }
+
+            override fun onResolveFailed(failed: NsdServiceInfo, errorCode: Int) {
+                nativeResolveActive = false
+                listener.onResolveFailed(failed, errorCode)
+            }
+        }
+        resolveCalls.add(ResolveCall(serviceInfo, terminalListener))
     }
+
+    fun createRecoveryManager(): FakeNsdManager =
+        FakeNsdManager(terminalRemovalTiming).also { recoveryManagers.add(it) }
 
     override fun registerService(
         serviceInfo: NsdServiceInfo,
@@ -226,7 +250,15 @@ private fun newPlugin(
     terminalRemovalTiming: TerminalRemovalTiming = TerminalRemovalTiming.AFTER_CALLBACK
 ): Pair<IrohHttpPlugin, FakeNsdManager> {
     val manager = FakeNsdManager(terminalRemovalTiming)
-    val activity = Activity()
+    val activity = object : Activity() {
+        override fun createConfigurationContext(configuration: Configuration): Context {
+            val recovery = manager.createRecoveryManager()
+            return object : Context() {
+                override fun getSystemService(name: String): Any? =
+                    if (name == Context.NSD_SERVICE) recovery else null
+            }
+        }
+    }
     activity.setSystemService(Context.NSD_SERVICE, manager)
     return Pair(IrohHttpPlugin(activity), manager)
 }
@@ -551,7 +583,8 @@ private fun testRetiredResolveQueuesDoNotStarveNewSessions() {
     val (plugin, manager) = newPlugin()
 
     // Generic request A1 is in flight; A2 and session B1 are queued behind it.
-    // Closing A must purge A2, so completing A1 advances directly to B1.
+    // Closing A must purge A2. A late native terminal callback still releases
+    // the healthy client, which then advances directly to B1 without rotation.
     val (sessionAId, sessionAListener) = startGenericBrowse(plugin, manager)
     val requestA1 = NsdServiceInfo().apply { serviceName = "generic-a1" }
     val requestA2 = NsdServiceInfo().apply { serviceName = "generic-a2-stale" }
@@ -564,14 +597,266 @@ private fun testRetiredResolveQueuesDoNotStarveNewSessions() {
     checkEquals(1, manager.resolveCalls.size, "legacy resolver keeps one request in flight")
 
     plugin.browse_stop(Invoke(stopArgs(sessionAId)))
+    checkEquals(1, manager.resolveCalls.size, "retirement waits for native terminal callback")
     requestA1Resolve.listener.onResolveFailed(requestA1, 21)
-    checkEquals(2, manager.resolveCalls.size, "live generic session advances after retirement")
+    checkEquals(2, manager.resolveCalls.size, "late terminal callback advances healthy client")
     checkThat(
         manager.resolveCalls.last().info === requestB1,
         "retired generic queue entry is skipped instead of starving another browse"
     )
+    checkEquals(0, manager.recoveryManagers.size, "normal late callback spends no recovery token")
     manager.resolveCalls.last().listener.onResolveFailed(requestB1, 22)
     plugin.browse_stop(Invoke(stopArgs(sessionBId)))
+
+    // Retiring ownership after dequeue but before native dispatch skips the
+    // stale request locally. Since resolveService was never called, the healthy
+    // client must not spend one of its bounded recovery rotations.
+    val (preDispatchPlugin, preDispatchManager) = newPlugin()
+    val (preDispatchId, preDispatchListener) =
+        startGenericBrowse(preDispatchPlugin, preDispatchManager)
+    val preDispatch = NsdServiceInfo().apply { serviceName = "stale-before-dispatch" }
+    val enteredSchedule = CountDownLatch(1)
+    val releaseSchedule = CountDownLatch(1)
+    val workerError = AtomicReference<Throwable?>(null)
+    Handler.postDelayedEntered = enteredSchedule
+    Handler.postDelayedRelease = releaseSchedule
+    val worker = Thread {
+        try {
+            preDispatchListener.onServiceFound(preDispatch)
+        } catch (error: Throwable) {
+            workerError.set(error)
+        }
+    }
+    worker.start()
+    checkThat(
+        enteredSchedule.await(5, TimeUnit.SECONDS),
+        "pre-dispatch resolve never reached the deterministic barrier"
+    )
+    preDispatchListener.onServiceLost(preDispatch)
+    releaseSchedule.countDown()
+    worker.join(5_000)
+    Handler.postDelayedEntered = null
+    Handler.postDelayedRelease = null
+    workerError.get()?.let { throw it }
+    checkThat(!worker.isAlive, "pre-dispatch resolve worker did not finish")
+    checkEquals(0, preDispatchManager.resolveCalls.size, "stale request never reaches NsdManager")
+    checkEquals(
+        0,
+        preDispatchManager.recoveryManagers.size,
+        "undispatched stale request spends no resolver rotation"
+    )
+    val afterPreDispatch = NsdServiceInfo().apply { serviceName = "live-after-stale" }
+    preDispatchListener.onServiceFound(afterPreDispatch)
+    preDispatchManager.resolveCalls.single().listener.onServiceResolved(
+        NsdServiceInfo().apply {
+            serviceName = "live-after-stale"
+            host = InetAddress.getByName("192.168.1.13")
+            setPort(9100)
+        }
+    )
+    val preDispatchPoll = Invoke(pollArgs(preDispatchId))
+    preDispatchPlugin.browse_poll(preDispatchPoll)
+    checkEquals(
+        1,
+        (preDispatchPoll.resolutions.single()!!["records"] as JSONArray).length(),
+        "healthy resolver remains usable after pre-dispatch retirement"
+    )
+
+    // Some Android releases terminate an in-flight resolve without delivering
+    // either ResolveListener callback when the service disappears. The lost
+    // presence must release the shared resolver so unrelated browse sessions
+    // remain observable.
+    val (lostPlugin, lostManager) = newPlugin()
+    val (_, lostSessionListener) = startGenericBrowse(lostPlugin, lostManager)
+    val disappearing = NsdServiceInfo().apply { serviceName = "disappearing" }
+    lostSessionListener.onServiceFound(disappearing)
+    checkEquals(1, lostManager.resolveCalls.size, "disappearing service starts its resolve")
+    lostSessionListener.onServiceLost(disappearing)
+
+    val (survivingId, survivingSessionListener) = startGenericBrowse(lostPlugin, lostManager)
+    val surviving = NsdServiceInfo().apply { serviceName = "surviving" }
+    survivingSessionListener.onServiceFound(surviving)
+    Handler.runAllPending()
+    waitUntil("lost presence did not create a replacement resolver client") {
+        lostManager.recoveryManagers.size == 1
+    }
+    val lostRecovery = lostManager.recoveryManagers.single()
+    waitUntil("replacement resolver did not receive the surviving request") {
+        lostRecovery.resolveCalls.size == 1
+    }
+    checkEquals(
+        1,
+        lostRecovery.resolveCalls.size,
+        "lost in-flight service advances on a fresh resolver client"
+    )
+    lostRecovery.resolveCalls.single().listener.onServiceResolved(
+        NsdServiceInfo().apply {
+            serviceName = "surviving"
+            host = InetAddress.getByName("192.168.1.9")
+            setPort(9100)
+            setAttribute("platform", "desktop")
+        }
+    )
+    val survivingPoll = Invoke(pollArgs(survivingId))
+    lostPlugin.browse_poll(survivingPoll)
+    val survivingRecords = survivingPoll.resolutions.single()!!["records"] as JSONArray
+    checkEquals(
+        1,
+        survivingRecords.length(),
+        "fresh resolver result reaches the public browse record queue"
+    )
+
+    // OEM NSD implementations have also been observed to omit both the
+    // resolve terminal callback and a matching service-lost callback. A
+    // bounded adapter watchdog must keep the process-wide legacy resolver
+    // usable in that case.
+    val (silentPlugin, silentManager) = newPlugin()
+    val (silentId, silentListener) = startGenericBrowse(silentPlugin, silentManager)
+    silentListener.onServiceFound(
+        NsdServiceInfo().apply { serviceName = "silent-platform-resolve" }
+    )
+    val silentLateCallback = silentManager.resolveCalls.single().listener
+    silentListener.onServiceFound(
+        NsdServiceInfo().apply { serviceName = "after-silent-resolve" }
+    )
+    Handler.runAllPending()
+    waitUntil(
+        "missing platform callback cannot poison the legacy resolver",
+        timeoutMillis = 6_000
+    ) {
+        silentManager.recoveryManagers.singleOrNull()?.resolveCalls?.size == 1
+    }
+    val silentRecovery = silentManager.recoveryManagers.single()
+    silentRecovery.resolveCalls.single().listener.onServiceResolved(
+        NsdServiceInfo().apply {
+            serviceName = "after-silent-resolve"
+            host = InetAddress.getByName("192.168.1.10")
+            setPort(9100)
+        }
+    )
+    val recoveredPoll = Invoke(pollArgs(silentId))
+    silentPlugin.browse_poll(recoveredPoll)
+    checkEquals(
+        1,
+        (recoveredPoll.resolutions.single()!!["records"] as JSONArray).length(),
+        "watchdog recovery emits the surviving record through browse_poll"
+    )
+    silentLateCallback.onServiceResolved(
+        NsdServiceInfo().apply {
+            serviceName = "silent-platform-resolve"
+            host = InetAddress.getByName("192.168.1.11")
+            setPort(9100)
+        }
+    )
+    val latePoll = Invoke(pollArgs(silentId))
+    silentPlugin.browse_poll(latePoll)
+    checkEquals(
+        0,
+        (latePoll.resolutions.single()!!["records"] as JSONArray).length(),
+        "late callback from poisoned resolver cannot revive its retired request"
+    )
+
+    // Ordinary found → lost races do not spend recovery budget when Android
+    // still delivers their native terminal callbacks.
+    val (churnPlugin, churnManager) = newPlugin()
+    val (churnId, churnListener) = startGenericBrowse(churnPlugin, churnManager)
+    repeat(6) { index ->
+        val transient = NsdServiceInfo().apply { serviceName = "normal-churn-$index" }
+        churnListener.onServiceFound(transient)
+        val terminal = churnManager.resolveCalls.last().listener
+        churnListener.onServiceLost(transient)
+        terminal.onResolveFailed(transient, 40 + index)
+    }
+    val stable = NsdServiceInfo().apply { serviceName = "stable-after-churn" }
+    churnListener.onServiceFound(stable)
+    churnManager.resolveCalls.last().listener.onServiceResolved(
+        NsdServiceInfo().apply {
+            serviceName = "stable-after-churn"
+            host = InetAddress.getByName("192.168.1.12")
+            setPort(9100)
+        }
+    )
+    val churnPoll = Invoke(pollArgs(churnId))
+    churnPlugin.browse_poll(churnPoll)
+    checkEquals(
+        1,
+        (churnPoll.resolutions.single()!!["records"] as JSONArray).length(),
+        "ordinary loss churn does not exhaust resolver recovery"
+    )
+    checkEquals(0, churnManager.recoveryManagers.size, "ordinary churn creates no NSD clients")
+
+    // Legacy Android exposes no public close operation for an abandoned NSD
+    // client. Recovery is therefore deliberately bounded: after four recovery
+    // rotations (five stalled clients) the browse fails explicitly instead of
+    // leaking clients forever.
+    val (boundedPlugin, boundedManager) = newPlugin()
+    val (boundedId, boundedListener) = startGenericBrowse(boundedPlugin, boundedManager)
+    val pendingAtExhaustion = Invoke(genericBrowseArgs())
+    boundedPlugin.browse_start(pendingAtExhaustion)
+    val pendingAtExhaustionCall = boundedManager.discoveryCalls.last()
+    checkEquals(0, pendingAtExhaustion.completionCount, "second browse remains pre-readiness")
+    repeat(5) { index ->
+        val stalled = NsdServiceInfo().apply { serviceName = "bounded-stall-$index" }
+        boundedListener.onServiceFound(stalled)
+        val activeManager = if (index == 0) {
+            boundedManager
+        } else {
+            boundedManager.recoveryManagers[index - 1]
+        }
+        waitUntil("bounded stall $index never reached its resolver client") {
+            activeManager.resolveCalls.size == 1
+        }
+        Handler.runAllPending()
+        if (index < 4) {
+            waitUntil("bounded stall $index did not rotate its resolver client") {
+                boundedManager.recoveryManagers.size == index + 1
+            }
+        }
+    }
+    var exhaustedPayload: JSObject? = null
+    waitUntil("resolver rotation exhaustion was not surfaced as terminal browse failure") {
+        val exhaustedPoll = Invoke(pollArgs(boundedId))
+        boundedPlugin.browse_poll(exhaustedPoll)
+        exhaustedPayload = exhaustedPoll.resolutions.single()
+        exhaustedPayload?.get("status") == "failed"
+    }
+    checkEquals(4, boundedManager.recoveryManagers.size, "resolver rotations stay bounded")
+    checkThat(
+        exhaustedPayload?.get("error").toString().contains("recovery exhausted"),
+        "bounded recovery reports an actionable terminal error"
+    )
+    checkEquals(
+        0,
+        pendingAtExhaustion.completionCount,
+        "pre-readiness exhaustion waits for native cleanup acknowledgement"
+    )
+    checkThat(
+        boundedManager.isDiscoveryStopPending(pendingAtExhaustionCall.listener),
+        "pre-readiness exhaustion dispatches native browse cleanup"
+    )
+    boundedManager.discoveryStopped(pendingAtExhaustionCall)
+    checkEquals(1, pendingAtExhaustion.rejections.size, "pre-readiness browse rejects once")
+    checkThat(
+        pendingAtExhaustion.rejections.single().contains("recovery exhausted"),
+        "pre-readiness browse receives the terminal resolver error"
+    )
+    checkThat(
+        !boundedManager.isDiscoveryListenerActive(pendingAtExhaustionCall.listener),
+        "pre-readiness owner retires only after native terminal callback"
+    )
+    val discoveryCallsAtExhaustion = boundedManager.discoveryCalls.size
+    val retryAfterExhaustion = Invoke(genericBrowseArgs())
+    boundedPlugin.browse_start(retryAfterExhaustion)
+    checkEquals(1, retryAfterExhaustion.rejections.size, "exhaustion rejects a later browse")
+    checkThat(
+        retryAfterExhaustion.rejections.single().contains("recovery exhausted"),
+        "later browse receives the durable restart-required error"
+    )
+    checkEquals(
+        discoveryCallsAtExhaustion,
+        boundedManager.discoveryCalls.size,
+        "later browse never starts on the poisoned resolver client"
+    )
 }
 
 private fun advertiseStopArgs(id: Long) = AdvertiseStopArgs().apply { advertiseId = id }

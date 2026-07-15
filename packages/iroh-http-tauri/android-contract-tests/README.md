@@ -8,7 +8,9 @@ It covers:
 - terminal-state poll consumption;
 - peer and generic found → lost → late-resolve suppression;
 - same-node, different-instance source identity and stale-handle isolation;
-- retirement-aware resolve queues that do not starve newer sessions;
+- retirement- and timeout-aware resolve queues that use fresh native clients
+  when Android omits terminal callbacks, then fail explicitly after the bounded
+  recovery budget is exhausted (an app restart resets that lifetime budget);
 - plural peer address TXT validation and SRV/relay fallback;
 - the exact 247-byte address TXT boundary and stable subset fitting;
 - registration acknowledgement, API-21 and current-AOSP terminal listener
@@ -33,6 +35,6 @@ duplicated callback probes.
 
 This complements, rather than replaces, the Android Gradle compile and physical
 device tests. In particular, real `NsdManager` multicast visibility, callback
-threading, a platform resolve that never calls back, and OEM-specific
-registration failures still require an API 21+ device or emulator on a
-multicast-capable network.
+threading and timing, recovery of the native resolver after a missing callback,
+and OEM-specific registration failures still require an API 21+ device or
+emulator on a multicast-capable network.
