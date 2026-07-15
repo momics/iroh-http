@@ -81,7 +81,10 @@ See [`ServeHandler` in the specification](../specification.md#servehandler) for 
 
 See [`IrohFetchInit` in the specification](../specification.md#irohfetchinit) for the canonical type.
 
-`IrohFetchInit` extends standard `RequestInit` with `signal?: AbortSignal` and `directAddrs?: string[]`.
+`IrohFetchInit` extends standard `RequestInit` with `signal?: AbortSignal`,
+`directAddrs?: string[]`, and `relayUrl?: string`. An explicit relay URL lets a
+fresh node dial a discovered peer without waiting for DNS lookup; iroh may still
+upgrade the connection to a direct path.
 
 ---
 

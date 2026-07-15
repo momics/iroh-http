@@ -86,6 +86,12 @@ export interface IrohFetchInit extends RequestInit {
    * whose address is already known out-of-band.
    */
   directAddrs?: string[];
+  /**
+   * Home relay URL for the target peer, usually obtained from discovery.
+   * Supplying it lets a fresh node connect without first resolving the peer
+   * through DNS. Iroh may still upgrade the connection to a direct path.
+   */
+  relayUrl?: string;
   /** Per-request timeout in milliseconds.  Overrides the endpoint-wide default. */
   requestTimeout?: number;
   /**

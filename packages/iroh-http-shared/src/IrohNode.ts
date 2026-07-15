@@ -48,6 +48,7 @@ import type {
   ServiceRecord,
 } from "./discovery.js";
 import type { NodeOptions } from "./options/NodeOptions.js";
+import { nodeAddrWithRelay } from "./utils.js";
 
 const _INTERNAL = Symbol("IrohNode._create");
 
@@ -170,8 +171,8 @@ export class IrohNode extends EventTarget {
    *
    * @param input An `httpi://<peer-public-key>/path` URL, as a string or `URL`.
    * @param init Standard `RequestInit` plus Iroh extras (`directAddrs`,
-   *   `requestTimeout`, `decompress`, `maxResponseBodyBytes`). Supports
-   *   cancellation via `init.signal`.
+   *   `relayUrl`, `requestTimeout`, `decompress`, `maxResponseBodyBytes`).
+   *   Supports cancellation via `init.signal`.
    * @returns The peer's `Response`.
    *
    * ```ts
@@ -235,8 +236,8 @@ export class IrohNode extends EventTarget {
    * {@link IrohNode.incoming}.
    *
    * @param peer The target peer, as a {@link PublicKey} or its string form.
-   * @param init Optional `directAddrs` (known `"ip:port"` addresses) that speed
-   *   up the initial connection when the peer's address is known out-of-band.
+   * @param init Optional direct-address and relay hints that speed up the
+   *   initial connection when the peer's address is known out-of-band.
    * @returns The established {@link IrohSession}.
    * @throws If the platform adapter does not support raw sessions.
    *
@@ -247,17 +248,18 @@ export class IrohNode extends EventTarget {
    */
   async dial(
     peer: PublicKey | string,
-    init?: { directAddrs?: string[] },
+    init?: { directAddrs?: string[]; relayUrl?: string },
   ): Promise<IrohSession> {
     const sessionFns = this.#adapter.sessionFns;
     if (!sessionFns) {
       throw new Error("dial() not supported by this platform adapter");
     }
     const nodeId = resolveNodeId(peer);
+    const remoteNodeAddr = nodeAddrWithRelay(nodeId, init?.relayUrl);
     const directAddrs = init?.directAddrs ?? null;
     const sessionHandle = await sessionFns.connect(
       this.#endpointHandle,
-      nodeId,
+      remoteNodeAddr,
       directAddrs,
     );
     const remotePk = PublicKey.fromString(nodeId);

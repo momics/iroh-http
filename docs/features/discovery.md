@@ -152,8 +152,9 @@ handshake is identical. Only the *mDNS enumeration* differs.
 ## Without discovery
 
 When DNS is disabled and neither `browse` nor `advertise` is called, the node
-operates in direct-address-only mode. Connections must use explicit addresses
-(`directAddrs` in `IrohFetchInit`) or ticket strings (see [tickets](tickets.md)).
+operates in explicit-address mode. Connections must use direct hints
+(`directAddrs`), a home-relay hint (`relayUrl`), or ticket strings (see
+[tickets](tickets.md)).
 
 Appropriate for embedded targets, air-gapped networks, and integration tests.
 

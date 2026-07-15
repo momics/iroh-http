@@ -25,6 +25,14 @@ fn parse_node_addr_accepts_ticket_json() {
     let ticket = serde_json::to_string(&info).unwrap();
     let parsed = parse_node_addr(&ticket).unwrap();
     assert_eq!(parsed.node_id, key.public());
+    assert_eq!(
+        parsed
+            .relay_urls
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>(),
+        ["https://relay.example.com/"]
+    );
     assert_eq!(parsed.direct_addrs.len(), 1);
     assert_eq!(parsed.direct_addrs[0].to_string(), "127.0.0.1:12345");
 }
@@ -52,5 +60,23 @@ fn parse_node_addr_rejects_port_zero_direct_addr() {
     assert!(
         format!("{err:?}").contains("192.168.50.227"),
         "error should name the offending address, got: {err:?}"
+    );
+}
+
+#[test]
+fn parse_node_addr_rejects_malformed_relay_url() {
+    let key = iroh::SecretKey::generate();
+    let info = NodeAddrInfo {
+        id: iroh_http_core::base32_encode(key.public().as_bytes()),
+        addrs: vec!["https://[not-an-ipv6-address".to_string()],
+    };
+    let ticket = serde_json::to_string(&info).unwrap();
+    let err = match parse_node_addr(&ticket) {
+        Ok(_) => panic!("malformed relay URL must be rejected"),
+        Err(error) => error,
+    };
+    assert!(
+        format!("{err:?}").contains("malformed relay URL"),
+        "error should identify the relay URL, got: {err:?}"
     );
 }

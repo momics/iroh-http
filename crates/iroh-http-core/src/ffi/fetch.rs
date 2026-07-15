@@ -69,6 +69,9 @@ pub async fn fetch(
     // any caller-supplied direct addresses.
     let parsed = parse_node_addr(remote_node_id)?;
     let mut addr = iroh::EndpointAddr::new(parsed.node_id);
+    for relay in parsed.relay_urls {
+        addr = addr.with_relay_url(relay);
+    }
     for a in &parsed.direct_addrs {
         addr = addr.with_ip_addr(*a);
     }
