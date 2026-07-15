@@ -273,6 +273,7 @@ export function makeServe(
         // Peer-Id is stripped (spoof prevention) and re-injected from the
         // authenticated QUIC connection identity in Rust core. No duplication here.
         const headers: [string, string][] = [...payload.headers];
+        const inboundHeaders = new Headers(headers);
 
         const reqInit: RequestInit & { duplex?: "half" } = {
           method: payload.method,
@@ -285,6 +286,19 @@ export function makeServe(
           payload.url,
           reqInit,
         );
+
+        // Chromium-based runtimes may still apply the forbidden request-header
+        // filter while constructing a Request, even though this is an inbound
+        // server request and the native transport has already received the
+        // headers. Expose that authoritative set to the handler rather than the
+        // constructor's potentially filtered copy. This is intentionally
+        // header-agnostic so platform policy cannot silently discard other
+        // legitimate inbound fields.
+        Object.defineProperty(req, "headers", {
+          value: inboundHeaders,
+          configurable: true,
+          enumerable: true,
+        });
 
         // Invoke the user handler with onError fallback.
         let res: Response;
