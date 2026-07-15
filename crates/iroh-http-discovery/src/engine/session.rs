@@ -174,7 +174,7 @@ pub struct AdvertisementSession {
     update_gate: Mutex<()>,
     update_operation: StdMutex<Option<Arc<InFlight<UpdateOutcome>>>>,
     current_update: StdMutex<Option<AdvertisementUpdate>>,
-    closed: AtomicBool,
+    closed: Arc<AtomicBool>,
 }
 
 impl AdvertisementSession {
@@ -196,7 +196,7 @@ impl AdvertisementSession {
             update_gate: Mutex::new(()),
             update_operation: StdMutex::new(None),
             current_update: StdMutex::new(current_update),
-            closed: AtomicBool::new(false),
+            closed: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -239,9 +239,13 @@ impl AdvertisementSession {
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Arc::clone(&operation));
         let task_operation = Arc::clone(&operation);
         let handle = Arc::clone(&self.handle);
+        let closed = Arc::clone(&self.closed);
         let task_update = update.clone();
         tokio::spawn(async move {
             let result = handle.update(task_update.clone()).await;
+            if result.is_err() && !closed.swap(true, Ordering::AcqRel) {
+                handle.request_close();
+            }
             task_operation.complete((task_update, result));
         });
         let (completed_update, result) = operation.wait().await;
@@ -626,6 +630,38 @@ mod tests {
         handle.0.release.add_permits(1);
         assert!(session.wait_closed().await.is_ok());
         assert_eq!(handle.0.completed.load(Ordering::Acquire), 1);
+        assert_eq!(handle.0.close_count.load(Ordering::Acquire), 1);
+    }
+
+    #[tokio::test]
+    async fn cancelled_failed_update_closes_without_a_second_waiter() {
+        let handle = FakeAdvertisement::new(true, true);
+        let session = Arc::new(AdvertisementSession::new(handle.clone()));
+        let entered = handle.0.entered.notified();
+        let task = tokio::spawn({
+            let session = Arc::clone(&session);
+            async move {
+                session
+                    .update(AdvertisementUpdate {
+                        port: 4433,
+                        addrs: Vec::new(),
+                        txt: Vec::new(),
+                    })
+                    .await
+            }
+        });
+        entered.await;
+
+        task.abort();
+        assert!(matches!(task.await, Err(error) if error.is_cancelled()));
+        handle.0.release.add_permits(1);
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while handle.0.close_count.load(Ordering::Acquire) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the operation owner must close after an unobserved failure");
         assert_eq!(handle.0.close_count.load(Ordering::Acquire), 1);
     }
 
