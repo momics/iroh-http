@@ -546,6 +546,10 @@ pub struct BrowseSession {
 }
 
 impl BrowseSession {
+    pub(crate) fn engine_session(&self) -> Arc<crate::engine::BrowseSession> {
+        Arc::clone(&self.inner)
+    }
+
     /// Returns the next record, or `None` when the session is closed.
     ///
     /// This takes `&self`, so a session can be placed directly in an [`Arc`]
@@ -567,10 +571,6 @@ impl BrowseSession {
     /// [`Self::next_record`] call.
     pub fn close(&self) {
         self.inner.close();
-    }
-
-    pub(crate) fn on_close(&self, callback: impl FnOnce() + Send + 'static) {
-        self.inner.on_close(callback);
     }
 }
 

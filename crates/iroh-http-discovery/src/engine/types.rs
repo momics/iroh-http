@@ -196,6 +196,6 @@ mod tests {
             service_type("web", Protocol::Tcp),
             Ok(value) if value == "_web._tcp.local."
         ));
-        assert!(matches!(service_type("bad.name", Protocol::Udp), Err(_)));
+        assert!(service_type("bad.name", Protocol::Udp).is_err());
     }
 }

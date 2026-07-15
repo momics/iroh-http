@@ -7,6 +7,8 @@ import android.net.Network
 import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import app.tauri.annotation.Command
 import app.tauri.annotation.InvokeArg
@@ -20,15 +22,9 @@ import java.net.InetAddress
 import java.net.Inet6Address
 import java.net.NetworkInterface
 import java.nio.charset.StandardCharsets
-import java.util.LinkedHashSet
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
-
-@InvokeArg
-class BrowseStartArgs {
-    lateinit var serviceName: String
-}
 
 @InvokeArg
 class BrowsePollArgs {
@@ -38,25 +34,6 @@ class BrowsePollArgs {
 @InvokeArg
 class BrowseStopArgs {
     var browseId: Long = 0
-}
-
-@InvokeArg
-class AdvertiseStartArgs {
-    lateinit var serviceName: String
-    lateinit var pk: String
-    var relay: String? = null
-
-    // Structured direct `ip:port` candidates. Native DNS-SD transports these
-    // as one comma-separated TXT value while preserving every candidate's
-    // authoritative port.
-    var addresses: List<String> = emptyList()
-}
-
-@InvokeArg
-class AdvertiseUpdateArgs {
-    var advertiseId: Long = 0
-    var relay: String? = null
-    var addresses: List<String> = emptyList()
 }
 
 @InvokeArg
@@ -94,12 +71,15 @@ class DnsSdBrowseStartArgs {
 class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
 
     private companion object {
-        const val MAX_ADDRESS_TXT_VALUE_BYTES = 247
         const val MAX_UNREGISTER_DISPATCH_ATTEMPTS = 2
+        const val MAX_BROWSE_STOP_DISPATCH_ATTEMPTS = 2
+        const val INITIAL_STOP_RETRY_DELAY_MILLIS = 25L
+        const val MAX_STOP_RETRY_DELAY_MILLIS = 1_000L
     }
 
     private val nextBrowseId = AtomicLong(1)
     private val nextAdvertiseId = AtomicLong(1)
+    private val stopRetryHandler = Handler(Looper.getMainLooper())
 
     private enum class NativeSessionState(val pollValue: String) {
         STARTING("active"),
@@ -125,33 +105,6 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
         }
     }
 
-    private class BrowseSession(
-        val id: Long,
-        val manager: NsdManager,
-        val listener: NsdManager.DiscoveryListener,
-        val startInvoke: InvokeOnce,
-        var state: NativeSessionState = NativeSessionState.STARTING,
-        var terminalError: String? = null,
-        val pendingEvents: MutableList<JSObject> = mutableListOf(),
-        // fullServiceName → snapshot. Keyed by a signature of (nodeId + sorted
-        // dialable addrs) so a peer that rebinds to a new address under the SAME
-        // nodeId (the iOS foreground-restart-rebind case, #336) re-emits instead
-        // of being suppressed by a nodeId-only dedup (#350 review M2).
-        val knownNodes: MutableMap<String, PeerSnapshot> = mutableMapOf(),
-        // Service-instance presence generation. Every `onServiceFound`
-        // advances it; `onServiceLost` removes it. A queued resolve may only
-        // commit while its captured generation is still current.
-        val presenceGenerations: MutableMap<String, Long> = mutableMapOf(),
-        var nextPresenceGeneration: Long = 1
-    )
-
-    private data class PeerSnapshot(val nodeId: String, val signature: String)
-
-    private sealed class AdvertisementKind {
-        data class Peer(val serviceName: String, val pk: String) : AdvertisementKind()
-        object Generic : AdvertisementKind()
-    }
-
     private enum class AdvertisementUpdatePhase {
         UNREGISTERING,
         REGISTERING
@@ -166,10 +119,10 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
     private class AdvertiseSession(
         val id: Long,
         val manager: NsdManager,
-        val kind: AdvertisementKind,
         val startInvoke: InvokeOnce,
         var state: NativeSessionState = NativeSessionState.STARTING,
         var terminalError: String? = null,
+        var pendingStartFailure: String? = null,
         var generation: Long = 1,
         var pendingUpdate: AdvertisementUpdate? = null,
         val pendingStops: MutableList<InvokeOnce> = mutableListOf(),
@@ -182,13 +135,15 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
         val retiredRegistrationGenerations: MutableSet<Long> = mutableSetOf(),
         // Unregister was accepted, but Android has not delivered its terminal
         // callback yet. This is the native cleanup acknowledgement barrier.
-        val unregisteringGenerations: MutableSet<Long> = mutableSetOf()
+        val unregisteringGenerations: MutableSet<Long> = mutableSetOf(),
+        var stopRetryScheduled: Boolean = false,
+        var stopRetryDelayMillis: Long = INITIAL_STOP_RETRY_DELAY_MILLIS
     ) {
         lateinit var listener: NsdManager.RegistrationListener
         lateinit var info: NsdServiceInfo
     }
 
-    /** A generic DNS-SD browse session, carrying full records rather than peers. */
+    /** A DNS-SD browse session carrying complete service records. */
     private class DnsSdBrowseSession(
         val id: Long,
         val manager: NsdManager,
@@ -197,31 +152,30 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
         val startInvoke: InvokeOnce,
         var state: NativeSessionState = NativeSessionState.STARTING,
         var terminalError: String? = null,
+        var pendingStartFailure: String? = null,
         val pendingRecords: MutableList<JSObject> = mutableListOf(),
         // Instances that have produced at least one resolved record. This is
         // presence bookkeeping for removals, not record de-duplication: generic
         // browse exposes every platform announcement, including identical ones.
         val knownInstances: MutableSet<String> = mutableSetOf(),
         val presenceGenerations: MutableMap<String, Long> = mutableMapOf(),
-        var nextPresenceGeneration: Long = 1
+        var nextPresenceGeneration: Long = 1,
+        val pendingStops: MutableList<InvokeOnce> = mutableListOf(),
+        var readinessPending: Boolean = true,
+        var stopDispatchAccepted: Boolean = false,
+        var stopDeferredUntilReady: Boolean = false,
+        var nativeTerminal: Boolean = false,
+        var stopRetryScheduled: Boolean = false,
+        var stopRetryDelayMillis: Long = INITIAL_STOP_RETRY_DELAY_MILLIS
     )
 
     /** Provenance for one serialized legacy NsdManager resolve request. */
-    private sealed class ResolveOwner {
-        data class Peer(
-            val session: BrowseSession,
-            val instanceName: String,
-            val presenceGeneration: Long
-        ) : ResolveOwner()
+    private data class ResolveOwner(
+        val session: DnsSdBrowseSession,
+        val instanceName: String,
+        val presenceGeneration: Long
+    )
 
-        data class Generic(
-            val session: DnsSdBrowseSession,
-            val instanceName: String,
-            val presenceGeneration: Long
-        ) : ResolveOwner()
-    }
-
-    private val browseMap = ConcurrentHashMap<Long, BrowseSession>()
     private val advertiseMap = ConcurrentHashMap<Long, AdvertiseSession>()
     private val dnsSdBrowseMap = ConcurrentHashMap<Long, DnsSdBrowseSession>()
 
@@ -433,9 +387,8 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
     // `NsdManager` allows only one outstanding `resolveService()` call at a
     // time; a second concurrent call fails with `FAILURE_ALREADY_ACTIVE` and
     // `onResolveFailed` is effectively a silent no-op, so records get dropped
-    // whenever several peers/services appear together. Both the peer
-    // (`browse_peers_start`) and generic (`browse_start`) browse paths share
-    // this single queue so resolves across sessions are serialized too.
+    // whenever several services appear together. Every browse session shares
+    // this queue so resolves across handles are serialized too.
     private data class ResolveRequest(
         val owner: ResolveOwner,
         val manager: NsdManager,
@@ -460,31 +413,20 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
         drainResolveQueue()
     }
 
-    private fun isCurrentResolveOwner(owner: ResolveOwner): Boolean = when (owner) {
-        is ResolveOwner.Peer -> synchronized(owner.session) {
-            browseMap[owner.session.id] === owner.session &&
-                owner.session.state == NativeSessionState.ACTIVE &&
-                owner.session.presenceGenerations[owner.instanceName] ==
-                owner.presenceGeneration
-        }
-        is ResolveOwner.Generic -> synchronized(owner.session) {
+    private fun isCurrentResolveOwner(owner: ResolveOwner): Boolean =
+        synchronized(owner.session) {
             dnsSdBrowseMap[owner.session.id] === owner.session &&
                 owner.session.state == NativeSessionState.ACTIVE &&
                 owner.session.presenceGenerations[owner.instanceName] ==
                 owner.presenceGeneration
         }
-    }
 
     /** Drop queued work for a retired session without disturbing another owner. */
     private fun retireResolveRequests(session: Any) {
         synchronized(resolveQueue) {
             val iterator = resolveQueue.iterator()
             while (iterator.hasNext()) {
-                val belongsToSession = when (val owner = iterator.next().owner) {
-                    is ResolveOwner.Peer -> owner.session === session
-                    is ResolveOwner.Generic -> owner.session === session
-                }
-                if (belongsToSession) iterator.remove()
+                if (iterator.next().owner.session === session) iterator.remove()
             }
         }
     }
@@ -545,412 +487,7 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
         }
     }
 
-    /**
-     * Validate that a string is a canonical iroh endpoint id: a 32-byte Ed25519
-     * public key encoded as lowercase RFC 4648 base32 without padding, i.e.
-     * exactly 52 characters drawn from the `a-z` / `2-7` alphabet.
-     *
-     * Used to safely accept the DNS-SD instance name as the node-id when a
-     * peer's advertisement carries no `pk` attribute. Every current
-     * `advertise_peer` implementation (desktop's `mdns-sd`-backed advertiser
-     * included) sets `pk`, so this is a defensive fallback for
-     * advertisements from older or third-party peers rather than the normal
-     * path. The advertise side truncates instance names to 63 chars, which
-     * does not truncate a 52-char id, so the recovered id is always
-     * complete.
-     */
-    private fun isValidEndpointId(s: String): Boolean {
-        if (s.length != 52) return false
-        return s.all { c -> c in 'a'..'z' || c in '2'..'7' }
-    }
-
-    /**
-     * Return a trimmed, dialable numeric socket literal. Host names and
-     * placeholder ports are rejected. IPv6 must be bracketed; link-local IPv6
-     * additionally requires a numeric, non-zero scope id.
-     */
-    private fun validatedSocketLiteral(raw: String): String? {
-        val candidate = raw.trim()
-        if (candidate.isEmpty()) return null
-
-        val host: String
-        val portText: String
-        val bracketedV6: Boolean
-        if (candidate.startsWith("[")) {
-            val close = candidate.lastIndexOf(']')
-            if (close <= 1 || close + 1 >= candidate.length || candidate[close + 1] != ':') {
-                return null
-            }
-            host = candidate.substring(1, close)
-            portText = candidate.substring(close + 2)
-            bracketedV6 = true
-        } else {
-            val separator = candidate.lastIndexOf(':')
-            if (separator <= 0 || candidate.indexOf(':') != separator) return null
-            host = candidate.substring(0, separator)
-            portText = candidate.substring(separator + 1)
-            bracketedV6 = false
-        }
-
-        if (portText.isEmpty() || portText.any { it !in '0'..'9' }) return null
-        val port = portText.toIntOrNull() ?: return null
-        if (port !in 2..65535) return null
-
-        val parsed: InetAddress
-        var hasNumericScope = false
-        if (bracketedV6) {
-            val scopeParts = host.split('%')
-            if (
-                scopeParts.size > 2 || scopeParts[0].isEmpty() ||
-                !scopeParts[0].contains(':')
-            ) return null
-            if (scopeParts.size == 2) {
-                val scope = scopeParts[1]
-                val scopeId = scope.toLongOrNull()
-                if (
-                    scope.isEmpty() || scope.any { it !in '0'..'9' } ||
-                    scopeId == null || scopeId !in 1..0xffff_ffffL
-                ) {
-                    return null
-                }
-                hasNumericScope = true
-            }
-            parsed = try {
-                InetAddress.getByName(scopeParts[0])
-            } catch (_: Throwable) {
-                return null
-            }
-            if (parsed !is Inet6Address) return null
-        } else {
-            val octets = host.split('.')
-            if (
-                octets.size != 4 ||
-                octets.any { part ->
-                    part.isEmpty() || part.any { it !in '0'..'9' } ||
-                        (part.length > 1 && part.startsWith('0')) ||
-                        part.toIntOrNull()?.let { it !in 0..255 } != false
-                }
-            ) {
-                return null
-            }
-            parsed = try {
-                InetAddress.getByName(host)
-            } catch (_: Throwable) {
-                return null
-            }
-            if (parsed is Inet6Address) return null
-        }
-
-        if (
-            parsed.isAnyLocalAddress || parsed.isLoopbackAddress ||
-            parsed.isMulticastAddress ||
-            (parsed.isLinkLocalAddress && !hasNumericScope)
-        ) {
-            return null
-        }
-        return candidate
-    }
-
-    /** Validate/de-duplicate candidates without letting one bad member poison the rest. */
-    private fun validatedSocketLiterals(candidates: Iterable<String>): List<String> {
-        val result = LinkedHashSet<String>()
-        for (candidate in candidates) validatedSocketLiteral(candidate)?.let(result::add)
-        return result.toList()
-    }
-
-    /**
-     * Select a stable subset of complete candidates for one DNS-SD TXT value.
-     * `address=` consumes eight of the 255 bytes allowed for a TXT entry,
-     * leaving at most 247 UTF-8 bytes for its comma-separated value. A member
-     * that does not fit is skipped without hiding a later shorter member.
-     */
-    private fun stableFittingAddressTxtSubset(candidates: Iterable<String>): String? {
-        val fitted = mutableListOf<String>()
-        var usedBytes = 0
-        for (candidate in validatedSocketLiterals(candidates)) {
-            val candidateBytes = candidate.toByteArray(StandardCharsets.UTF_8).size
-            val separatorBytes = if (fitted.isEmpty()) 0 else 1
-            if (
-                usedBytes + separatorBytes + candidateBytes >
-                MAX_ADDRESS_TXT_VALUE_BYTES
-            ) continue
-            fitted.add(candidate)
-            usedBytes += separatorBytes + candidateBytes
-        }
-        return fitted.takeIf { it.isNotEmpty() }?.joinToString(",")
-    }
-
-    private fun peerAddresses(resolved: NsdServiceInfo): List<String> {
-        val addresses = LinkedHashSet<String>()
-        val advertised = resolved.attributes["address"]
-            ?.let { String(it, StandardCharsets.UTF_8) }
-            ?.split(',')
-            ?: emptyList()
-        val direct = validatedSocketLiterals(advertised)
-        addresses.addAll(direct)
-
-        // An invalid/non-dialable `address` TXT is equivalent to no direct TXT:
-        // it must not suppress a valid SRV host:port fallback.
-        if (direct.isEmpty() && resolved.port > 1) {
-            resolved.host?.let { host ->
-                validatedSocketLiteral(formatSocketAddr(host, resolved.port))?.let(addresses::add)
-            }
-        }
-        resolved.attributes["relay"]
-            ?.let { String(it, StandardCharsets.UTF_8).trim() }
-            ?.takeIf { it.isNotEmpty() }
-            ?.let(addresses::add)
-        return addresses.toList()
-    }
-
-    // ── Browse ────────────────────────────────────────────────────────────────
-
-    @Command
-    fun browse_peers_start(invoke: Invoke) {
-        val manager = nsd() ?: return invoke.reject("NsdManager unavailable")
-        val args = invoke.parseArgs(BrowseStartArgs::class.java)
-        val browseId = nextBrowseId.getAndIncrement()
-        val serviceType = "_${args.serviceName}._udp"
-        val startInvoke = InvokeOnce(invoke)
-
-        val listener = object : NsdManager.DiscoveryListener {
-            override fun onStartDiscoveryFailed(serviceType: String, errorCode: Int) {
-                Log.e("iroh-http-mdns", "browse $browseId start failed: $errorCode")
-                val session = browseMap[browseId] ?: return
-                synchronized(session) {
-                    if (browseMap[browseId] !== session) return
-                    val message = "Failed to start peer browse: error $errorCode"
-                    val failedBeforeReady = session.state == NativeSessionState.STARTING
-                    session.state = NativeSessionState.FAILED
-                    session.terminalError = message
-                    retireResolveRequests(session)
-                    if (failedBeforeReady) {
-                        // No handle escaped from a rejected start, so retaining
-                        // this entry would leak an unreachable session.
-                        browseMap.remove(browseId)
-                        session.startInvoke.reject(message)
-                        // Do not call stopServiceDiscovery here. AOSP treats a
-                        // start failure as terminal; API 21 retires the listener
-                        // only after this callback returns, so stopping from
-                        // inside it can enqueue a second operation on a failed
-                        // discovery key.
-                    }
-                }
-            }
-            override fun onStopDiscoveryFailed(serviceType: String, errorCode: Int) {
-                val session = browseMap[browseId] ?: return
-                synchronized(session) {
-                    if (browseMap[browseId] !== session) return
-                    val failedBeforeReady = session.state == NativeSessionState.STARTING
-                    session.state = NativeSessionState.FAILED
-                    session.terminalError = "Peer browse stop failed: error $errorCode"
-                    retireResolveRequests(session)
-                    if (failedBeforeReady) {
-                        browseMap.remove(browseId)
-                        session.startInvoke.reject(session.terminalError!!)
-                    }
-                }
-            }
-            override fun onDiscoveryStarted(serviceType: String) {
-                val session = browseMap[browseId] ?: return
-                synchronized(session) {
-                    if (
-                        browseMap[browseId] !== session ||
-                        session.state != NativeSessionState.STARTING
-                    ) return
-                    session.state = NativeSessionState.ACTIVE
-                    val ret = JSObject()
-                    ret.put("browseId", browseId)
-                    session.startInvoke.resolve(ret)
-                }
-            }
-            override fun onDiscoveryStopped(serviceType: String) {
-                val session = browseMap[browseId] ?: return
-                synchronized(session) {
-                    if (browseMap[browseId] !== session) return
-                    if (session.state == NativeSessionState.STARTING) {
-                        session.state = NativeSessionState.CLOSED
-                        browseMap.remove(browseId)
-                        session.startInvoke.reject("Peer browse stopped before becoming ready")
-                    } else if (session.state == NativeSessionState.ACTIVE) {
-                        // Retain terminal state until exactly one poll observes it.
-                        session.state = NativeSessionState.CLOSED
-                    }
-                    retireResolveRequests(session)
-                }
-            }
-
-            override fun onServiceFound(serviceInfo: NsdServiceInfo) {
-                val session = browseMap[browseId] ?: return
-                val instanceName = serviceInfo.serviceName
-                val generation = synchronized(session) {
-                    if (
-                        browseMap[browseId] !== session ||
-                        session.state != NativeSessionState.ACTIVE
-                    ) return
-                    val current = session.nextPresenceGeneration++
-                    session.presenceGenerations[instanceName] = current
-                    current
-                }
-                enqueueResolve(
-                    ResolveOwner.Peer(session, instanceName, generation),
-                    session.manager,
-                    serviceInfo,
-                    object : NsdManager.ResolveListener {
-                    override fun onServiceResolved(resolved: NsdServiceInfo) {
-                        // Prefer the `pk` attribute (set by every current
-                        // advertiser, mobile and desktop alike); fall back to
-                        // the DNS-SD instance name — which desktop's
-                        // `mdns-sd`-backed advertiser publishes as the base32
-                        // endpoint id too — for advertisements from older or
-                        // third-party peers that carry no `pk` attribute.
-                        val pkAttr = resolved.attributes["pk"]
-                            ?.let { String(it, StandardCharsets.UTF_8) }
-                        val nodeId = if (!pkAttr.isNullOrEmpty()) {
-                            pkAttr
-                        } else {
-                            val name = instanceName
-                            if (isValidEndpointId(name)) name else return
-                        }
-
-                        val key = instanceName
-                        val resolvedAddrs = peerAddresses(resolved)
-
-                        // #350 review M2: dedup on (nodeId + sorted addrs) so a
-                        // rebind under the same nodeId re-emits with the new
-                        // address instead of being suppressed.
-                        val sortedAddrs = resolvedAddrs.sorted()
-                        val signature = buildString {
-                            append(nodeId.length).append(':').append(nodeId)
-                            for (address in sortedAddrs) {
-                                append(address.length).append(':').append(address)
-                            }
-                        }
-                        synchronized(session) {
-                            if (
-                                browseMap[browseId] !== session ||
-                                session.state != NativeSessionState.ACTIVE ||
-                                session.presenceGenerations[key] != generation
-                            ) return
-                            if (session.knownNodes[key]?.signature == signature) return
-                            session.knownNodes[key] = PeerSnapshot(nodeId, signature)
-
-                            val addrs = JSONArray()
-                            resolvedAddrs.forEach { addrs.put(it) }
-                            val event = JSObject()
-                            event.put("type", "discovered")
-                            event.put("instanceName", key)
-                            event.put("nodeId", nodeId)
-                            event.put("addrs", addrs)
-                            session.pendingEvents.add(event)
-                        }
-                    }
-
-                    override fun onResolveFailed(serviceInfo: NsdServiceInfo, errorCode: Int) {}
-                    }
-                )
-            }
-
-            override fun onServiceLost(serviceInfo: NsdServiceInfo) {
-                val session = browseMap[browseId] ?: return
-                val instanceName = serviceInfo.serviceName
-                synchronized(session) {
-                    if (
-                        browseMap[browseId] !== session ||
-                        session.state != NativeSessionState.ACTIVE
-                    ) return
-                    // Invalidate queued resolves even when no resolved snapshot
-                    // has been emitted yet (found → lost → late resolve).
-                    session.presenceGenerations.remove(instanceName)
-                    val snapshot = session.knownNodes.remove(instanceName) ?: return
-                    val event = JSObject()
-                    event.put("type", "expired")
-                    event.put("instanceName", instanceName)
-                    event.put("nodeId", snapshot.nodeId)
-                    event.put("addrs", JSONArray())
-                    session.pendingEvents.add(event)
-                }
-            }
-        }
-
-        val session = BrowseSession(browseId, manager, listener, startInvoke)
-        browseMap[browseId] = session
-
-        try {
-            manager.discoverServices(serviceType, NsdManager.PROTOCOL_DNS_SD, listener)
-        } catch (e: Throwable) {
-            synchronized(session) {
-                if (browseMap[browseId] === session) browseMap.remove(browseId)
-                session.state = NativeSessionState.FAILED
-                session.terminalError = e.message
-                retireResolveRequests(session)
-                session.startInvoke.reject("Discovery failed: ${e.message}")
-            }
-        }
-    }
-
-    @Command
-    fun browse_peers_poll(invoke: Invoke) {
-        val args = invoke.parseArgs(BrowsePollArgs::class.java)
-        val session = browseMap[args.browseId]
-        val ret = JSObject()
-        if (session == null) {
-            ret.put("status", NativeSessionState.CLOSED.pollValue)
-            ret.put("events", JSONArray())
-        } else {
-            synchronized(session) {
-                val events = session.pendingEvents.toList()
-                session.pendingEvents.clear()
-                val arr = JSONArray()
-                events.forEach { arr.put(it) }
-                ret.put("status", session.state.pollValue)
-                ret.put("events", arr)
-                session.terminalError?.let { ret.put("error", it) }
-                if (
-                    session.state == NativeSessionState.CLOSED ||
-                    session.state == NativeSessionState.FAILED
-                ) {
-                    if (browseMap[args.browseId] === session) browseMap.remove(args.browseId)
-                }
-            }
-        }
-        invoke.resolve(ret)
-    }
-
-    @Command
-    fun browse_peers_stop(invoke: Invoke) {
-        val args = invoke.parseArgs(BrowseStopArgs::class.java)
-        val session = browseMap.remove(args.browseId)
-        if (session != null) {
-            synchronized(session) {
-                val wasStarting = session.state == NativeSessionState.STARTING
-                session.state = NativeSessionState.CLOSED
-                session.presenceGenerations.clear()
-                retireResolveRequests(session)
-                if (wasStarting) {
-                    session.startInvoke.reject("Peer browse stopped before becoming ready")
-                }
-            }
-            try { session.manager.stopServiceDiscovery(session.listener) } catch (_: Throwable) {}
-        }
-        invoke.resolve()
-    }
-
     // ── Advertise ─────────────────────────────────────────────────────────────
-
-    private fun peerServiceInfo(
-        serviceName: String,
-        pk: String,
-        relay: String?,
-        addresses: Iterable<String>
-    ): NsdServiceInfo = NsdServiceInfo().apply {
-        this.serviceName = pk.take(63)
-        this.serviceType = "_${serviceName}._udp"
-        setPort(1) // SRV placeholder; complete QUIC candidates live in TXT.
-        setAttribute("pk", pk)
-        relay?.trim()?.takeIf { it.isNotEmpty() }?.let { setAttribute("relay", it) }
-        stableFittingAddressTxtSubset(addresses)?.let { setAttribute("address", it) }
-    }
 
     /**
      * Dispatch unregister for one native listener at most once.
@@ -1007,12 +544,62 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
         }
     }
 
-    /** Fail current waiters while retaining the native owner for a later retry. */
-    private fun failAdvertisementStopRetainingOwner(session: AdvertiseSession, error: String) {
-        session.terminalError = error
-        val waiters = session.pendingStops.toList()
-        session.pendingStops.clear()
-        for (waiter in waiters) waiter.reject(error)
+    /**
+     * Retry an unaccepted unregister without requiring another Tauri command.
+     *
+     * Rust closes each native handle exactly once. Keep that Invoke pending and
+     * retain the listener until Android accepts unregister and later reports a
+     * terminal callback. The capped delay avoids a busy loop while still
+     * recovering from transient framework/OEM dispatch failures.
+     */
+    private fun scheduleAdvertisementStopRetry(session: AdvertiseSession, error: Throwable) {
+        if (
+            session.stopRetryScheduled ||
+            advertiseMap[session.id] !== session ||
+            session.state != NativeSessionState.CLOSED
+        ) return
+        session.stopRetryScheduled = true
+        val delayMillis = session.stopRetryDelayMillis
+        session.stopRetryDelayMillis =
+            (delayMillis * 2).coerceAtMost(MAX_STOP_RETRY_DELAY_MILLIS)
+        Log.w(
+            "iroh-http-dnssd",
+            "advertise ${session.id} unregister dispatch failed; retrying in " +
+                "${delayMillis}ms: ${error.message}"
+        )
+        stopRetryHandler.postDelayed({
+            synchronized(session) {
+                session.stopRetryScheduled = false
+                if (
+                    advertiseMap[session.id] !== session ||
+                    session.state != NativeSessionState.CLOSED ||
+                    session.generation in session.unregisteringGenerations ||
+                    session.generation in session.retiredRegistrationGenerations
+                ) return@synchronized
+
+                val retryError = unregisterRegistrationWithRetry(
+                    session,
+                    session.generation,
+                    session.listener
+                )
+                if (retryError == null) {
+                    session.stopRetryDelayMillis = INITIAL_STOP_RETRY_DELAY_MILLIS
+                } else {
+                    scheduleAdvertisementStopRetry(session, retryError)
+                }
+            }
+        }, delayMillis)
+    }
+
+    private fun rejectPendingAdvertisementStart(
+        session: AdvertiseSession,
+        cleanupError: String? = null
+    ) {
+        val startError = session.pendingStartFailure ?: return
+        session.pendingStartFailure = null
+        session.startInvoke.reject(
+            cleanupError?.let { "$startError; native cleanup failed: $it" } ?: startError
+        )
     }
 
     private fun registrationListener(
@@ -1028,10 +615,7 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
                     // instead of leaking a native service with no owner.
                     val error = unregisterRegistrationWithRetry(session, generation, this)
                     if (error != null) {
-                        failAdvertisementStopRetainingOwner(
-                            session,
-                            "DNS-SD advertisement stop failed: ${error.message}"
-                        )
+                        scheduleAdvertisementStopRetry(session, error)
                     }
                     return
                 }
@@ -1071,6 +655,7 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
                 if (session.state == NativeSessionState.CLOSED) {
                     session.pendingUpdate?.invoke?.reject("DNS-SD advertisement is closed")
                     session.pendingUpdate = null
+                    rejectPendingAdvertisementStart(session)
                     finishAdvertisementStop(session)
                     return
                 }
@@ -1105,6 +690,7 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
                     session.listener !== this
                 ) return
                 if (session.state == NativeSessionState.CLOSED) {
+                    rejectPendingAdvertisementStart(session)
                     finishAdvertisementStop(session)
                     return
                 }
@@ -1169,6 +755,7 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
                     // up the native service.
                     val message = "DNS-SD advertisement stop failed: error $errorCode"
                     session.terminalError = message
+                    rejectPendingAdvertisementStart(session, message)
                     finishAdvertisementStop(session, message)
                     return
                 }
@@ -1195,11 +782,10 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
     private fun startAdvertisement(
         manager: NsdManager,
         advertiseId: Long,
-        kind: AdvertisementKind,
         info: NsdServiceInfo,
         invoke: Invoke
     ) {
-        val session = AdvertiseSession(advertiseId, manager, kind, InvokeOnce(invoke))
+        val session = AdvertiseSession(advertiseId, manager, InvokeOnce(invoke))
         synchronized(session) {
             session.info = info
             session.listener = registrationListener(session, session.generation)
@@ -1207,56 +793,33 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
             try {
                 manager.registerService(info, NsdManager.PROTOCOL_DNS_SD, session.listener)
             } catch (e: Throwable) {
-                advertiseMap.remove(advertiseId)
-                session.state = NativeSessionState.FAILED
-                session.terminalError = e.message
+                val message = "Registration failed: ${e.message}"
+                if (e is IllegalArgumentException) {
+                    advertiseMap.remove(advertiseId)
+                    session.state = NativeSessionState.FAILED
+                    session.terminalError = message
+                    session.startInvoke.reject(message)
+                    return
+                }
+                session.state = NativeSessionState.CLOSED
+                session.terminalError = message
+                session.pendingStartFailure = message
                 // Validation failures happen before NsdManager installs the
                 // listener; transport failures can happen after installation.
-                // A failed cleanup stays retryable by a possible late callback.
-                try {
-                    unregisterRegistrationOnce(
-                        session,
-                        session.generation,
-                        session.listener
-                    )
-                } catch (_: Throwable) {}
-                session.startInvoke.reject("Registration failed: ${e.message}")
+                // Retain ownership until cleanup is accepted and terminal. If
+                // both bounded attempts fail, a late readiness callback can
+                // retry the same still-owned listener.
+                val cleanupError = unregisterRegistrationWithRetry(
+                    session,
+                    session.generation,
+                    session.listener
+                )
+                // If cleanup is still unaccepted, keep start pending and the
+                // map owned. Only a terminal native callback may release the
+                // Rust start lease.
+                cleanupError?.let { session.terminalError = "$message; cleanup: ${it.message}" }
             }
         }
-    }
-
-    @Command
-    fun advertise_peer_start(invoke: Invoke) {
-        val manager = nsd() ?: return invoke.reject("NsdManager unavailable")
-        val args = invoke.parseArgs(AdvertiseStartArgs::class.java)
-        val advertiseId = nextAdvertiseId.getAndIncrement()
-        val info = try {
-            peerServiceInfo(args.serviceName, args.pk, args.relay, args.addresses)
-        } catch (e: Throwable) {
-            return invoke.reject("Failed to encode peer DNS-SD record: ${e.message}")
-        }
-        startAdvertisement(
-            manager,
-            advertiseId,
-            AdvertisementKind.Peer(args.serviceName, args.pk),
-            info,
-            invoke
-        )
-    }
-
-    @Command
-    fun advertise_peer_update(invoke: Invoke) {
-        val args = invoke.parseArgs(AdvertiseUpdateArgs::class.java)
-        val session = advertiseMap[args.advertiseId]
-            ?: return invoke.reject("DNS-SD advertisement is closed")
-        val peer = session.kind as? AdvertisementKind.Peer
-            ?: return invoke.reject("Advertisement is not an iroh peer advertisement")
-        val info = try {
-            peerServiceInfo(peer.serviceName, peer.pk, args.relay, args.addresses)
-        } catch (e: Throwable) {
-            return invoke.reject("Failed to encode peer DNS-SD record: ${e.message}")
-        }
-        updateAdvertisement(args.advertiseId, info, invoke)
     }
 
     private fun updateAdvertisement(advertiseId: Long, info: NsdServiceInfo, invoke: Invoke) {
@@ -1318,6 +881,7 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
             // An UNREGISTERING update already dispatched the terminal call.
             if (update?.phase == AdvertisementUpdatePhase.UNREGISTERING) return
             if (session.generation in session.unregisteringGenerations) return
+            if (session.stopRetryScheduled) return
             // A terminal listener has no native registration left to stop.
             if (session.generation in session.retiredRegistrationGenerations) {
                 finishAdvertisementStop(session)
@@ -1349,30 +913,20 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
                 // callback. Keep the stop pending so a late acknowledgement can
                 // retry cleanup with the now-confirmed native registration.
                 if (!registrationStillPending) {
-                    failAdvertisementStopRetainingOwner(
-                        session,
-                        "DNS-SD advertisement stop failed: ${error.message}"
-                    )
+                    scheduleAdvertisementStopRetry(session, error)
                 }
             }
         }
     }
 
-    @Command
-    fun advertise_peer_stop(invoke: Invoke) {
-        val args = invoke.parseArgs(AdvertiseStopArgs::class.java)
-        stopAdvertisement(args.advertiseId, invoke)
-    }
-
-    // ── Generic DNS-SD ────────────────────────────────────────────────────────
+    // ── DNS-SD commands ───────────────────────────────────────────────────────
 
     private fun protoSuffix(protocol: String): String =
         if (protocol.equals("tcp", ignoreCase = true)) "_tcp" else "_udp"
 
     /**
      * Format a resolved host + port as a socket-address string. Numeric IPv6
-     * scopes are preserved; a link-local address without a numeric scope is
-     * subsequently rejected by `validatedSocketLiteral`.
+     * scopes are preserved.
      */
     private fun formatSocketAddr(host: InetAddress, port: Int): String {
         val literal = host.hostAddress?.substringBefore('%') ?: return ""
@@ -1382,6 +936,82 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
         } else {
             "$literal:$port"
         }
+    }
+
+    private fun finishBrowseStop(session: DnsSdBrowseSession, error: String? = null) {
+        if (dnsSdBrowseMap[session.id] === session) dnsSdBrowseMap.remove(session.id)
+        val waiters = session.pendingStops.toList()
+        session.pendingStops.clear()
+        for (waiter in waiters) {
+            if (error == null) waiter.resolve() else waiter.reject(error)
+        }
+    }
+
+    /** Retry an unaccepted active browse stop while preserving its first Invoke. */
+    private fun scheduleBrowseStopRetry(session: DnsSdBrowseSession, error: Throwable) {
+        if (
+            session.stopRetryScheduled ||
+            dnsSdBrowseMap[session.id] !== session ||
+            session.nativeTerminal ||
+            session.state != NativeSessionState.CLOSED
+        ) return
+        session.stopRetryScheduled = true
+        val delayMillis = session.stopRetryDelayMillis
+        session.stopRetryDelayMillis =
+            (delayMillis * 2).coerceAtMost(MAX_STOP_RETRY_DELAY_MILLIS)
+        Log.w(
+            "iroh-http-dnssd",
+            "browse ${session.id} stop dispatch failed; retrying in " +
+                "${delayMillis}ms: ${error.message}"
+        )
+        stopRetryHandler.postDelayed({
+            synchronized(session) {
+                session.stopRetryScheduled = false
+                if (
+                    dnsSdBrowseMap[session.id] !== session ||
+                    session.nativeTerminal ||
+                    session.state != NativeSessionState.CLOSED ||
+                    session.stopDispatchAccepted
+                ) return@synchronized
+                if (session.readinessPending) {
+                    session.stopDeferredUntilReady = true
+                    return@synchronized
+                }
+
+                val retryError = dispatchBrowseStopWithRetry(session)
+                if (retryError == null) {
+                    session.stopRetryDelayMillis = INITIAL_STOP_RETRY_DELAY_MILLIS
+                } else {
+                    scheduleBrowseStopRetry(session, retryError)
+                }
+            }
+        }, delayMillis)
+    }
+
+    private fun rejectPendingBrowseStart(
+        session: DnsSdBrowseSession,
+        cleanupError: String? = null
+    ) {
+        val startError = session.pendingStartFailure ?: return
+        session.pendingStartFailure = null
+        session.startInvoke.reject(
+            cleanupError?.let { "$startError; native cleanup failed: $it" } ?: startError
+        )
+    }
+
+    private fun dispatchBrowseStopWithRetry(session: DnsSdBrowseSession): Throwable? {
+        if (session.stopDispatchAccepted || session.nativeTerminal) return null
+        var lastError: Throwable? = null
+        repeat(MAX_BROWSE_STOP_DISPATCH_ATTEMPTS) {
+            try {
+                session.manager.stopServiceDiscovery(session.listener)
+                session.stopDispatchAccepted = true
+                return null
+            } catch (error: Throwable) {
+                lastError = error
+            }
+        }
+        return lastError
     }
 
     @Command
@@ -1400,15 +1030,27 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
                     if (dnsSdBrowseMap[browseId] !== session) return
                     val message = "Failed to start DNS-SD browse: error $errorCode"
                     val failedBeforeReady = session.state == NativeSessionState.STARTING
+                    val retainedFailedStart = session.pendingStartFailure != null
+                    val stopPending = session.pendingStops.isNotEmpty()
+                    session.readinessPending = false
+                    session.nativeTerminal = true
+                    session.stopDispatchAccepted = false
                     session.state = NativeSessionState.FAILED
                     session.terminalError = message
                     retireResolveRequests(session)
+                    rejectPendingBrowseStart(session)
                     if (failedBeforeReady) {
                         dnsSdBrowseMap.remove(browseId)
                         session.startInvoke.reject(message)
                         // Start failure is already terminal. In particular,
                         // API 21 removes the listener after this callback; a
                         // nested stop would target a failed discovery key.
+                    }
+                    if (stopPending) {
+                        session.state = NativeSessionState.CLOSED
+                        finishBrowseStop(session)
+                    } else if (retainedFailedStart) {
+                        dnsSdBrowseMap.remove(browseId)
                     }
                 }
             }
@@ -1417,22 +1059,40 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
                 synchronized(session) {
                     if (dnsSdBrowseMap[browseId] !== session) return
                     val failedBeforeReady = session.state == NativeSessionState.STARTING
+                    val retainedFailedStart = session.pendingStartFailure != null
+                    val stopPending = session.pendingStops.isNotEmpty()
+                    session.readinessPending = false
+                    session.nativeTerminal = true
+                    session.stopDispatchAccepted = false
                     session.state = NativeSessionState.FAILED
                     session.terminalError = "DNS-SD browse stop failed: error $errorCode"
                     retireResolveRequests(session)
+                    rejectPendingBrowseStart(session, session.terminalError)
                     if (failedBeforeReady) {
                         dnsSdBrowseMap.remove(browseId)
                         session.startInvoke.reject(session.terminalError!!)
+                    }
+                    if (stopPending) {
+                        finishBrowseStop(session, session.terminalError)
+                    } else if (retainedFailedStart) {
+                        dnsSdBrowseMap.remove(browseId)
                     }
                 }
             }
             override fun onDiscoveryStarted(serviceType: String) {
                 val session = dnsSdBrowseMap[browseId] ?: return
                 synchronized(session) {
-                    if (
-                        dnsSdBrowseMap[browseId] !== session ||
-                        session.state != NativeSessionState.STARTING
-                    ) return
+                    if (dnsSdBrowseMap[browseId] !== session) return
+                    session.readinessPending = false
+                    if (session.state == NativeSessionState.CLOSED) {
+                        session.stopDeferredUntilReady = false
+                        val error = dispatchBrowseStopWithRetry(session)
+                        if (error != null) {
+                            scheduleBrowseStopRetry(session, error)
+                        }
+                        return
+                    }
+                    if (session.state != NativeSessionState.STARTING) return
                     session.state = NativeSessionState.ACTIVE
                     val ret = JSObject()
                     ret.put("browseId", browseId)
@@ -1443,14 +1103,25 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
                 val session = dnsSdBrowseMap[browseId] ?: return
                 synchronized(session) {
                     if (dnsSdBrowseMap[browseId] !== session) return
-                    if (session.state == NativeSessionState.STARTING) {
+                    val stopPending = session.pendingStops.isNotEmpty()
+                    val stoppedBeforeReady = session.state == NativeSessionState.STARTING
+                    val retainedFailedStart = session.pendingStartFailure != null
+                    session.readinessPending = false
+                    session.nativeTerminal = true
+                    session.stopDispatchAccepted = false
+                    if (stoppedBeforeReady) {
                         session.state = NativeSessionState.CLOSED
-                        dnsSdBrowseMap.remove(browseId)
                         session.startInvoke.reject("DNS-SD browse stopped before becoming ready")
                     } else if (session.state == NativeSessionState.ACTIVE) {
                         session.state = NativeSessionState.CLOSED
                     }
                     retireResolveRequests(session)
+                    rejectPendingBrowseStart(session)
+                    if (stopPending) {
+                        finishBrowseStop(session)
+                    } else if (stoppedBeforeReady || retainedFailedStart) {
+                        dnsSdBrowseMap.remove(browseId)
+                    }
                 }
             }
 
@@ -1473,7 +1144,7 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
                     }
                 }
                 enqueueResolve(
-                    ResolveOwner.Generic(session, instanceName, generation),
+                    ResolveOwner(session, instanceName, generation),
                     session.manager,
                     serviceInfo,
                     object : NsdManager.ResolveListener {
@@ -1559,11 +1230,23 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
             manager.discoverServices(serviceType, NsdManager.PROTOCOL_DNS_SD, listener)
         } catch (e: Throwable) {
             synchronized(session) {
-                if (dnsSdBrowseMap[browseId] === session) dnsSdBrowseMap.remove(browseId)
-                session.state = NativeSessionState.FAILED
-                session.terminalError = e.message
+                val message = "Discovery failed: ${e.message}"
+                if (e is IllegalArgumentException) {
+                    if (dnsSdBrowseMap[browseId] === session) dnsSdBrowseMap.remove(browseId)
+                    session.state = NativeSessionState.FAILED
+                    session.terminalError = message
+                    session.startInvoke.reject(message)
+                    return
+                }
+                session.state = NativeSessionState.CLOSED
+                session.terminalError = message
+                session.pendingStartFailure = message
                 retireResolveRequests(session)
-                session.startInvoke.reject("Discovery failed: ${e.message}")
+                val cleanupError = dispatchBrowseStopWithRetry(session)
+                if (cleanupError != null) {
+                    session.stopDeferredUntilReady = true
+                    session.terminalError = "$message; cleanup: ${cleanupError.message}"
+                }
             }
         }
     }
@@ -1586,8 +1269,9 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
                 ret.put("records", arr)
                 session.terminalError?.let { ret.put("error", it) }
                 if (
-                    session.state == NativeSessionState.CLOSED ||
-                    session.state == NativeSessionState.FAILED
+                    session.nativeTerminal &&
+                    (session.state == NativeSessionState.CLOSED ||
+                        session.state == NativeSessionState.FAILED)
                 ) {
                     if (dnsSdBrowseMap[args.browseId] === session) {
                         dnsSdBrowseMap.remove(args.browseId)
@@ -1601,9 +1285,16 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
     @Command
     fun browse_stop(invoke: Invoke) {
         val args = invoke.parseArgs(BrowseStopArgs::class.java)
-        val session = dnsSdBrowseMap.remove(args.browseId)
-        if (session != null) {
-            synchronized(session) {
+        val completion = InvokeOnce(invoke)
+        val session = dnsSdBrowseMap[args.browseId] ?: return completion.resolve()
+        synchronized(session) {
+            if (dnsSdBrowseMap[args.browseId] !== session) return completion.resolve()
+            session.pendingStops.add(completion)
+            if (session.nativeTerminal) {
+                finishBrowseStop(session)
+                return
+            }
+            if (session.state != NativeSessionState.CLOSED) {
                 val wasStarting = session.state == NativeSessionState.STARTING
                 session.state = NativeSessionState.CLOSED
                 session.presenceGenerations.clear()
@@ -1612,9 +1303,27 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
                     session.startInvoke.reject("DNS-SD browse stopped before becoming ready")
                 }
             }
-            try { session.manager.stopServiceDiscovery(session.listener) } catch (_: Throwable) {}
+
+            if (
+                session.stopDispatchAccepted ||
+                session.stopDeferredUntilReady ||
+                session.stopRetryScheduled
+            ) return
+            if (session.readinessPending) {
+                try {
+                    session.manager.stopServiceDiscovery(session.listener)
+                    session.stopDispatchAccepted = true
+                } catch (_: Throwable) {
+                    session.stopDeferredUntilReady = true
+                }
+                return
+            }
+
+            val error = dispatchBrowseStopWithRetry(session)
+            if (error != null) {
+                scheduleBrowseStopRetry(session, error)
+            }
         }
-        invoke.resolve()
     }
 
     @Command
@@ -1646,7 +1355,7 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
         } catch (e: Throwable) {
             return invoke.reject("Failed to encode DNS-SD record: ${e.message}")
         }
-        startAdvertisement(manager, advertiseId, AdvertisementKind.Generic, info, invoke)
+        startAdvertisement(manager, advertiseId, info, invoke)
     }
 
     @Command
@@ -1662,9 +1371,6 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
         }
         val session = advertiseMap[args.advertiseId]
             ?: return invoke.reject("DNS-SD advertisement is closed")
-        if (session.kind !is AdvertisementKind.Generic) {
-            return invoke.reject("Advertisement is not a generic DNS-SD advertisement")
-        }
         val identity = synchronized(session) {
             Pair(session.info.serviceName, session.info.serviceType)
         }

@@ -148,7 +148,8 @@ cannot restart a session or emit records from it.
 
 The deterministic ownership guards are in
 [`source_scoped_lookup.rs`](../../crates/iroh-http-core/src/endpoint/source_scoped_lookup.rs),
-[`mobile_address_lookup.rs`](../../packages/iroh-http-tauri/src/mobile_address_lookup.rs),
+the canonical peer projection in
+[`iroh-http-discovery`](../../crates/iroh-http-discovery/src/lib.rs),
 [`discovery_ownership.rs`](../../packages/iroh-http-tauri/src/discovery_ownership.rs),
 and
 [`discovery_handles.rs`](../../packages/iroh-http-tauri/src/discovery_handles.rs).
@@ -180,9 +181,9 @@ Rust peer projection.
 | Shared JS lifecycle | `npm test --workspace=packages/iroh-http-shared` | One-start iterator behavior; abort, return, failure, cleanup, and peer/generic sharing. |
 | Cross-runtime public shape | [`tests/suites/discovery.mjs`](../../tests/suites/discovery.mjs) through Node, Deno, and Tauri runners | Public methods return the expected promise/iterable shapes, abort settles, and `asIrohPeer` compatibility remains. This suite deliberately does not prove multicast behavior. |
 | Structured interop | [`tests/interop/suite.mjs`](../../tests/interop/suite.mjs) | Real advertise/browse self round-trip, dialable address TXT, and rebind re-emission where mDNS is available. |
-| Android native contract | `bash packages/iroh-http-tauri/android-contract-tests/run.sh` | Deterministic `NsdManager` callbacks: readiness/failure, found/lost/late-resolve, source identity, queue retirement, TXT fitting, registration update/stop races, and API-era listener ordering. |
+| Android native contract | `bash packages/iroh-http-tauri/android-contract-tests/run.sh` | Deterministic generic `NsdManager` callbacks: readiness/failure, found/lost/late-resolve, resolve-queue retirement, peer-shaped TXT fidelity, registration update/stop races, unregister retry, and API-era listener ordering. Peer parsing and TXT fitting are Rust policy tests. |
 | Android compile | `bash packages/iroh-http-tauri/scripts/ci-android-gradle-build.sh` | Kotlin/Tauri API compatibility at compile SDK 34 (plus the CI-resolved Tauri Android SDK). |
-| iOS native contract | `bash packages/iroh-http-tauri/ios/ContractTests/run.sh` | Peer address-TXT fitting plus a deterministic executable specification for readiness/failure, found/change/lost, stale generations, stop acknowledgement, and callback races. The lifecycle cases must be retargeted to the extracted production reducer before native legacy deletion. |
+| iOS native contract | `bash packages/iroh-http-tauri/ios/ContractTests/run.sh` | Deterministic production generic-lifecycle coverage for readiness/failure, peer-shaped TXT fidelity, found/change/lost, stale generations, stop acknowledgement, and callback races. Peer parsing and TXT fitting are Rust policy tests. |
 | iOS compile | `bash packages/iroh-http-tauri/scripts/ci-ios-swift-build.sh` | Full Swift plugin compiles against the iOS 14 simulator/Tauri API. |
 | Physical device matrix | [`dns-sd-device-verification.md`](dns-sd-device-verification.md) | Actual multicast, permissions, desktop↔mobile discovery, direct dial, rebind, and the iOS metadata-only/Android fully-resolved distinction. |
 
@@ -228,39 +229,23 @@ The refactor is complete only when all behavior above is green and the code has:
   moves. Native harnesses may be retargeted to the generic adapter, while peer
   interpretation cases move to Rust projection tests.
 
-## Known gaps and documentation drift
+## Remaining verification constraints
 
-These are not permission to weaken the contract; they identify gates that need
-work before destructive legacy deletion:
+These are not permission to weaken the contract; they are explicit boundaries
+for review and release:
 
-1. **The iOS lifecycle contract is not yet coupled to production.** The host
-   contract now specifies the Android-equivalent readiness/failure,
-   found/lost/stale-callback, close-race, and update/stop scenarios, but it
-   currently drives a test-only reducer because the production state is private
-   and coupled directly to `NWBrowser`, `NetService`, and Tauri `Invoke`.
-   Retarget the same cases to the extracted production reducer before deleting
-   the peer-specific Swift path.
-2. **Post-ready advertisement failure has no status channel.** ADR-019 records
+1. **Post-ready advertisement failure has no status channel.** ADR-019 records
    this explicitly. Start readiness is covered, but a later native
    advertisement failure cannot yet be delivered uniformly.
-3. **Physical-device verification remains outstanding.** Compile and host
+2. **Physical-device verification remains outstanding.** Compile and host
    callback tests do not prove multicast visibility, permissions, interface
    changes, or OEM behavior. Complete the matrix in
-   `dns-sd-device-verification.md` before the final native deletion checkpoint.
-4. **ADR-018 type prose drifted.** It says `DiscoveredPeer` gained optional TXT,
-   port, instance, and host fields and calls the generic field `serviceName`.
-   The shipped public type has only `nodeId`, `addrs`, `isActive`, and
-   `ServiceRecord.serviceType`. Preserve the shipped API unless a separately
-   approved breaking/additive API change is made.
-5. **Some guides are stale.** [`docs/api-overview.md`](../api-overview.md)
-   still says mDNS is unavailable on iOS/Android, and the device runbook's
-   introduction says no CI job compiles mobile code even though `ci.yml` now
-   compiles both native plugins and runs host contracts. Correct these as part
-   of final documentation cleanup, without changing behavior.
-6. **“Lossless” needs the iOS qualifier everywhere.** Generic Rust/desktop and
+   `dns-sd-device-verification.md` before treating the mobile work as
+   device-verified.
+3. **“Lossless” needs the iOS qualifier everywhere.** Generic Rust/desktop and
    Android records are lossless; iOS generic browse is deliberately
    metadata-only. Tests and docs must keep that distinction explicit.
-7. **Port `1` policy differs at two public/internal boundaries.** Rust peer
+4. **Port `1` policy differs at two public/internal boundaries.** Rust peer
    lookup treats `:1` as a placeholder, while the exported
    `isDialableSocketAddr()` accepts it as a valid socket port. Consolidation
    must preserve this until a separately reviewed compatibility decision makes

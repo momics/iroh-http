@@ -29,10 +29,9 @@ discovery = ["dep:iroh-http-discovery"]
 [dependencies]
 iroh-http-core = { path = "../../crates/iroh-http-core", version = "0.6.0" }
 iroh-http-adapter = { path = "../../crates/iroh-http-adapter", version = "0.6.0" }
-# iroh: the mobile AddressLookup bridge implements
-# `iroh::address_lookup::AddressLookup` in-process. Inherited from
-# `[workspace.dependencies]` above so it stays locked to the same iroh as
-# iroh-http-core / -adapter.
+# Used directly for the endpoint address watcher that refreshes mobile peer
+# advertisements. Inherited from `[workspace.dependencies]` above so it stays
+# locked to the same iroh as iroh-http-core / -adapter.
 iroh = { workspace = true }
 bytes = "1"
 base64 = "0.22"
@@ -49,8 +48,8 @@ tracing = "0.1"
 # version already in the tree so no second copy is linked.
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 
-# iOS direct-address fallback: enumerate every active interface instead of
-# assuming a default IPv4/IPv6 route exists. Android cannot use if-addrs 0.15:
+# iOS peer advertisement inventory: enumerate every active interface instead
+# of assuming a default IPv4/IPv6 route exists. Android cannot use if-addrs 0.15:
 # its getifaddrs call requires API 24 while this plugin supports API 21. Android
 # inventory therefore comes from the API-21-safe native mobile bridge.
 [target.'cfg(target_os = "ios")'.dependencies]

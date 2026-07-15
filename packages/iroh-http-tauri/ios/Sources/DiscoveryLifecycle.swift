@@ -5,12 +5,13 @@ import Foundation
 enum DiscoverySessionState: Equatable {
     case starting
     case active
+    case stopping
     case closed
     case failed(String)
 
     var pollValue: String {
         switch self {
-        case .starting, .active:
+        case .starting, .active, .stopping:
             return "active"
         case .closed:
             return "closed"
@@ -25,6 +26,14 @@ enum DiscoveryStartCompletion: Equatable {
     case pending
     case resolved(UInt64)
     case rejected(String)
+}
+
+/// Invoke-equivalent completion of an accepted native stop. Requesting a stop
+/// never resolves it; only the platform's terminal callback may do that.
+enum DiscoveryStopCompletion: Equatable {
+    case notRequested
+    case pending
+    case resolved
 }
 
 /// Metadata surfaced by the iOS `NWBrowser` adapter.
@@ -82,6 +91,12 @@ struct DiscoveryBrowseChange: Equatable {
     let isUpdate: Bool
 }
 
+enum DiscoveryBrowseStopDisposition: Equatable {
+    case cancelNow
+    case alreadyStopping
+    case alreadyTerminal
+}
+
 /// Deterministic reducer for one native generic browse generation.
 ///
 /// `NWBrowser` callbacks are translated into these methods on the plugin's
@@ -94,9 +109,12 @@ final class DiscoveryBrowseLifecycle {
 
     private(set) var state: DiscoverySessionState = .starting
     private(set) var startCompletion: DiscoveryStartCompletion = .pending
+    private(set) var stopCompletion: DiscoveryStopCompletion = .notRequested
+    private(set) var nativeTerminalAcknowledged = false
 
     private var known: [String: DiscoveryDnsSdRecord] = [:]
     private var pending: [DiscoveryDnsSdRecord] = []
+    private var pendingStartFailure: String?
 
     init(id: UInt64, callbackGeneration: UInt64) {
         self.id = id
@@ -115,23 +133,37 @@ final class DiscoveryBrowseLifecycle {
         switch state {
         case .starting:
             state = .failed(message)
-            completeStart(.rejected(message))
+            pendingStartFailure = message
         case .active:
             state = .failed(message)
-        case .closed, .failed:
+        case .stopping, .closed, .failed:
             return
         }
     }
 
     func nativeCancelled(generation: UInt64) {
-        guard accepts(generation) else { return }
+        guard generation == callbackGeneration else { return }
+        nativeTerminalAcknowledged = true
         switch state {
         case .starting:
             state = .closed
             completeStart(.rejected("browse closed before becoming ready"))
         case .active:
             state = .closed
-        case .closed, .failed:
+        case .stopping:
+            state = .closed
+            if startCompletion == .pending {
+                completeStart(
+                    .rejected(pendingStartFailure ?? "browse closed before becoming ready")
+                )
+            }
+            stopCompletion = .resolved
+        case .failed(let message):
+            if startCompletion == .pending {
+                completeStart(.rejected(pendingStartFailure ?? message))
+                state = .closed
+            }
+        case .closed:
             return
         }
     }
@@ -176,14 +208,28 @@ final class DiscoveryBrowseLifecycle {
     }
 
     @discardableResult
-    func stop() -> Bool {
-        if state == .starting {
-            completeStart(.rejected("browse closed before becoming ready"))
+    func requestStop() -> DiscoveryBrowseStopDisposition {
+        if nativeTerminalAcknowledged {
+            // Stop won the serial-queue race with poll, so it becomes the
+            // terminal consumer. Discard an unobserved failure and make the
+            // native session removable without waiting for another command.
+            state = .closed
+            stopCompletion = .resolved
+            known.removeAll()
+            pending.removeAll()
+            return .alreadyTerminal
         }
-        state = .closed
+        if state == .stopping {
+            return .alreadyStopping
+        }
+        if state == .starting {
+            pendingStartFailure = "browse closed before becoming ready"
+        }
+        stopCompletion = .pending
+        state = .stopping
         known.removeAll()
         pending.removeAll()
-        return true
+        return .cancelNow
     }
 
     func poll() -> DiscoveryBrowsePoll {
@@ -214,6 +260,7 @@ final class DiscoveryBrowseLifecycle {
 enum DiscoveryAdvertisementStopDisposition: Equatable {
     case stopNow
     case afterUpdate
+    case alreadyStopping
     case alreadyStopped
 }
 
@@ -249,8 +296,11 @@ final class DiscoveryAdvertisementLifecycle {
 
     private(set) var state: DiscoverySessionState = .starting
     private(set) var startCompletion: DiscoveryStartCompletion = .pending
+    private(set) var stopCompletion: DiscoveryStopCompletion = .notRequested
+    private(set) var nativeTerminalAcknowledged = false
     private var updateInFlight = false
     private var stopAfterUpdate = false
+    private var pendingStartFailure: String?
 
     init(id: UInt64, callbackGeneration: UInt64) {
         self.id = id
@@ -269,16 +319,17 @@ final class DiscoveryAdvertisementLifecycle {
         switch state {
         case .starting:
             state = .failed(message)
-            completeStart(.rejected(message))
+            pendingStartFailure = message
         case .active:
             state = .failed(message)
-        case .closed, .failed:
+        case .stopping, .closed, .failed:
             return
         }
     }
 
     func nativeStopped(generation: UInt64) {
-        guard accepts(generation) else { return }
+        guard generation == callbackGeneration else { return }
+        nativeTerminalAcknowledged = true
         switch state {
         case .starting:
             let message = "registration stopped before it was published"
@@ -286,7 +337,20 @@ final class DiscoveryAdvertisementLifecycle {
             completeStart(.rejected(message))
         case .active:
             state = .failed("registration stopped unexpectedly")
-        case .closed, .failed:
+        case .stopping:
+            state = .closed
+            if startCompletion == .pending {
+                completeStart(
+                    .rejected(pendingStartFailure ?? "advertisement closed before becoming ready")
+                )
+            }
+            stopCompletion = .resolved
+        case .failed(let message):
+            state = .closed
+            if startCompletion == .pending {
+                completeStart(.rejected(pendingStartFailure ?? message))
+            }
+        case .closed:
             return
         }
     }
@@ -304,14 +368,18 @@ final class DiscoveryAdvertisementLifecycle {
         if state == .closed {
             return .alreadyStopped
         }
+        if state == .stopping {
+            return .alreadyStopping
+        }
+        stopCompletion = .pending
         if state == .starting {
-            completeStart(.rejected("advertisement closed before becoming ready"))
+            pendingStartFailure = "advertisement closed before becoming ready"
         }
         if updateInFlight {
             stopAfterUpdate = true
             return .afterUpdate
         }
-        state = .closed
+        state = .stopping
         return .stopNow
     }
 
@@ -322,7 +390,7 @@ final class DiscoveryAdvertisementLifecycle {
         updateInFlight = false
         guard stopAfterUpdate else { return false }
         stopAfterUpdate = false
-        state = .closed
+        state = .stopping
         return true
     }
 

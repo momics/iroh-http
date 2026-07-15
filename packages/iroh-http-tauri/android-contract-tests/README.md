@@ -12,8 +12,9 @@ It covers:
 - plural peer address TXT validation and SRV/relay fallback;
 - the exact 247-byte address TXT boundary and stable subset fitting;
 - registration acknowledgement, API-21 and current-AOSP terminal listener
-  ordering, retry after a failed unregister dispatch, peer advertisement
-  updates, and callback/threaded update/stop races;
+  ordering, autonomous delayed browse/unregister retries after repeated dispatch
+  failures, generic advertisement updates, and callback/threaded update/stop
+  races;
 - generic explicit-address rejection.
 
 Run it from the repository root:

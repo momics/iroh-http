@@ -26,7 +26,7 @@ pub mod engine;
 #[cfg(feature = "mdns")]
 pub mod dns_sd;
 
-#[cfg(feature = "mdns")]
+#[cfg(feature = "runtime")]
 use std::{
     collections::{HashMap, VecDeque},
     net::{IpAddr, SocketAddr},
@@ -36,23 +36,25 @@ use std::{
     },
 };
 
-#[cfg(feature = "mdns")]
-use futures::{stream::BoxStream, FutureExt};
+#[cfg(feature = "runtime")]
+use futures::stream::BoxStream;
 
 #[cfg(feature = "mdns")]
+use futures::FutureExt;
+
+#[cfg(feature = "runtime")]
 use iroh::{
     address_lookup::{AddressLookup, AddressLookupServices, Error as AddressLookupError, Item},
     EndpointId, Watcher,
 };
 
-#[cfg(feature = "mdns")]
+#[cfg(feature = "runtime")]
 use iroh_http_core::{AddressLookupSource, SourceScopedAddressLookup};
 
+pub use engine::{BrowseConfig, Protocol, ServiceConfig, ServiceRecord};
+
 #[cfg(feature = "mdns")]
-pub use dns_sd::{
-    advertise, browse, AdvertiseSession, BrowseConfig, BrowseSession as ServiceBrowseSession,
-    Protocol, ServiceConfig, ServiceRecord,
-};
+pub use dns_sd::{advertise, browse, AdvertiseSession, BrowseSession as ServiceBrowseSession};
 
 // ── DiscoveryError ────────────────────────────────────────────────────────────
 
@@ -114,7 +116,7 @@ pub const TXT_RELAY: &str = "relay";
 /// validate, and deduplicate every member. See #346/#350.
 pub const TXT_ADDRESS: &str = "address";
 
-#[cfg(feature = "mdns")]
+#[cfg(feature = "runtime")]
 const DNS_SD_TXT_ENTRY_MAX_BYTES: usize = 255;
 
 /// Join as many complete values as fit in one DNS-SD TXT entry.
@@ -122,7 +124,7 @@ const DNS_SD_TXT_ENTRY_MAX_BYTES: usize = 255;
 /// RFC 6763 TXT entries are length-prefixed by one byte, so `key=value` must
 /// not exceed 255 bytes. Selection is stable: input order is preserved and an
 /// item that does not fit is skipped without truncating it.
-#[cfg(feature = "mdns")]
+#[cfg(feature = "runtime")]
 fn fit_txt_values(key: &str, values: &[String]) -> Option<String> {
     let prefix_len = key.len().checked_add(1)?;
     let value_budget = DNS_SD_TXT_ENTRY_MAX_BYTES.checked_sub(prefix_len)?;
@@ -148,7 +150,7 @@ fn fit_txt_values(key: &str, values: &[String]) -> Option<String> {
 /// label that fits a DNS-SD instance name and matches the node-id form used by
 /// the rest of iroh-http. iroh's own `Display` is 64-char hex, which exceeds the
 /// 63-byte DNS label limit and is rejected by `mdns-sd`.
-#[cfg(feature = "mdns")]
+#[cfg(feature = "runtime")]
 fn node_id_label(id: &iroh::EndpointId) -> String {
     base32::encode(
         base32::Alphabet::Rfc4648Lower { padding: false },
@@ -162,7 +164,7 @@ fn node_id_label(id: &iroh::EndpointId) -> String {
 /// label. On active records the resolved socket addresses are surfaced and a
 /// `relay` TXT property is appended if present. Returns `None` if no usable
 /// node id can be derived.
-#[cfg(feature = "mdns")]
+#[cfg(feature = "runtime")]
 fn peer_event_from_record(rec: &ServiceRecord) -> Option<PeerDiscoveryEvent> {
     let node_id = rec
         .txt
@@ -242,7 +244,7 @@ fn peer_event_from_record(rec: &ServiceRecord) -> Option<PeerDiscoveryEvent> {
     })
 }
 
-#[cfg(feature = "mdns")]
+#[cfg(feature = "runtime")]
 fn same_scoped_host(left: &SocketAddr, right: &SocketAddr) -> bool {
     match (left, right) {
         (SocketAddr::V4(left), SocketAddr::V4(right)) => left.ip() == right.ip(),
@@ -264,13 +266,13 @@ fn same_scoped_host(left: &SocketAddr, right: &SocketAddr) -> bool {
 /// Drop to stop receiving events; the underlying DNS-SD browse and its daemon
 /// are shut down, and every address contributed by this browse is synchronously
 /// retracted from the endpoint lookup.
-#[cfg(feature = "mdns")]
+#[cfg(feature = "runtime")]
 #[derive(Debug)]
 struct EndpointLookupProvider {
     lookup: SourceScopedAddressLookup,
 }
 
-#[cfg(feature = "mdns")]
+#[cfg(feature = "runtime")]
 impl AddressLookup for EndpointLookupProvider {
     fn resolve(
         &self,
@@ -280,14 +282,14 @@ impl AddressLookup for EndpointLookupProvider {
     }
 }
 
-#[cfg(feature = "mdns")]
+#[cfg(feature = "runtime")]
 fn endpoint_lookup_registry() -> &'static Mutex<HashMap<usize, Weak<EndpointLookupProvider>>> {
     static REGISTRY: OnceLock<Mutex<HashMap<usize, Weak<EndpointLookupProvider>>>> =
         OnceLock::new();
     REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-#[cfg(feature = "mdns")]
+#[cfg(feature = "runtime")]
 fn endpoint_lookup_for_key(
     endpoint_key: usize,
     services: &AddressLookupServices,
@@ -308,7 +310,7 @@ fn endpoint_lookup_for_key(
     provider.lookup.clone()
 }
 
-#[cfg(feature = "mdns")]
+#[cfg(feature = "runtime")]
 fn endpoint_lookup(services: &AddressLookupServices) -> SourceScopedAddressLookup {
     // `Endpoint::address_lookup` returns a reference to a field in the endpoint's
     // shared inner allocation, so this address is stable across Endpoint clones
@@ -318,9 +320,9 @@ fn endpoint_lookup(services: &AddressLookupServices) -> SourceScopedAddressLooku
     endpoint_lookup_for_key(services as *const AddressLookupServices as usize, services)
 }
 
-#[cfg(feature = "mdns")]
+#[cfg(feature = "runtime")]
 struct PeerBrowseShared {
-    inner: ServiceBrowseSession,
+    inner: Arc<engine::BrowseSession>,
     source: AddressLookupSource,
     pending: Mutex<VecDeque<PeerDiscoveryEvent>>,
     next_event: tokio::sync::Mutex<()>,
@@ -328,9 +330,9 @@ struct PeerBrowseShared {
     closed: AtomicBool,
 }
 
-#[cfg(feature = "mdns")]
+#[cfg(feature = "runtime")]
 impl PeerBrowseShared {
-    fn new(inner: ServiceBrowseSession, source: AddressLookupSource) -> Arc<Self> {
+    fn new(inner: Arc<engine::BrowseSession>, source: AddressLookupSource) -> Arc<Self> {
         let shared = Arc::new(Self {
             inner,
             source,
@@ -381,12 +383,12 @@ impl PeerBrowseShared {
     }
 }
 
-#[cfg(feature = "mdns")]
+#[cfg(feature = "runtime")]
 pub struct BrowseSession {
     shared: Arc<PeerBrowseShared>,
 }
 
-#[cfg(feature = "mdns")]
+#[cfg(feature = "runtime")]
 fn apply_peer_record(
     source: &AddressLookupSource,
     record: &ServiceRecord,
@@ -430,7 +432,7 @@ fn apply_peer_record(
     }
 }
 
-#[cfg(feature = "mdns")]
+#[cfg(feature = "runtime")]
 impl BrowseSession {
     /// Returns the next peer event, or `None` when the session is closed.
     ///
@@ -457,9 +459,17 @@ impl BrowseSession {
                 }
                 return Some(event);
             }
-            let Some(record) = self.shared.inner.next_record().await else {
-                self.close();
-                return None;
+            let record = match self.shared.inner.next().await {
+                Ok(Some(event)) => ServiceRecord::from(event),
+                Ok(None) => {
+                    self.close();
+                    return None;
+                }
+                Err(error) => {
+                    tracing::debug!(%error, "iroh-http-discovery: DNS-SD browse failed");
+                    self.close();
+                    return None;
+                }
             };
             let mut events = apply_peer_record(&self.shared.source, &record).into_iter();
             let Some(event) = events.next() else {
@@ -484,13 +494,60 @@ impl BrowseSession {
     pub fn close(&self) {
         self.shared.close();
     }
+
+    /// Stop browsing, retract this browse's lookup contributions, and wait
+    /// until the platform transport acknowledges native cleanup.
+    pub async fn wait_closed(&self) -> Result<(), engine::TransportError> {
+        self.shared.close();
+        self.shared.inner.wait_closed().await
+    }
 }
 
-#[cfg(feature = "mdns")]
+#[cfg(feature = "runtime")]
 impl Drop for BrowseSession {
     fn drop(&mut self) {
         self.close();
     }
+}
+
+/// Project an already-started DNS-SD engine browse into an iroh endpoint.
+///
+/// This is the platform-adapter seam for Android and iOS: native discovery
+/// supplies the engine session, while this crate owns all iroh peer parsing,
+/// source-scoped lookup updates, endpoint-close handling, and retraction.
+#[cfg(feature = "runtime")]
+pub fn browse_peers_with_engine(
+    ep: &iroh::Endpoint,
+    inner: Arc<engine::BrowseSession>,
+) -> Result<BrowseSession, DiscoveryError> {
+    if ep.is_closed() {
+        inner.close();
+        return Err(DiscoveryError::Setup("endpoint is closed".to_string()));
+    }
+    let services = match ep.address_lookup() {
+        Ok(services) => services,
+        Err(error) => {
+            inner.close();
+            return Err(DiscoveryError::Setup(error.to_string()));
+        }
+    };
+    let source = endpoint_lookup(services).new_source();
+    let shared = PeerBrowseShared::new(inner, source);
+    let weak = Arc::downgrade(&shared);
+    let endpoint_closed = ep.closed();
+    let task = tokio::spawn(async move {
+        endpoint_closed.await;
+        if let Some(shared) = weak.upgrade() {
+            shared.close();
+        }
+    });
+    shared.install_endpoint_task(task.abort_handle());
+    drop(task);
+    if ep.is_closed() {
+        shared.close();
+        return Err(DiscoveryError::Setup("endpoint is closed".to_string()));
+    }
+    Ok(BrowseSession { shared })
 }
 
 /// Start a browse session: discover iroh-http peers on the local network.
@@ -506,38 +563,11 @@ pub async fn browse_peers(
     ep: &iroh::Endpoint,
     service_name: &str,
 ) -> Result<BrowseSession, DiscoveryError> {
-    let services = ep
-        .address_lookup()
-        .map_err(|e| DiscoveryError::Setup(e.to_string()))?;
     // Establish the native browse before installing the endpoint provider, so
     // invalid service names and daemon setup failures cannot grow the endpoint's
     // permanent AddressLookupServices list.
     let inner = dns_sd::browse(BrowseConfig::udp(service_name))?;
-    if ep.is_closed() {
-        inner.close();
-        return Err(DiscoveryError::Setup("endpoint is closed".to_string()));
-    }
-    let lookup = endpoint_lookup(services);
-    let source = lookup.new_source();
-    let shared = PeerBrowseShared::new(inner, source);
-    let weak = Arc::downgrade(&shared);
-    let endpoint_closed = ep.closed();
-    let task = tokio::spawn(async move {
-        endpoint_closed.await;
-        if let Some(shared) = weak.upgrade() {
-            shared.close();
-        }
-    });
-    shared.install_endpoint_task(task.abort_handle());
-    drop(task);
-    // Close can win after the first preflight but before the endpoint watcher
-    // is installed. Reject when it did, rather than returning a browse handle
-    // that was already retired before this start operation linearized.
-    if ep.is_closed() {
-        shared.close();
-        return Err(DiscoveryError::Setup("endpoint is closed".to_string()));
-    }
-    Ok(BrowseSession { shared })
+    browse_peers_with_engine(ep, inner.engine_session())
 }
 
 // ── iroh-http advertise (specialization of dns_sd::advertise) ────────────────
@@ -547,40 +577,60 @@ fn select_advertise_address(
     ip_addrs: &[SocketAddr],
     bound_sockets: &[SocketAddr],
 ) -> Option<String> {
-    select_advertise_addresses(ip_addrs, bound_sockets)
+    peer_direct_addresses(ip_addrs, bound_sockets, &[])
         .into_iter()
         .next()
+        .map(|address| address.to_string())
 }
 
-/// Select every dialable endpoint candidate for the `address` TXT boundary.
+/// Select every dialable direct candidate for an iroh peer.
 ///
 /// Loopback, unspecified, and link-local addresses are excluded. Real ports
 /// (including reflexive QAD ports) remain authoritative. Only a `:0`/`:1`
-/// placeholder borrows a same-family bound QUIC port; a placeholder with no
-/// matching listener is skipped. Order is preserved and duplicates collapse,
-/// retaining simultaneous LAN, VPN, IPv4, and IPv6 paths.
-#[cfg(feature = "mdns")]
-fn select_advertise_addresses(
+/// placeholder borrows a compatible bound QUIC port; a placeholder with no
+/// matching listener is skipped. Supplied interface IPs fill gaps in iroh's
+/// endpoint snapshot using the same rule. Endpoint order is preserved, then
+/// interface order, and duplicates collapse, retaining simultaneous LAN, VPN,
+/// IPv4, and IPv6 paths.
+///
+/// This is the canonical policy seam used by peer advertisement and mobile
+/// `discovery_info`; platform adapters only provide their interface inventory.
+#[cfg(feature = "runtime")]
+pub fn peer_direct_addresses(
     ip_addrs: &[SocketAddr],
     bound_sockets: &[SocketAddr],
-) -> Vec<String> {
-    let mut selected = Vec::new();
+    interface_ips: &[IpAddr],
+) -> Vec<SocketAddr> {
+    let compatible_bound = |ip: IpAddr| {
+        bound_sockets.iter().find(|bound| {
+            bound.is_ipv6() == ip.is_ipv6()
+                && !is_placeholder_port(bound.port())
+                && (bound.ip().is_unspecified() || bound.ip() == ip)
+        })
+    };
+    let mut selected: Vec<SocketAddr> = Vec::new();
     for addr in ip_addrs
         .iter()
         .copied()
         .filter(|addr| is_routable_ip(&addr.ip()))
     {
         let addr = if is_placeholder_port(addr.port()) {
-            let Some(bound) = bound_sockets.iter().find(|bound| {
-                bound.is_ipv6() == addr.is_ipv6() && !is_placeholder_port(bound.port())
-            }) else {
+            let Some(bound) = compatible_bound(addr.ip()) else {
                 continue;
             };
             SocketAddr::new(addr.ip(), bound.port())
         } else {
             addr
         };
-        let addr = addr.to_string();
+        if !selected.contains(&addr) {
+            selected.push(addr);
+        }
+    }
+    for ip in interface_ips.iter().copied().filter(is_routable_ip) {
+        let Some(bound) = compatible_bound(ip) else {
+            continue;
+        };
+        let addr = SocketAddr::new(ip, bound.port());
         if !selected.contains(&addr) {
             selected.push(addr);
         }
@@ -591,7 +641,7 @@ fn select_advertise_addresses(
 /// Whether `port` is a non-dialable placeholder (`0` unspecified, or `1` — the
 /// value iOS was observed enumerating for a local address, never a real QUIC
 /// ephemeral port). Mirrors `is_placeholder_port` in `iroh-http-core`.
-#[cfg(feature = "mdns")]
+#[cfg(feature = "runtime")]
 fn is_placeholder_port(port: u16) -> bool {
     port == 0 || port == 1
 }
@@ -602,7 +652,7 @@ fn is_placeholder_port(port: u16) -> bool {
 /// on its own segment, so advertising it as a dialable address makes a browsing
 /// peer's direct dial fail (#350). `Ipv6Addr::is_unicast_link_local` is still
 /// unstable, so the `fe80::/10` prefix is matched by hand.
-#[cfg(feature = "mdns")]
+#[cfg(feature = "runtime")]
 fn is_routable_ip(ip: &IpAddr) -> bool {
     if ip.is_loopback() || ip.is_unspecified() {
         return false;
@@ -614,7 +664,7 @@ fn is_routable_ip(ip: &IpAddr) -> bool {
 }
 
 #[cfg(feature = "mdns")]
-fn peer_service_config(
+fn desktop_peer_service_config(
     service_name: &str,
     instance_name: &str,
     bound_sockets: &[SocketAddr],
@@ -633,7 +683,7 @@ fn peer_service_config(
                 (interface.ip(), usable)
             }),
     );
-    peer_service_config_with_interfaces(
+    peer_service_config_from_snapshot(
         service_name,
         instance_name,
         bound_sockets,
@@ -658,8 +708,8 @@ fn operational_interface_ips(interfaces: impl IntoIterator<Item = (IpAddr, bool)
         .collect()
 }
 
-#[cfg(feature = "mdns")]
-fn peer_service_config_with_interfaces(
+#[cfg(feature = "runtime")]
+fn peer_service_config_from_snapshot(
     service_name: &str,
     instance_name: &str,
     bound_sockets: &[SocketAddr],
@@ -667,14 +717,13 @@ fn peer_service_config_with_interfaces(
     interface_ips: &[IpAddr],
 ) -> Result<ServiceConfig, DiscoveryError> {
     let socket_addrs: Vec<SocketAddr> = node_addr.ip_addrs().copied().collect();
-    let direct = select_advertise_addresses(&socket_addrs, bound_sockets);
-    let direct_sockets: Vec<SocketAddr> = direct
+    let direct_sockets = peer_direct_addresses(&socket_addrs, bound_sockets, interface_ips);
+    let direct: Vec<String> = direct_sockets
         .iter()
-        .filter_map(|address| address.parse::<SocketAddr>().ok())
+        .map(|address| address.to_string())
         .collect();
     let interface_is_eligible = |ip: &IpAddr, bound: &SocketAddr| {
-        !ip.is_loopback()
-            && !ip.is_unspecified()
+        is_routable_ip(ip)
             && bound.is_ipv6() == ip.is_ipv6()
             && (bound.ip().is_unspecified() || bound.ip() == *ip)
             && !direct_sockets
@@ -762,6 +811,34 @@ fn peer_service_config_with_interfaces(
     })
 }
 
+/// Build the canonical DNS-SD advertisement for an iroh endpoint.
+///
+/// Platform adapters provide the IP addresses of interfaces on which their
+/// native DNS-SD implementation can publish. Endpoint identity, bound QUIC
+/// ports, relay metadata, and direct candidates remain Rust-owned policy.
+#[cfg(feature = "runtime")]
+pub fn peer_service_config_with_ips(
+    ep: &iroh::Endpoint,
+    service_name: &str,
+    interface_ips: &[IpAddr],
+) -> Result<ServiceConfig, DiscoveryError> {
+    engine::service_type(service_name, Protocol::Udp)
+        .map_err(|error| DiscoveryError::InvalidServiceName(error.to_string()))?;
+    if ep.is_closed() {
+        return Err(DiscoveryError::Setup("endpoint is closed".to_string()));
+    }
+    let instance_name = node_id_label(&ep.id());
+    let bound_sockets = ep.bound_sockets();
+    let node_addr = ep.watch_addr().get();
+    peer_service_config_from_snapshot(
+        service_name,
+        &instance_name,
+        &bound_sockets,
+        &node_addr,
+        interface_ips,
+    )
+}
+
 /// Start advertising this node on the local network via DNS-SD.
 ///
 /// Publishes `_<service_name>._udp.local` with the instance name and `pk` TXT
@@ -786,7 +863,7 @@ pub fn advertise_peer(
     let bound_sockets: Vec<SocketAddr> = ep.bound_sockets();
     let mut watcher = ep.watch_addr();
     let initial = watcher.get();
-    let config = peer_service_config(service_name, &instance, &bound_sockets, &initial)?;
+    let config = desktop_peer_service_config(service_name, &instance, &bound_sockets, &initial)?;
     // The config already enumerates only endpoint-backed interface families
     // and ports. mdns-sd's unconstrained auto-expansion could add an unbound
     // family, so it stays disabled for the peer specialization.
@@ -810,7 +887,7 @@ pub fn advertise_peer(
                     Err(_) => return true,
                 },
             };
-            let config = match peer_service_config(
+            let config = match desktop_peer_service_config(
                 &service_name,
                 &instance,
                 &bound_sockets,
@@ -847,6 +924,112 @@ pub fn advertise_peer(
         return Err(DiscoveryError::Setup("endpoint is closed".to_string()));
     }
     Ok(session)
+}
+
+#[cfg(all(test, feature = "runtime"))]
+mod runtime_peer_tests {
+    use std::{
+        collections::VecDeque,
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc, Mutex,
+        },
+    };
+
+    use iroh::SecretKey;
+    use iroh_http_core::SourceScopedAddressLookup;
+
+    use super::*;
+
+    struct ScriptedBrowse {
+        events: Mutex<VecDeque<Result<Option<engine::RawEvent>, engine::TransportError>>>,
+        closed: Arc<AtomicUsize>,
+    }
+
+    impl engine::BrowseHandle for ScriptedBrowse {
+        fn next(
+            &self,
+        ) -> engine::BoxFuture<'_, Result<Option<engine::RawEvent>, engine::TransportError>>
+        {
+            let result = self
+                .events
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .pop_front()
+                .unwrap_or(Ok(None));
+            Box::pin(futures::future::ready(result))
+        }
+
+        fn request_close(&self) {}
+
+        fn closed(&self) -> engine::BoxFuture<'_, Result<(), engine::TransportError>> {
+            self.closed.fetch_add(1, Ordering::AcqRel);
+            Box::pin(futures::future::ready(Ok(())))
+        }
+    }
+
+    fn engine_with(
+        events: impl IntoIterator<Item = Result<Option<engine::RawEvent>, engine::TransportError>>,
+    ) -> (Arc<engine::BrowseSession>, Arc<AtomicUsize>) {
+        let closed = Arc::new(AtomicUsize::new(0));
+        let session = Arc::new(engine::BrowseSession::new(ScriptedBrowse {
+            events: Mutex::new(events.into_iter().collect()),
+            closed: Arc::clone(&closed),
+        }));
+        (session, closed)
+    }
+
+    #[tokio::test]
+    async fn peer_projection_over_engine_updates_retracts_and_waits_for_transport() {
+        use iroh::address_lookup::AddressLookup;
+
+        let node_id = SecretKey::from_bytes(&[41; 32]).public();
+        let record = ServiceRecord {
+            is_active: true,
+            service_type: "_iroh-http._udp.local.".to_string(),
+            instance_name: "peer".to_string(),
+            host: None,
+            port: 4433,
+            addrs: vec!["10.0.0.41:4433".parse().unwrap()],
+            txt: vec![(TXT_PK.to_string(), node_id.to_string())],
+        };
+        let (inner, closed) = engine_with([Ok(Some(engine::RawEvent::Upsert(record)))]);
+        let lookup = SourceScopedAddressLookup::new("runtime-peer-test");
+        let session = BrowseSession {
+            shared: PeerBrowseShared::new(inner, lookup.new_source()),
+        };
+
+        let event = session.next_event().await.expect("peer event");
+        assert_eq!(event.node_id, node_id_label(&node_id));
+        assert!(lookup.resolve(node_id).is_some());
+
+        session.wait_closed().await.unwrap();
+        assert!(lookup.resolve(node_id).is_none());
+        assert_eq!(closed.load(Ordering::Acquire), 1);
+    }
+
+    #[tokio::test]
+    async fn engine_error_is_terminal_and_retracts_the_projection_source() {
+        use iroh::address_lookup::AddressLookup;
+
+        let node_id = SecretKey::from_bytes(&[42; 32]).public();
+        let lookup = SourceScopedAddressLookup::new("runtime-peer-error-test");
+        let source = lookup.new_source();
+        source
+            .upsert(
+                "peer",
+                &node_id.to_string(),
+                &["10.0.0.42:4433".to_string()],
+            )
+            .unwrap();
+        let (inner, _) = engine_with([Err(engine::TransportError::new("native browse failed"))]);
+        let session = BrowseSession {
+            shared: PeerBrowseShared::new(inner, source),
+        };
+
+        assert!(session.next_event().await.is_none());
+        assert!(lookup.resolve(node_id).is_none());
+    }
 }
 
 // ── Unit tests ────────────────────────────────────────────────────────────────
@@ -1052,7 +1235,7 @@ mod tests {
             )
             .unwrap();
         let (inner, _finish) = dns_sd::controlled_test_browse();
-        let shared = PeerBrowseShared::new(inner, source);
+        let shared = PeerBrowseShared::new(inner.engine_session(), source);
         let (endpoint_close_tx, endpoint_close_rx) = futures::channel::oneshot::channel();
         let weak = Arc::downgrade(&shared);
         let endpoint_task = tokio::spawn(async move {
@@ -1101,7 +1284,7 @@ mod tests {
             .unwrap();
         let (inner, finish) = dns_sd::controlled_test_browse();
         let session = Arc::new(BrowseSession {
-            shared: PeerBrowseShared::new(inner, source),
+            shared: PeerBrowseShared::new(inner.engine_session(), source),
         });
         finish.send(()).unwrap();
 
@@ -1606,7 +1789,7 @@ mod tests {
     async fn closing_peer_browse_discards_queued_identity_transition() {
         let (inner, _finish) = dns_sd::controlled_test_browse();
         let lookup = SourceScopedAddressLookup::new("test-mdns");
-        let shared = PeerBrowseShared::new(inner, lookup.new_source());
+        let shared = PeerBrowseShared::new(inner.engine_session(), lookup.new_source());
         shared
             .pending
             .lock()
@@ -1710,7 +1893,10 @@ mod tests {
         ];
 
         assert_eq!(
-            select_advertise_addresses(&ip_addrs, &bound),
+            peer_direct_addresses(&ip_addrs, &bound, &[])
+                .into_iter()
+                .map(|address| address.to_string())
+                .collect::<Vec<_>>(),
             [
                 "192.168.1.42:59234",
                 "10.8.0.7:59234",
@@ -1718,6 +1904,104 @@ mod tests {
                 "198.51.100.10:40349",
             ],
             "LAN, VPN, IPv6 ULA, and reflexive candidates must remain plural"
+        );
+    }
+
+    #[test]
+    fn peer_direct_addresses_reconciles_filters_and_deduplicates_candidates() {
+        let candidates = vec![
+            "127.0.0.1:56604".parse().unwrap(),
+            "169.254.1.5:56604".parse().unwrap(),
+            "10.12.222.17:1".parse().unwrap(),
+            "192.168.50.227:56604".parse().unwrap(),
+            "10.12.222.17:56604".parse().unwrap(),
+        ];
+        let bound = vec!["0.0.0.0:56604".parse().unwrap()];
+
+        assert_eq!(
+            peer_direct_addresses(&candidates, &bound, &[]),
+            ["10.12.222.17:56604", "192.168.50.227:56604"].map(|address| address.parse().unwrap())
+        );
+    }
+
+    #[test]
+    fn peer_direct_addresses_preserves_real_ports_without_a_listener_snapshot() {
+        let candidates = vec![
+            "[2001:db8::7]:1".parse().unwrap(),
+            "192.26.168.188:40349".parse().unwrap(),
+        ];
+
+        assert_eq!(
+            peer_direct_addresses(&candidates, &[], &[]),
+            ["192.26.168.188:40349".parse().unwrap()]
+        );
+    }
+
+    #[test]
+    fn peer_direct_addresses_synthesizes_each_compatible_interface_family() {
+        let candidates = vec!["192.168.50.227:62546".parse().unwrap()];
+        let bound = vec![
+            "0.0.0.0:62546".parse().unwrap(),
+            "[::]:60000".parse().unwrap(),
+        ];
+        let interfaces = vec![
+            "192.168.50.227".parse().unwrap(),
+            "fd12:3456:789a::7".parse().unwrap(),
+        ];
+
+        assert_eq!(
+            peer_direct_addresses(&candidates, &bound, &interfaces),
+            ["192.168.50.227:62546", "[fd12:3456:789a::7]:60000"]
+                .map(|address| address.parse().unwrap())
+        );
+    }
+
+    #[test]
+    fn peer_direct_addresses_rejects_nonroutable_or_unbound_interfaces() {
+        let bound = vec!["192.168.50.227:62546".parse().unwrap()];
+        let interfaces = vec![
+            "127.0.0.1".parse().unwrap(),
+            "169.254.1.5".parse().unwrap(),
+            "10.12.222.17".parse().unwrap(),
+            "192.168.50.227".parse().unwrap(),
+            "fd12:3456:789a::7".parse().unwrap(),
+        ];
+
+        assert_eq!(
+            peer_direct_addresses(&[], &bound, &interfaces),
+            ["192.168.50.227:62546".parse().unwrap()]
+        );
+        assert!(peer_direct_addresses(&[], &[], &interfaces).is_empty());
+        assert!(
+            peer_direct_addresses(&[], &["0.0.0.0:1".parse().unwrap()], &interfaces).is_empty()
+        );
+    }
+
+    #[test]
+    fn peer_service_config_synthesizes_missing_mobile_interface_candidates() {
+        use iroh::{EndpointAddr, SecretKey};
+
+        let endpoint_id = SecretKey::from_bytes(&[24; 32]).public();
+        let bound = vec!["0.0.0.0:59234".parse().unwrap()];
+        let node_addr = EndpointAddr::new(endpoint_id);
+        let interfaces = vec![
+            "10.8.0.24".parse().unwrap(),
+            "192.168.1.24".parse().unwrap(),
+        ];
+
+        let config =
+            peer_service_config_from_snapshot("iroh-http", "peer", &bound, &node_addr, &interfaces)
+                .unwrap();
+        let direct = config
+            .txt
+            .iter()
+            .find(|(key, _)| key == TXT_ADDRESS)
+            .map(|(_, value)| value.as_str());
+
+        assert_eq!(
+            direct,
+            Some("10.8.0.24:59234,192.168.1.24:59234"),
+            "mobile VPN and physical-LAN candidates must remain dialable even when iroh's endpoint snapshot omits them"
         );
     }
 
@@ -1752,10 +2036,10 @@ mod tests {
             "fd00::7".parse().unwrap(),
         ];
         let initial =
-            peer_service_config_with_interfaces("iroh-http", "peer", &bound, &initial, &interfaces)
+            peer_service_config_from_snapshot("iroh-http", "peer", &bound, &initial, &interfaces)
                 .unwrap();
         let updated =
-            peer_service_config_with_interfaces("iroh-http", "peer", &bound, &updated, &interfaces)
+            peer_service_config_from_snapshot("iroh-http", "peer", &bound, &updated, &interfaces)
                 .unwrap();
         let initial_direct: std::collections::BTreeSet<_> = initial
             .txt
@@ -1767,9 +2051,14 @@ mod tests {
             .collect();
         assert_eq!(
             initial_direct,
-            ["192.168.1.42:59234", "10.8.0.7:45555"]
-                .into_iter()
-                .collect()
+            [
+                "192.168.1.42:59234",
+                "10.8.0.7:45555",
+                "10.8.0.7:59234",
+                "[fd00::7]:60000",
+            ]
+            .into_iter()
+            .collect()
         );
         let initial_srv_sockets: Vec<_> = initial
             .addrs
@@ -1792,7 +2081,7 @@ mod tests {
                 .iter()
                 .find(|(key, _)| key == TXT_ADDRESS)
                 .map(|(_, value)| value.as_str()),
-            Some("[fd00::7]:60000")
+            Some("[fd00::7]:60000,192.168.1.42:59234,10.8.0.7:59234")
         );
         assert_eq!(updated.port, 59234);
         assert_eq!(
@@ -1822,7 +2111,7 @@ mod tests {
             ],
         );
 
-        let config = peer_service_config_with_interfaces(
+        let config = peer_service_config_from_snapshot(
             "iroh-http",
             "peer",
             &bound,
@@ -1858,7 +2147,7 @@ mod tests {
             [TransportAddr::Ip("192.168.1.42:62546".parse().unwrap())],
         );
 
-        let config = peer_service_config_with_interfaces(
+        let config = peer_service_config_from_snapshot(
             "iroh-http",
             "peer",
             &bound,
@@ -1884,7 +2173,7 @@ mod tests {
             [TransportAddr::Ip("[fd00::21]:60000".parse().unwrap())],
         );
 
-        let config = peer_service_config_with_interfaces(
+        let config = peer_service_config_from_snapshot(
             "iroh-http",
             "peer",
             &bound,
@@ -1895,6 +2184,26 @@ mod tests {
 
         assert_eq!(config.port, 60000);
         assert_eq!(config.addrs, ["fd00::21".parse::<IpAddr>().unwrap()]);
+    }
+
+    #[test]
+    fn link_local_interface_cannot_win_the_srv_family_selection() {
+        use iroh::{EndpointAddr, SecretKey};
+
+        let endpoint_id = SecretKey::from_bytes(&[25; 32]).public();
+        let bound = vec![
+            "0.0.0.0:62546".parse().unwrap(),
+            "[::]:60000".parse().unwrap(),
+        ];
+        let node_addr = EndpointAddr::new(endpoint_id);
+        let interfaces = vec!["169.254.1.5".parse().unwrap(), "fd00::25".parse().unwrap()];
+
+        let config =
+            peer_service_config_from_snapshot("iroh-http", "peer", &bound, &node_addr, &interfaces)
+                .unwrap();
+
+        assert_eq!(config.port, 60000);
+        assert_eq!(config.addrs, ["fd00::25".parse::<IpAddr>().unwrap()]);
     }
 
     #[test]
@@ -1915,14 +2224,9 @@ mod tests {
             ("fd00::22".parse().unwrap(), true),
         ]);
 
-        let config = peer_service_config_with_interfaces(
-            "iroh-http",
-            "peer",
-            &bound,
-            &node_addr,
-            &interfaces,
-        )
-        .unwrap();
+        let config =
+            peer_service_config_from_snapshot("iroh-http", "peer", &bound, &node_addr, &interfaces)
+                .unwrap();
 
         assert_eq!(config.port, 60000);
         assert_eq!(config.addrs, ["fd00::22".parse::<IpAddr>().unwrap()]);
@@ -1948,7 +2252,7 @@ mod tests {
             [TransportAddr::Ip("[fd00::23]:60000".parse().unwrap())],
         );
 
-        let config = peer_service_config_with_interfaces(
+        let config = peer_service_config_from_snapshot(
             "iroh-http",
             "peer",
             &bound,

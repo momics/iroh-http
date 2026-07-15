@@ -418,9 +418,9 @@ mod platform_dependency_contract {
 ///
 /// The mobile mDNS/DNS-SD commands cross a Rust ↔ Swift/Kotlin boundary that is
 /// matched **by string at runtime**: the Rust plugin calls
-/// `run_mobile_plugin_async("browse_peers_start", …)`, which dispatches to the native
-/// handler declared as `@objc public func browse_peers_start` (Swift) and
-/// `@Command fun browse_peers_start` (Kotlin). Each side compiles independently,
+/// `run_mobile_plugin_async("browse_start", …)`, which dispatches to the native
+/// handler declared as `@objc public func browse_start` (Swift) and
+/// `@Command fun browse_start` (Kotlin). Each side compiles independently,
 /// so a rename or a dropped handler on one side is a *silent* contract drift
 /// that only surfaces as an `unknown method` runtime error during manual
 /// on-device testing (exactly the failure PR #330 risked introducing).

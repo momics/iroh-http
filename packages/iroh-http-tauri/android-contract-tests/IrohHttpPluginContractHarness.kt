@@ -11,6 +11,7 @@ import org.json.JSONObject
 import java.net.InetAddress
 import java.nio.charset.StandardCharsets
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
 
@@ -47,11 +48,15 @@ private class FakeNsdManager(
     val registrationCalls = mutableListOf<RegistrationCall>()
     val unregisteredListeners = mutableListOf<RegistrationListener>()
     private val activeDiscoveryTypes = mutableMapOf<DiscoveryListener, String>()
-    private val pendingDiscoveryStops = mutableSetOf<DiscoveryListener>()
+    private val pendingDiscoveryStops = ConcurrentHashMap.newKeySet<DiscoveryListener>()
     private val activeRegistrationListeners = mutableSetOf<RegistrationListener>()
-    private val pendingUnregistrationListeners = mutableSetOf<RegistrationListener>()
+    private val pendingUnregistrationListeners =
+        ConcurrentHashMap.newKeySet<RegistrationListener>()
     var failNextUnregister: Boolean = false
+    var registerDispatchFailuresRemaining: Int = 0
     var unregisterDispatchFailuresRemaining: Int = 0
+    var discoverDispatchFailuresRemaining: Int = 0
+    var stopDiscoveryDispatchFailuresRemaining: Int = 0
     var unregisterEntered: CountDownLatch? = null
     var unregisterRelease: CountDownLatch? = null
 
@@ -62,11 +67,19 @@ private class FakeNsdManager(
     ) {
         discoveryCalls.add(DiscoveryCall(serviceType, listener))
         activeDiscoveryTypes[listener] = serviceType
+        if (discoverDispatchFailuresRemaining > 0) {
+            discoverDispatchFailuresRemaining -= 1
+            throw IllegalStateException("injected discovery dispatch failure")
+        }
     }
 
     override fun stopServiceDiscovery(listener: DiscoveryListener) {
         check(activeDiscoveryTypes.containsKey(listener)) {
             "discovery listener is not active"
+        }
+        if (stopDiscoveryDispatchFailuresRemaining > 0) {
+            stopDiscoveryDispatchFailuresRemaining -= 1
+            throw IllegalStateException("injected discovery stop dispatch failure")
         }
         stoppedDiscoveryListeners.add(listener)
         pendingDiscoveryStops.add(listener)
@@ -84,6 +97,10 @@ private class FakeNsdManager(
         registrationCalls.add(RegistrationCall(serviceInfo, listener))
         check(activeRegistrationListeners.add(listener)) {
             "registration listener was reused"
+        }
+        if (registerDispatchFailuresRemaining > 0) {
+            registerDispatchFailuresRemaining -= 1
+            throw IllegalStateException("injected register dispatch failure")
         }
     }
 
@@ -197,6 +214,12 @@ private class FakeNsdManager(
 
     fun isUnregistrationPending(listener: RegistrationListener): Boolean =
         pendingUnregistrationListeners.contains(listener)
+
+    fun isDiscoveryListenerActive(listener: DiscoveryListener): Boolean =
+        activeDiscoveryTypes.containsKey(listener)
+
+    fun isDiscoveryStopPending(listener: DiscoveryListener): Boolean =
+        pendingDiscoveryStops.contains(listener)
 }
 
 private fun newPlugin(
@@ -218,34 +241,21 @@ private fun checkEquals(expected: Any?, actual: Any?, message: String) {
     }
 }
 
-private fun checkFails(message: String, block: () -> Unit) {
-    try {
-        block()
-    } catch (_: Throwable) {
-        return
+private fun waitUntil(
+    message: String,
+    timeoutMillis: Long = 2_000,
+    condition: () -> Boolean
+) {
+    val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMillis)
+    while (!condition() && System.nanoTime() < deadline) {
+        Thread.sleep(5)
     }
-    throw AssertionError(message)
+    checkThat(condition(), message)
 }
 
-private fun peerBrowseArgs() = BrowseStartArgs().apply { serviceName = "iroh" }
 private fun genericBrowseArgs() = DnsSdBrowseStartArgs().apply { serviceName = "demo" }
 private fun pollArgs(id: Long) = BrowsePollArgs().apply { browseId = id }
 private fun stopArgs(id: Long) = BrowseStopArgs().apply { browseId = id }
-
-private fun startPeerBrowse(
-    plugin: IrohHttpPlugin,
-    manager: FakeNsdManager
-): Pair<Long, NsdManager.DiscoveryListener> {
-    val invoke = Invoke(peerBrowseArgs())
-    val callIndex = manager.discoveryCalls.size
-    plugin.browse_peers_start(invoke)
-    checkEquals(0, invoke.completionCount, "peer browse must wait for readiness")
-    val listener = manager.discoveryCalls[callIndex].listener
-    listener.onDiscoveryStarted("_iroh._udp")
-    checkEquals(1, invoke.completionCount, "peer browse readiness completes exactly once")
-    val id = invoke.resolutions.single()!!["browseId"] as Long
-    return Pair(id, listener)
-}
 
 private fun startGenericBrowse(
     plugin: IrohHttpPlugin,
@@ -257,168 +267,182 @@ private fun startGenericBrowse(
     checkEquals(0, invoke.completionCount, "generic browse must wait for readiness")
     val listener = manager.discoveryCalls[callIndex].listener
     listener.onDiscoveryStarted("_demo._udp")
+    checkEquals(1, invoke.completionCount, "generic browse readiness completes exactly once")
     val id = invoke.resolutions.single()!!["browseId"] as Long
     return Pair(id, listener)
 }
 
-private fun resolvedPeer(instance: String, address: String): NsdServiceInfo =
-    NsdServiceInfo().apply {
-        serviceName = instance
-        host = InetAddress.getByName("192.168.50.9")
-        setPort(4555)
-        setAttribute("pk", "a".repeat(52))
-        setAttribute("address", address)
-        setAttribute("relay", "https://relay.example")
-    }
-
 private fun testBrowseReadinessAndTerminalConsumption() {
     val (plugin, manager) = newPlugin()
 
-    val failed = Invoke(peerBrowseArgs())
-    plugin.browse_peers_start(failed)
+    val (ackPlugin, ackManager) = newPlugin()
+    ackManager.discoverDispatchFailuresRemaining = 1
+    val acknowledgedStart = Invoke(genericBrowseArgs())
+    ackPlugin.browse_start(acknowledgedStart)
+    val acknowledgedCall = ackManager.discoveryCalls.single()
+    checkEquals(
+        0,
+        acknowledgedStart.completionCount,
+        "ambiguous discovery failure waits for accepted stop acknowledgement"
+    )
+    checkThat(
+        ackManager.isDiscoveryStopPending(acknowledgedCall.listener),
+        "ambiguous failed browse dispatches native cleanup"
+    )
+    ackManager.discoveryStopped(acknowledgedCall)
+    checkEquals(1, acknowledgedStart.rejections.size, "failed browse rejects after cleanup terminal")
+
+    val (retainedStartPlugin, retainedStartManager) = newPlugin()
+    retainedStartManager.discoverDispatchFailuresRemaining = 1
+    retainedStartManager.stopDiscoveryDispatchFailuresRemaining = 2
+    val retainedStart = Invoke(genericBrowseArgs())
+    retainedStartPlugin.browse_start(retainedStart)
+    val retainedStartCall = retainedStartManager.discoveryCalls.single()
+    checkEquals(
+        0,
+        retainedStart.completionCount,
+        "exhausted failed-start cleanup keeps the Rust start lease fenced"
+    )
+    checkThat(
+        retainedStartManager.isDiscoveryListenerActive(retainedStartCall.listener),
+        "failed browse start retains owner after unaccepted cleanup"
+    )
+    retainedStartManager.stopDiscoveryDispatchFailuresRemaining = 1
+    retainedStartCall.listener.onDiscoveryStarted("_demo._udp")
+    checkThat(
+        retainedStartManager.isDiscoveryStopPending(retainedStartCall.listener),
+        "late browse readiness retries retained failed-start cleanup"
+    )
+    retainedStartManager.discoveryStopped(retainedStartCall)
+    checkEquals(1, retainedStart.rejections.size, "retained browse start rejects after terminal cleanup")
+    checkThat(
+        !retainedStartManager.isDiscoveryListenerActive(retainedStartCall.listener),
+        "retained failed browse owner releases at terminal callback"
+    )
+
+    val failed = Invoke(genericBrowseArgs())
+    plugin.browse_start(failed)
     val failedCall = manager.discoveryCalls.last()
     val failedListener = manager.discoveryCalls.last().listener
     manager.startDiscoveryFailed(failedCall, 7)
-    failedListener.onStartDiscoveryFailed("_iroh._udp", 7)
-    failedListener.onDiscoveryStarted("_iroh._udp")
-    checkEquals(1, failed.completionCount, "peer start failure must reject exactly once")
-    checkEquals(1, failed.rejections.size, "peer start failure must reject")
+    failedListener.onStartDiscoveryFailed("_demo._udp", 7)
+    failedListener.onDiscoveryStarted("_demo._udp")
+    checkEquals(1, failed.completionCount, "generic start failure must reject exactly once")
+    checkEquals(1, failed.rejections.size, "generic start failure must reject")
     checkThat(
         !manager.stoppedDiscoveryListeners.contains(failedListener),
         "failed start must not stop an AOSP-retired discovery listener"
     )
 
-    val (id, listener) = startPeerBrowse(plugin, manager)
+    val (id, listener) = startGenericBrowse(plugin, manager)
     manager.stopServiceDiscovery(listener)
     manager.stopDiscoveryFailed(manager.discoveryCalls.last(), 9)
     val firstPoll = Invoke(pollArgs(id))
-    plugin.browse_peers_poll(firstPoll)
+    plugin.browse_poll(firstPoll)
     checkEquals("failed", firstPoll.resolutions.single()!!["status"], "failed state visible")
     checkThat(firstPoll.resolutions.single()!!["error"] != null, "failed state includes error")
     val secondPoll = Invoke(pollArgs(id))
-    plugin.browse_peers_poll(secondPoll)
+    plugin.browse_poll(secondPoll)
     checkEquals("closed", secondPoll.resolutions.single()!!["status"], "failure consumed once")
 
     val missing = Invoke(pollArgs(9999))
-    plugin.browse_peers_poll(missing)
-    checkEquals("closed", missing.resolutions.single()!!["status"], "missing peer handle is closed")
+    plugin.browse_poll(missing)
+    checkEquals("closed", missing.resolutions.single()!!["status"], "missing handle is closed")
 
-    val genericFailed = Invoke(genericBrowseArgs())
-    plugin.browse_start(genericFailed)
-    val genericFailedCall = manager.discoveryCalls.last()
-    val genericListener = manager.discoveryCalls.last().listener
-    manager.startDiscoveryFailed(genericFailedCall, 11)
-    genericListener.onStartDiscoveryFailed("_demo._udp", 11)
-    checkEquals(1, genericFailed.completionCount, "generic start failure must reject exactly once")
-
-    val (genericId, activeGenericListener) = startGenericBrowse(plugin, manager)
-    manager.stopServiceDiscovery(activeGenericListener)
-    manager.stopDiscoveryFailed(manager.discoveryCalls.last(), 12)
-    val genericTerminal = Invoke(pollArgs(genericId))
-    plugin.browse_poll(genericTerminal)
-    checkEquals(
-        "failed",
-        genericTerminal.resolutions.single()!!["status"],
-        "generic failed state visible"
-    )
-    val genericConsumed = Invoke(pollArgs(genericId))
-    plugin.browse_poll(genericConsumed)
-    checkEquals(
-        "closed",
-        genericConsumed.resolutions.single()!!["status"],
-        "generic failure consumed once"
-    )
-
-    val (closedId, closedListener) = startPeerBrowse(plugin, manager)
+    val (closedId, closedListener) = startGenericBrowse(plugin, manager)
     manager.stopServiceDiscovery(closedListener)
     manager.discoveryStopped(manager.discoveryCalls.last())
     val closedTerminal = Invoke(pollArgs(closedId))
-    plugin.browse_peers_poll(closedTerminal)
+    plugin.browse_poll(closedTerminal)
     checkEquals(
         "closed",
         closedTerminal.resolutions.single()!!["status"],
         "native discovery stop is visible as a terminal state"
     )
 
-    val (stoppedId, stoppedListener) = startPeerBrowse(plugin, manager)
+    val (stoppedId, stoppedListener) = startGenericBrowse(plugin, manager)
     val stop = Invoke(stopArgs(stoppedId))
-    plugin.browse_peers_stop(stop)
-    checkEquals(1, stop.completionCount, "explicit peer stop resolves")
+    val duplicateStop = Invoke(stopArgs(stoppedId))
+    plugin.browse_stop(stop)
+    plugin.browse_stop(duplicateStop)
+    checkEquals(0, stop.completionCount, "generic stop waits for native acknowledgement")
+    checkEquals(0, duplicateStop.completionCount, "duplicate generic stop shares the waiter")
     checkThat(
         manager.stoppedDiscoveryListeners.contains(stoppedListener),
-        "peer stop executes the native stopServiceDiscovery callback sequence"
+        "generic stop executes the native stopServiceDiscovery callback sequence"
     )
     manager.discoveryStopped(manager.discoveryCalls.last())
+    checkEquals(1, stop.resolutions.size, "generic stop resolves after native acknowledgement")
+    checkEquals(1, duplicateStop.resolutions.size, "duplicate stop resolves after acknowledgement")
     val stoppedPoll = Invoke(pollArgs(stoppedId))
-    plugin.browse_peers_poll(stoppedPoll)
+    plugin.browse_poll(stoppedPoll)
     checkEquals(
         "closed",
         stoppedPoll.resolutions.single()!!["status"],
-        "explicitly stopped peer browse is closed"
-    )
-}
-
-private fun testPeerPresenceGenerationsAndPluralTxt() {
-    val (plugin, manager) = newPlugin()
-    val (id, listener) = startPeerBrowse(plugin, manager)
-
-    val pending = NsdServiceInfo().apply { serviceName = "late-instance" }
-    listener.onServiceFound(pending)
-    val lateResolve = manager.resolveCalls.last().listener
-    listener.onServiceLost(pending)
-    lateResolve.onServiceResolved(resolvedPeer("late-instance", "192.168.50.2:4433"))
-    val latePoll = Invoke(pollArgs(id))
-    plugin.browse_peers_poll(latePoll)
-    val lateEvents = latePoll.resolutions.single()!!["events"] as JSONArray
-    checkEquals(0, lateEvents.length(), "found-lost-late-resolve must not emit")
-
-    // Two found callbacks for one instance supersede the first queued resolve.
-    val first = NsdServiceInfo().apply { serviceName = "peer-instance" }
-    val second = NsdServiceInfo().apply { serviceName = "peer-instance" }
-    listener.onServiceFound(first)
-    val firstResolve = manager.resolveCalls.last().listener
-    listener.onServiceFound(second)
-    firstResolve.onServiceResolved(resolvedPeer("peer-instance", "192.168.50.3:4433"))
-    val secondResolve = manager.resolveCalls.last().listener
-    secondResolve.onServiceResolved(
-        resolvedPeer(
-            "peer-instance",
-            " 192.168.50.4:4433,broken,[fd00::1]:4434,[fe80::1%7]:4435,"
-                + "[fe80::1%wlan0]:4436,192.168.50.4:4433,10.0.0.3:1"
-        )
+        "explicitly stopped generic browse is closed"
     )
 
-    val poll = Invoke(pollArgs(id))
-    plugin.browse_peers_poll(poll)
-    val events = poll.resolutions.single()!!["events"] as JSONArray
-    checkEquals(1, events.length(), "only current presence generation emits")
-    val event = events[0] as JSObject
-    checkEquals("peer-instance", event["instanceName"], "peer event includes instance name")
-    val addrs = (event["addrs"] as JSONArray).toList()
-    checkEquals(
-        listOf(
-            "192.168.50.4:4433",
-            "[fd00::1]:4434",
-            "[fe80::1%7]:4435",
-            "https://relay.example"
-        ),
-        addrs,
-        "plural TXT keeps valid members and de-duplicates"
+    // A stop issued before readiness can be rejected because Android has not
+    // activated the listener yet. Keep the waiter and retry after the late
+    // readiness callback instead of resolving or losing the native owner.
+    val (latePlugin, lateManager) = newPlugin()
+    val lateStart = Invoke(genericBrowseArgs())
+    latePlugin.browse_start(lateStart)
+    val lateCall = lateManager.discoveryCalls.single()
+    lateManager.stopDiscoveryDispatchFailuresRemaining = 1
+    val lateStop = Invoke(stopArgs(1))
+    latePlugin.browse_stop(lateStop)
+    checkEquals(1, lateStart.rejections.size, "stop-before-ready rejects start once")
+    checkEquals(0, lateStop.completionCount, "stop-before-ready waits for late readiness")
+    lateCall.listener.onDiscoveryStarted("_demo._udp")
+    checkThat(
+        lateManager.isDiscoveryStopPending(lateCall.listener),
+        "late readiness retries the deferred discovery stop"
     )
+    checkEquals(0, lateStop.completionCount, "late-ready cleanup waits for terminal callback")
+    lateManager.discoveryStopped(lateCall)
+    checkEquals(1, lateStop.resolutions.size, "late-ready stop resolves after terminal callback")
 
-    val fallback = NsdServiceInfo().apply { serviceName = "fallback-instance" }
-    listener.onServiceFound(fallback)
-    manager.resolveCalls.last().listener.onServiceResolved(
-        resolvedPeer("fallback-instance", "invalid,10.0.0.1:1")
+    // Confirmed active sessions retry a synchronous dispatch rejection once.
+    val (retryPlugin, retryManager) = newPlugin()
+    val (retryId, retryListener) = startGenericBrowse(retryPlugin, retryManager)
+    retryManager.stopDiscoveryDispatchFailuresRemaining = 1
+    val retryStop = Invoke(stopArgs(retryId))
+    retryPlugin.browse_stop(retryStop)
+    checkEquals(0, retryStop.completionCount, "retried browse stop waits for acknowledgement")
+    checkThat(
+        retryManager.isDiscoveryStopPending(retryListener),
+        "active browse stop retries an unaccepted dispatch"
     )
-    val fallbackPoll = Invoke(pollArgs(id))
-    plugin.browse_peers_poll(fallbackPoll)
-    val fallbackEvent = (fallbackPoll.resolutions.single()!!["events"] as JSONArray)[0] as JSObject
-    checkEquals(
-        listOf("192.168.50.9:4555", "https://relay.example"),
-        (fallbackEvent["addrs"] as JSONArray).toList(),
-        "invalid TXT must not suppress SRV or relay fallback"
+    retryManager.discoveryStopped(retryManager.discoveryCalls.last())
+    checkEquals(1, retryStop.resolutions.size, "retried browse stop resolves after acknowledgement")
+
+    // Exhausted immediate retries retain both the original caller and native
+    // ownership. The adapter retries after a delay because Rust issues exactly
+    // one stop command for a handle.
+    val (retainedPlugin, retainedManager) = newPlugin()
+    val (retainedId, retainedListener) = startGenericBrowse(retainedPlugin, retainedManager)
+    retainedManager.stopDiscoveryDispatchFailuresRemaining = 5
+    val failedDispatchStop = Invoke(stopArgs(retainedId))
+    retainedPlugin.browse_stop(failedDispatchStop)
+    checkEquals(0, failedDispatchStop.completionCount, "browse stop remains pending after immediate retries")
+    checkThat(
+        retainedManager.isDiscoveryListenerActive(retainedListener),
+        "failed browse stop retains its native listener owner"
     )
+    waitUntil("browse stop did not autonomously retry after dispatch recovery") {
+        retainedManager.isDiscoveryStopPending(retainedListener)
+    }
+    checkEquals(0, failedDispatchStop.completionCount, "retried browse stop waits for acknowledgement")
+    retainedManager.discoveryStopped(retainedManager.discoveryCalls.last())
+    checkEquals(1, failedDispatchStop.resolutions.size, "original browse stop closes terminally")
+
+    val (callbackPlugin, callbackManager) = newPlugin()
+    val (callbackId, _) = startGenericBrowse(callbackPlugin, callbackManager)
+    val callbackStop = Invoke(stopArgs(callbackId))
+    callbackPlugin.browse_stop(callbackStop)
+    callbackManager.stopDiscoveryFailed(callbackManager.discoveryCalls.last(), 51)
+    checkEquals(1, callbackStop.rejections.size, "terminal stop failure rejects its waiter")
 }
 
 private fun testGenericBrowseRecordsPresenceAndRepeatedUpserts() {
@@ -523,133 +547,31 @@ private fun testGenericBrowseRecordsPresenceAndRepeatedUpserts() {
     )
 }
 
-private fun testPeerInstanceIdentityAndLateHandleCallbacks() {
-    val (plugin, manager) = newPlugin()
-    val (id, listener) = startPeerBrowse(plugin, manager)
-    val originalCall = manager.discoveryCalls.last()
-
-    // Two simultaneously-present DNS-SD instances may intentionally carry the
-    // same stable node id. Native events must retain the instance identity so
-    // expiry of A cannot retract B's source contribution in Rust.
-    val instanceA = NsdServiceInfo().apply { serviceName = "peer-a" }
-    listener.onServiceFound(instanceA)
-    manager.resolveCalls.last().listener.onServiceResolved(
-        resolvedPeer("peer-a", "192.168.10.2:4433")
-    )
-    val instanceB = NsdServiceInfo().apply { serviceName = "peer-b" }
-    listener.onServiceFound(instanceB)
-    manager.resolveCalls.last().listener.onServiceResolved(
-        resolvedPeer("peer-b", "192.168.10.3:4433")
-    )
-
-    val discovered = Invoke(pollArgs(id))
-    plugin.browse_peers_poll(discovered)
-    val discoveryEvents = discovered.resolutions.single()!!["events"] as JSONArray
-    checkEquals(2, discoveryEvents.length(), "both same-node sources are emitted")
-    checkEquals(
-        listOf("peer-a", "peer-b"),
-        discoveryEvents.toList().map { (it as JSObject)["instanceName"] },
-        "each discovery carries its own source instance"
-    )
-
-    listener.onServiceLost(instanceA)
-    val expiredA = Invoke(pollArgs(id))
-    plugin.browse_peers_poll(expiredA)
-    val expiryEvents = expiredA.resolutions.single()!!["events"] as JSONArray
-    checkEquals(1, expiryEvents.length(), "only the lost instance expires")
-    checkEquals(
-        "peer-a",
-        (expiryEvents[0] as JSObject)["instanceName"],
-        "expiry retains the exact source identity"
-    )
-
-    // A stable duplicate for B remains suppressed, proving A's loss did not
-    // accidentally delete B's native snapshot.
-    listener.onServiceFound(instanceB)
-    manager.resolveCalls.last().listener.onServiceResolved(
-        resolvedPeer("peer-b", "192.168.10.3:4433")
-    )
-    val stableB = Invoke(pollArgs(id))
-    plugin.browse_peers_poll(stableB)
-    checkEquals(
-        0,
-        (stableB.resolutions.single()!!["events"] as JSONArray).length(),
-        "the still-live source retains its snapshot after another source expires"
-    )
-
-    plugin.browse_peers_stop(Invoke(stopArgs(id)))
-    val resolvesBeforeLateCallback = manager.resolveCalls.size
-    val (replacementId, _) = startPeerBrowse(plugin, manager)
-    checkThat(replacementId != id, "browse handles are monotonic and never ABA-reused")
-    listener.onServiceFound(NsdServiceInfo().apply { serviceName = "late-old-session" })
-    checkEquals(
-        resolvesBeforeLateCallback,
-        manager.resolveCalls.size,
-        "late callbacks from a retired handle cannot enqueue into its replacement"
-    )
-    manager.discoveryStopped(originalCall)
-    plugin.browse_peers_stop(Invoke(stopArgs(replacementId)))
-    manager.discoveryStopped(manager.discoveryCalls.last())
-}
-
 private fun testRetiredResolveQueuesDoNotStarveNewSessions() {
     val (plugin, manager) = newPlugin()
 
-    // Peer request A1 is in flight; A2 and generic B1 are queued behind it.
-    // Closing peer A must purge A2, so completing A1 advances directly to B1.
-    val (peerId, peerListener) = startPeerBrowse(plugin, manager)
-    val peerA1 = NsdServiceInfo().apply { serviceName = "peer-a1" }
-    val peerA2 = NsdServiceInfo().apply { serviceName = "peer-a2-stale" }
-    peerListener.onServiceFound(peerA1)
-    val peerA1Resolve = manager.resolveCalls.single()
-    peerListener.onServiceFound(peerA2)
-    val (genericId, genericListener) = startGenericBrowse(plugin, manager)
-    val genericB1 = NsdServiceInfo().apply { serviceName = "generic-b1" }
-    genericListener.onServiceFound(genericB1)
+    // Generic request A1 is in flight; A2 and session B1 are queued behind it.
+    // Closing A must purge A2, so completing A1 advances directly to B1.
+    val (sessionAId, sessionAListener) = startGenericBrowse(plugin, manager)
+    val requestA1 = NsdServiceInfo().apply { serviceName = "generic-a1" }
+    val requestA2 = NsdServiceInfo().apply { serviceName = "generic-a2-stale" }
+    sessionAListener.onServiceFound(requestA1)
+    val requestA1Resolve = manager.resolveCalls.single()
+    sessionAListener.onServiceFound(requestA2)
+    val (sessionBId, sessionBListener) = startGenericBrowse(plugin, manager)
+    val requestB1 = NsdServiceInfo().apply { serviceName = "generic-b1" }
+    sessionBListener.onServiceFound(requestB1)
     checkEquals(1, manager.resolveCalls.size, "legacy resolver keeps one request in flight")
 
-    plugin.browse_peers_stop(Invoke(stopArgs(peerId)))
-    peerA1Resolve.listener.onResolveFailed(peerA1, 21)
-    checkEquals(2, manager.resolveCalls.size, "new generic session advances after peer retirement")
+    plugin.browse_stop(Invoke(stopArgs(sessionAId)))
+    requestA1Resolve.listener.onResolveFailed(requestA1, 21)
+    checkEquals(2, manager.resolveCalls.size, "live generic session advances after retirement")
     checkThat(
-        manager.resolveCalls.last().info === genericB1,
-        "retired peer queue entry is skipped instead of starving generic browse"
+        manager.resolveCalls.last().info === requestB1,
+        "retired generic queue entry is skipped instead of starving another browse"
     )
-    manager.resolveCalls.last().listener.onResolveFailed(genericB1, 22)
-
-    // Reverse the ownership: a generic session has active/queued work and a
-    // new peer waits behind it. Retiring generic B must purge only B's queue.
-    val genericB2 = NsdServiceInfo().apply { serviceName = "generic-b2" }
-    val genericB3 = NsdServiceInfo().apply { serviceName = "generic-b3-stale" }
-    genericListener.onServiceFound(genericB2)
-    val genericB2Resolve = manager.resolveCalls.last()
-    genericListener.onServiceFound(genericB3)
-    val (peerCId, peerCListener) = startPeerBrowse(plugin, manager)
-    val peerC1 = NsdServiceInfo().apply { serviceName = "peer-c1" }
-    peerCListener.onServiceFound(peerC1)
-
-    plugin.browse_stop(Invoke(stopArgs(genericId)))
-    genericB2Resolve.listener.onResolveFailed(genericB2, 23)
-    checkThat(
-        manager.resolveCalls.last().info === peerC1,
-        "retired generic queue entry is skipped instead of starving peer browse"
-    )
-    manager.resolveCalls.last().listener.onResolveFailed(peerC1, 24)
-    plugin.browse_peers_stop(Invoke(stopArgs(peerCId)))
-}
-
-private fun peerAdvertiseArgs() = AdvertiseStartArgs().apply {
-    serviceName = "iroh"
-    pk = "b".repeat(52)
-    relay = "https://relay.example"
-    addresses = listOf(
-        "192.168.1.2:4433",
-        "invalid",
-        "[fd00::2]:4434",
-        "[fe80::2%9]:4435",
-        "[fe80::2%wlan0]:4436",
-        "192.168.1.2:4433"
-    )
+    manager.resolveCalls.last().listener.onResolveFailed(requestB1, 22)
+    plugin.browse_stop(Invoke(stopArgs(sessionBId)))
 }
 
 private fun advertiseStopArgs(id: Long) = AdvertiseStopArgs().apply { advertiseId = id }
@@ -664,152 +586,83 @@ private fun genericAdvertiseUpdateArgs(
     this.txt = txt
 }
 
-private fun testAddressTxtByteBoundary() {
-    // The TXT wire entry is `address=<value>`: seven key bytes plus `=` leave
-    // exactly 247 UTF-8 bytes for the value.
-    val rawInfo = NsdServiceInfo()
-    val exactly247Bytes = "é".repeat(123) + "a"
-    checkEquals(
-        247,
-        exactly247Bytes.toByteArray(StandardCharsets.UTF_8).size,
-        "boundary fixture is exactly 247 UTF-8 bytes"
-    )
-    rawInfo.setAttribute("address", exactly247Bytes)
-    val exactly248Bytes = "é".repeat(124)
-    checkEquals(
-        248,
-        exactly248Bytes.toByteArray(StandardCharsets.UTF_8).size,
-        "overflow fixture is exactly 248 UTF-8 bytes"
-    )
-    checkFails("stub must reject a 248-byte address TXT value") {
-        rawInfo.setAttribute("address", exactly248Bytes)
-    }
+private fun peerShapedTxt(
+    address: String = "192.168.1.2:4433,[fd00::2]:4434,[fe80::2%9]:4435",
+    relay: String = "https://relay.example"
+): Map<String, String> = mapOf(
+    "pk" to "b".repeat(52),
+    "relay" to relay,
+    "address" to address
+)
 
-    // This ordered set of valid socket literals is exactly 247 bytes. The
-    // following candidate must be omitted whole rather than truncated.
-    val exactPrefix = (1..17).map { index ->
-        val port = if (index <= 2) 20000 else 2000
-        "10.0.0.$index:$port"
-    }
-    val expected = exactPrefix.joinToString(",")
-    checkEquals(
-        247,
-        expected.toByteArray(StandardCharsets.UTF_8).size,
-        "valid socket set is exactly 247 bytes"
-    )
-
-    val (plugin, manager) = newPlugin()
-    val invoke = Invoke(AdvertiseStartArgs().apply {
-        serviceName = "iroh"
-        pk = "c".repeat(52)
-        addresses = exactPrefix + listOf("10.0.0.18:2000")
-    })
-    plugin.advertise_peer_start(invoke)
-    val registration = manager.registrationCalls.single()
-    val actual = registration.info.attributes["address"]
-        ?.let { String(it, StandardCharsets.UTF_8) }
-    checkEquals(expected, actual, "advertisement keeps the exact fitting subset")
-    checkEquals(
-        247,
-        actual!!.toByteArray(StandardCharsets.UTF_8).size,
-        "advertised address TXT is capped at 247 bytes"
-    )
-    checkThat(!actual.contains("10.0.0.18:2000"), "overflow candidate is omitted whole")
-    registration.listener.onServiceRegistered(registration.info)
-    val id = invoke.resolutions.single()!!["advertiseId"] as Long
-    plugin.advertise_peer_stop(Invoke(advertiseStopArgs(id)))
-
-    // Matching desktop policy, a long member that does not fit is skipped and
-    // a later shorter member may still use the remaining budget.
-    val fittingBase = exactPrefix.take(16)
-    val longCandidate = "[2001:db8:1234:5678:9abc:def0:1234:5678]:4433"
-    val laterShortCandidate = "8.8.8.8:2"
-    val subsetInvoke = Invoke(AdvertiseStartArgs().apply {
-        serviceName = "iroh"
-        pk = "d".repeat(52)
-        addresses = fittingBase + listOf(longCandidate, laterShortCandidate)
-    })
-    plugin.advertise_peer_start(subsetInvoke)
-    val subsetRegistration = manager.registrationCalls.last()
-    val subset = subsetRegistration.info.attributes["address"]
-        ?.let { String(it, StandardCharsets.UTF_8) }!!
-    checkThat(!subset.contains(longCandidate), "non-fitting long candidate is skipped")
-    checkThat(
-        subset.endsWith(laterShortCandidate),
-        "later shorter candidate uses the remaining TXT budget"
-    )
-    checkThat(
-        subset.toByteArray(StandardCharsets.UTF_8).size <= 247,
-        "stable fitting subset stays within the value budget"
-    )
-    subsetRegistration.listener.onServiceRegistered(subsetRegistration.info)
-    val subsetId = subsetInvoke.resolutions.single()!!["advertiseId"] as Long
-    plugin.advertise_peer_stop(Invoke(advertiseStopArgs(subsetId)))
+private fun peerShapedAdvertiseArgs() = DnsSdAdvertiseStartArgs().apply {
+    serviceName = "iroh"
+    instanceName = "b".repeat(52)
+    port = 1
+    protocol = "udp"
+    txt = peerShapedTxt()
 }
 
-private fun startPeerAdvertisement(
+private fun startGenericAdvertisement(
     plugin: IrohHttpPlugin,
     manager: FakeNsdManager
 ): Pair<Long, FakeNsdManager.RegistrationCall> {
-    val invoke = Invoke(peerAdvertiseArgs())
+    val invoke = Invoke(peerShapedAdvertiseArgs())
     val callIndex = manager.registrationCalls.size
-    plugin.advertise_peer_start(invoke)
-    checkEquals(0, invoke.completionCount, "peer advertise waits for registration ack")
+    plugin.advertise_start(invoke)
+    checkEquals(0, invoke.completionCount, "generic advertise waits for registration ack")
     val call = manager.registrationCalls[callIndex]
     val address = call.info.attributes["address"]?.let { String(it, StandardCharsets.UTF_8) }
     checkEquals(
         "192.168.1.2:4433,[fd00::2]:4434,[fe80::2%9]:4435",
         address,
-        "peer advertisement publishes one plural address TXT"
+        "generic advertisement preserves peer-shaped address TXT"
     )
     call.listener.onServiceRegistered(call.info)
     val id = invoke.resolutions.single()!!["advertiseId"] as Long
     return Pair(id, call)
 }
 
-private fun testAdvertisementAckUpdateAndRaces() {
+private fun testAdvertisementLifecycleAndRaces() {
     val (plugin, manager) = newPlugin()
 
-    val failed = Invoke(peerAdvertiseArgs())
-    plugin.advertise_peer_start(failed)
+    val failed = Invoke(peerShapedAdvertiseArgs())
+    plugin.advertise_start(failed)
     val failedCall = manager.registrationCalls.last()
     manager.registrationFailed(failedCall, 3)
     failedCall.listener.onRegistrationFailed(failedCall.info, 3)
     failedCall.listener.onServiceRegistered(failedCall.info)
     checkEquals(1, failed.completionCount, "registration failure completes start exactly once")
 
-    // Exhausting the bounded native retry rejects this caller but must retain
-    // the owner. A later stop can retry the same active listener and observes
-    // the terminal callback before reporting success.
+    // Exhausting the immediate native retries keeps the original caller and
+    // owner pending. The adapter retries after a delay because the production
+    // Rust actor sends no second stop command.
     val (retainedPlugin, retainedManager) = newPlugin()
     val (retainedId, retainedRegistration) =
-        startPeerAdvertisement(retainedPlugin, retainedManager)
-    retainedManager.unregisterDispatchFailuresRemaining = 2
+        startGenericAdvertisement(retainedPlugin, retainedManager)
+    retainedManager.unregisterDispatchFailuresRemaining = 5
     val failedDispatchStop = Invoke(advertiseStopArgs(retainedId))
-    retainedPlugin.advertise_peer_stop(failedDispatchStop)
-    checkEquals(1, failedDispatchStop.rejections.size, "peer stop surfaces exhausted dispatch retry")
+    retainedPlugin.advertise_stop(failedDispatchStop)
+    checkEquals(0, failedDispatchStop.completionCount, "generic stop remains pending after immediate retries")
     checkThat(
         retainedManager.isRegistrationListenerActive(retainedRegistration.listener),
-        "failed peer stop retains ownership of the active registration"
+        "failed generic stop retains ownership of the active registration"
     )
-    val retainedRetryStop = Invoke(advertiseStopArgs(retainedId))
-    retainedPlugin.advertise_peer_stop(retainedRetryStop)
-    checkEquals(0, retainedRetryStop.completionCount, "retrying peer stop waits for cleanup")
-    checkThat(
-        retainedManager.isUnregistrationPending(retainedRegistration.listener),
-        "retrying peer stop dispatches cleanup for the retained owner"
-    )
-    retainedManager.serviceUnregistered(retainedRegistration)
-    checkEquals(1, retainedRetryStop.resolutions.size, "retained peer owner closes after callback")
-
-    val (id, initial) = startPeerAdvertisement(plugin, manager)
-    val updateArgs = AdvertiseUpdateArgs().apply {
-        advertiseId = id
-        relay = "https://new-relay.example"
-        addresses = listOf("10.0.0.2:5000", "bad", "10.0.0.2:5000")
+    waitUntil("generic stop did not autonomously retry after dispatch recovery") {
+        retainedManager.isUnregistrationPending(retainedRegistration.listener)
     }
+    checkEquals(0, failedDispatchStop.completionCount, "retried generic stop waits for cleanup")
+    retainedManager.serviceUnregistered(retainedRegistration)
+    checkEquals(1, failedDispatchStop.resolutions.size, "original generic owner closes after callback")
+
+    val (id, initial) = startGenericAdvertisement(plugin, manager)
+    val updateArgs = genericAdvertiseUpdateArgs(
+        id,
+        port = 1,
+        txt = peerShapedTxt("10.0.0.2:5000", "https://new-relay.example")
+    )
     val update = Invoke(updateArgs)
-    plugin.advertise_peer_update(update)
+    plugin.advertise_update(update)
     checkEquals(0, update.completionCount, "update waits for unregister/register callbacks")
     checkThat(
         manager.unregisteredListeners.last() === initial.listener,
@@ -828,14 +681,13 @@ private fun testAdvertisementAckUpdateAndRaces() {
 
     // Stop while the next update is waiting for unregistration. The late
     // callback must not re-register, and the update rejects exactly once.
-    val racingUpdate = Invoke(AdvertiseUpdateArgs().apply {
-        advertiseId = id
-        addresses = listOf("10.0.0.3:5001")
-    })
-    plugin.advertise_peer_update(racingUpdate)
+    val racingUpdate = Invoke(
+        genericAdvertiseUpdateArgs(id, port = 1, txt = peerShapedTxt("10.0.0.3:5001"))
+    )
+    plugin.advertise_update(racingUpdate)
     val registrationsBeforeStop = manager.registrationCalls.size
     val stop = Invoke(advertiseStopArgs(id))
-    plugin.advertise_peer_stop(stop)
+    plugin.advertise_stop(stop)
     checkEquals(1, racingUpdate.rejections.size, "stop rejects in-flight update exactly once")
     checkEquals(0, stop.completionCount, "stop waits for the in-flight unregister callback")
 
@@ -856,20 +708,19 @@ private fun testAdvertisementAckUpdateAndRaces() {
     replacement.listener.onServiceUnregistered(replacement.info)
     checkEquals(registrationsBeforeStop, manager.registrationCalls.size, "late unregister cannot revive")
     val stopAgain = Invoke(advertiseStopArgs(id))
-    plugin.advertise_peer_stop(stopAgain)
+    plugin.advertise_stop(stopAgain)
     checkEquals(1, stopAgain.completionCount, "stop is idempotent")
 
     // Also cover stop after the replacement registration has been launched but
     // before Android acknowledges it.
-    val (raceId, raceInitial) = startPeerAdvertisement(plugin, manager)
-    val registerRace = Invoke(AdvertiseUpdateArgs().apply {
-        advertiseId = raceId
-        addresses = listOf("10.0.0.4:5002")
-    })
-    plugin.advertise_peer_update(registerRace)
+    val (raceId, raceInitial) = startGenericAdvertisement(plugin, manager)
+    val registerRace = Invoke(
+        genericAdvertiseUpdateArgs(raceId, port = 1, txt = peerShapedTxt("10.0.0.4:5002"))
+    )
+    plugin.advertise_update(registerRace)
     manager.serviceUnregistered(raceInitial)
     val pendingReplacement = manager.registrationCalls.last()
-    plugin.advertise_peer_stop(Invoke(advertiseStopArgs(raceId)))
+    plugin.advertise_stop(Invoke(advertiseStopArgs(raceId)))
     pendingReplacement.listener.onServiceRegistered(pendingReplacement.info)
     checkEquals(1, registerRace.rejections.size, "stop/register race rejects update once")
     checkEquals(0, registerRace.resolutions.size, "stopped update never resolves")
@@ -882,12 +733,11 @@ private fun testAdvertisementAckUpdateAndRaces() {
     // AOSP invalidates the listener mapping before delivering an unregister
     // failure. The advertisement must become terminal: it cannot truthfully
     // return to ACTIVE, update again, or try to stop with the dead listener.
-    val (failureId, failureInitial) = startPeerAdvertisement(plugin, manager)
-    val failedUpdate = Invoke(AdvertiseUpdateArgs().apply {
-        advertiseId = failureId
-        addresses = listOf("10.0.0.5:5003")
-    })
-    plugin.advertise_peer_update(failedUpdate)
+    val (failureId, failureInitial) = startGenericAdvertisement(plugin, manager)
+    val failedUpdate = Invoke(
+        genericAdvertiseUpdateArgs(failureId, port = 1, txt = peerShapedTxt("10.0.0.5:5003"))
+    )
+    plugin.advertise_update(failedUpdate)
     checkThat(
         manager.isRegistrationListenerActive(failureInitial.listener) &&
             manager.isUnregistrationPending(failureInitial.listener),
@@ -897,14 +747,13 @@ private fun testAdvertisementAckUpdateAndRaces() {
     manager.unregistrationFailed(failureInitial, 19)
     checkEquals(1, failedUpdate.rejections.size, "unregister failure rejects update")
 
-    val subsequentUpdate = Invoke(AdvertiseUpdateArgs().apply {
-        advertiseId = failureId
-        addresses = listOf("10.0.0.6:5004")
-    })
-    plugin.advertise_peer_update(subsequentUpdate)
+    val subsequentUpdate = Invoke(
+        genericAdvertiseUpdateArgs(failureId, port = 1, txt = peerShapedTxt("10.0.0.6:5004"))
+    )
+    plugin.advertise_update(subsequentUpdate)
     checkEquals(1, subsequentUpdate.rejections.size, "terminal advertisement rejects updates")
     val terminalStop = Invoke(advertiseStopArgs(failureId))
-    plugin.advertise_peer_stop(terminalStop)
+    plugin.advertise_stop(terminalStop)
     checkEquals(1, terminalStop.completionCount, "terminal advertisement still stops cleanly")
     checkEquals(
         unregisterCallsAtFailure,
@@ -915,6 +764,55 @@ private fun testAdvertisementAckUpdateAndRaces() {
 
 private fun testGenericAdvertiseContract() {
     val (plugin, manager) = newPlugin()
+
+    val (ackPlugin, ackManager) = newPlugin()
+    ackManager.registerDispatchFailuresRemaining = 1
+    val acknowledgedStart = Invoke(peerShapedAdvertiseArgs())
+    ackPlugin.advertise_start(acknowledgedStart)
+    val acknowledgedRegistration = ackManager.registrationCalls.single()
+    checkEquals(
+        0,
+        acknowledgedStart.completionCount,
+        "ambiguous register failure waits for accepted cleanup acknowledgement"
+    )
+    checkThat(
+        ackManager.isUnregistrationPending(acknowledgedRegistration.listener),
+        "ambiguous failed start dispatches native cleanup"
+    )
+    ackManager.serviceUnregistered(acknowledgedRegistration)
+    checkEquals(1, acknowledgedStart.rejections.size, "failed start rejects after cleanup terminal")
+
+    // registerService can throw after installing the listener. If cleanup also
+    // rejects dispatch, the failed start retains an internal owner so a late
+    // readiness callback can retry and await terminal unregistration.
+    val (latePlugin, lateManager) = newPlugin()
+    lateManager.registerDispatchFailuresRemaining = 1
+    lateManager.unregisterDispatchFailuresRemaining = 2
+    val lateStart = Invoke(peerShapedAdvertiseArgs())
+    latePlugin.advertise_start(lateStart)
+    val lateRegistration = lateManager.registrationCalls.single()
+    checkEquals(
+        0,
+        lateStart.completionCount,
+        "unaccepted failed-start cleanup keeps the Rust start lease fenced"
+    )
+    checkThat(
+        lateManager.isRegistrationListenerActive(lateRegistration.listener),
+        "failed start retains ownership while cleanup is unaccepted"
+    )
+    lateManager.failNextUnregister = true
+    lateRegistration.listener.onServiceRegistered(lateRegistration.info)
+    checkThat(
+        lateManager.isUnregistrationPending(lateRegistration.listener),
+        "late readiness retries cleanup for the retained failed start"
+    )
+    lateManager.serviceUnregistered(lateRegistration)
+    checkEquals(1, lateStart.rejections.size, "retained advertise start rejects after terminal cleanup")
+    checkThat(
+        !lateManager.isRegistrationListenerActive(lateRegistration.listener),
+        "failed start owner is released only at the terminal callback"
+    )
+
     val rejectedArgs = DnsSdAdvertiseStartArgs().apply {
         serviceName = "demo"
         instanceName = "instance"
@@ -1054,21 +952,20 @@ private fun testGenericAdvertiseContract() {
 
 private fun testThreadedUpdateStopRace() {
     val (plugin, manager) = newPlugin()
-    val (id, initial) = startPeerAdvertisement(plugin, manager)
+    val (id, initial) = startGenericAdvertisement(plugin, manager)
     val unregisterEntered = CountDownLatch(1)
     val unregisterRelease = CountDownLatch(1)
     manager.unregisterEntered = unregisterEntered
     manager.unregisterRelease = unregisterRelease
 
-    val update = Invoke(AdvertiseUpdateArgs().apply {
-        advertiseId = id
-        addresses = listOf("10.0.0.7:5005")
-    })
+    val update = Invoke(
+        genericAdvertiseUpdateArgs(id, port = 1, txt = peerShapedTxt("10.0.0.7:5005"))
+    )
     val stop = Invoke(advertiseStopArgs(id))
     val failure = AtomicReference<Throwable?>(null)
     val updateThread = Thread {
         try {
-            plugin.advertise_peer_update(update)
+            plugin.advertise_update(update)
         } catch (error: Throwable) {
             failure.compareAndSet(null, error)
         }
@@ -1083,7 +980,7 @@ private fun testThreadedUpdateStopRace() {
     val stopThread = Thread {
         stopStarted.countDown()
         try {
-            plugin.advertise_peer_stop(stop)
+            plugin.advertise_stop(stop)
         } catch (error: Throwable) {
             failure.compareAndSet(null, error)
         }
@@ -1109,8 +1006,8 @@ private fun testAospListenerLifecycleAcrossApiEras() {
     for (timing in TerminalRemovalTiming.values()) {
         val (plugin, manager) = newPlugin(timing)
 
-        val failedBrowse = Invoke(peerBrowseArgs())
-        plugin.browse_peers_start(failedBrowse)
+        val failedBrowse = Invoke(genericBrowseArgs())
+        plugin.browse_start(failedBrowse)
         val failedBrowseCall = manager.discoveryCalls.last()
         manager.startDiscoveryFailed(failedBrowseCall, 31)
         checkEquals(1, failedBrowse.rejections.size, "$timing browse failure rejects once")
@@ -1119,18 +1016,28 @@ private fun testAospListenerLifecycleAcrossApiEras() {
             "$timing start failure never stops a terminal listener"
         )
 
-        val (id, initial) = startPeerAdvertisement(plugin, manager)
-        val update = Invoke(AdvertiseUpdateArgs().apply {
-            advertiseId = id
-            addresses = listOf("10.0.0.20:6000")
-        })
-        plugin.advertise_peer_update(update)
+        val (browseId, browseListener) = startGenericBrowse(plugin, manager)
+        val browseStop = Invoke(stopArgs(browseId))
+        plugin.browse_stop(browseStop)
+        checkEquals(0, browseStop.completionCount, "$timing browse stop waits for terminal callback")
+        manager.discoveryStopped(manager.discoveryCalls.last())
+        checkEquals(1, browseStop.resolutions.size, "$timing browse stop resolves terminally")
+        checkThat(
+            !manager.isDiscoveryListenerActive(browseListener),
+            "$timing terminal browse callback retires the listener"
+        )
+
+        val (id, initial) = startGenericAdvertisement(plugin, manager)
+        val update = Invoke(
+            genericAdvertiseUpdateArgs(id, port = 1, txt = peerShapedTxt("10.0.0.20:6000"))
+        )
+        plugin.advertise_update(update)
         manager.serviceUnregistered(initial)
         val replacement = manager.registrationCalls.last()
         replacement.listener.onServiceRegistered(replacement.info)
         checkEquals(1, update.resolutions.size, "$timing update resolves once")
 
-        plugin.advertise_peer_stop(Invoke(advertiseStopArgs(id)))
+        plugin.advertise_stop(Invoke(advertiseStopArgs(id)))
         checkThat(
             manager.isUnregistrationPending(replacement.listener),
             "$timing stop dispatches exactly one unregister"
@@ -1146,18 +1053,17 @@ private fun testAospListenerLifecycleAcrossApiEras() {
     // must not poison the generation. A late registration acknowledgement can
     // then perform the ownerless cleanup exactly once.
     val (retryPlugin, retryManager) = newPlugin()
-    val (retryId, retryInitial) = startPeerAdvertisement(retryPlugin, retryManager)
-    val retryUpdate = Invoke(AdvertiseUpdateArgs().apply {
-        advertiseId = retryId
-        addresses = listOf("10.0.0.21:6001")
-    })
-    retryPlugin.advertise_peer_update(retryUpdate)
+    val (retryId, retryInitial) = startGenericAdvertisement(retryPlugin, retryManager)
+    val retryUpdate = Invoke(
+        genericAdvertiseUpdateArgs(retryId, port = 1, txt = peerShapedTxt("10.0.0.21:6001"))
+    )
+    retryPlugin.advertise_update(retryUpdate)
     retryManager.serviceUnregistered(retryInitial)
     val pendingReplacement = retryManager.registrationCalls.last()
     val successfulUnregistersBeforeStop = retryManager.unregisteredListeners.size
     retryManager.failNextUnregister = true
     val retryStop = Invoke(advertiseStopArgs(retryId))
-    retryPlugin.advertise_peer_stop(retryStop)
+    retryPlugin.advertise_stop(retryStop)
     checkEquals(
         successfulUnregistersBeforeStop,
         retryManager.unregisteredListeners.size,
@@ -1179,17 +1085,16 @@ private fun testAospListenerLifecycleAcrossApiEras() {
     // Conversely, a registration-failure callback is terminal in both AOSP
     // orderings. Stop must not pass its already-retired listener back to NSD.
     val (failurePlugin, failureManager) = newPlugin()
-    val (failureId, failureInitial) = startPeerAdvertisement(failurePlugin, failureManager)
-    val failedReplacementUpdate = Invoke(AdvertiseUpdateArgs().apply {
-        advertiseId = failureId
-        addresses = listOf("10.0.0.22:6002")
-    })
-    failurePlugin.advertise_peer_update(failedReplacementUpdate)
+    val (failureId, failureInitial) = startGenericAdvertisement(failurePlugin, failureManager)
+    val failedReplacementUpdate = Invoke(
+        genericAdvertiseUpdateArgs(failureId, port = 1, txt = peerShapedTxt("10.0.0.22:6002"))
+    )
+    failurePlugin.advertise_update(failedReplacementUpdate)
     failureManager.serviceUnregistered(failureInitial)
     val failedReplacement = failureManager.registrationCalls.last()
     failureManager.registrationFailed(failedReplacement, 32)
     val unregistersAtFailure = failureManager.unregisteredListeners.size
-    failurePlugin.advertise_peer_stop(Invoke(advertiseStopArgs(failureId)))
+    failurePlugin.advertise_stop(Invoke(advertiseStopArgs(failureId)))
     checkEquals(
         unregistersAtFailure,
         failureManager.unregisteredListeners.size,
@@ -1202,16 +1107,28 @@ private fun testAospListenerLifecycleAcrossApiEras() {
     )
 }
 
+private fun testPeerSpecificCommandSurfaceIsRemoved() {
+    val commandNames = IrohHttpPlugin::class.java.methods.map { it.name }.toSet()
+    for (removed in listOf(
+        "browse_peers_start",
+        "browse_peers_poll",
+        "browse_peers_stop",
+        "advertise_peer_start",
+        "advertise_peer_update",
+        "advertise_peer_stop"
+    )) {
+        checkThat(removed !in commandNames, "$removed must be removed in favor of generic DNS-SD")
+    }
+}
+
 fun main() {
     testBrowseReadinessAndTerminalConsumption()
-    testPeerPresenceGenerationsAndPluralTxt()
     testGenericBrowseRecordsPresenceAndRepeatedUpserts()
-    testPeerInstanceIdentityAndLateHandleCallbacks()
     testRetiredResolveQueuesDoNotStarveNewSessions()
-    testAddressTxtByteBoundary()
-    testAdvertisementAckUpdateAndRaces()
+    testAdvertisementLifecycleAndRaces()
     testGenericAdvertiseContract()
     testThreadedUpdateStopRace()
     testAospListenerLifecycleAcrossApiEras()
-    println("Android native discovery contract: 10/10 test groups passed")
+    testPeerSpecificCommandSurfaceIsRemoved()
+    println("Android generic discovery contract: 7/7 test groups passed")
 }

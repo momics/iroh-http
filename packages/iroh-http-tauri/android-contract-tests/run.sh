@@ -11,6 +11,7 @@ kotlinc \
   "$here/stubs/android/net/Network.kt" \
   "$here/stubs/android/net/nsd/NsdManager.kt" \
   "$here/stubs/android/os/Build.kt" \
+  "$here/stubs/android/os/Handler.kt" \
   "$here/stubs/android/util/Log.kt" \
   "$here/stubs/app/tauri/annotation/Annotations.kt" \
   "$here/stubs/app/tauri/plugin/Plugin.kt" \

@@ -5,8 +5,6 @@ mod discovery_handles;
 mod discovery_ownership;
 mod state;
 
-pub mod mobile_address_lookup;
-
 #[cfg(any(mobile, all(test, feature = "discovery")))]
 mod mobile_discovery_transport;
 
@@ -203,11 +201,6 @@ impl<R: Runtime> PluginBuilder<R> {
                     let mdns = mobile_mdns::init(app, _api)
                         .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
                     app.manage(mdns);
-                    // #310: manage the in-process AddressLookup that feeds
-                    // natively-discovered peers to iroh's dialer. Registered on
-                    // each endpoint in `create_endpoint`, updated by the browse
-                    // event pump in `mdns_next_event`.
-                    app.manage(mobile_address_lookup::MobileAddressLookup::new());
                 }
                 Ok(())
             })
@@ -234,12 +227,6 @@ impl<R: Runtime> PluginBuilder<R> {
                     if app.webview_windows().is_empty() {
                         commands::retire_all_discovery_sessions(app);
                         state::clear_endpoint_owners();
-                        #[cfg(mobile)]
-                        if let Some(lookups) =
-                            app.try_state::<mobile_address_lookup::MobileAddressLookup>()
-                        {
-                            lookups.clear();
-                        }
                         iroh_http_core::registry::close_all_endpoints();
                     }
                 }

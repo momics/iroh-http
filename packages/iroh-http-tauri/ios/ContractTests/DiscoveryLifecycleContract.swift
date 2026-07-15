@@ -11,11 +11,37 @@ private struct DiscoveryLifecycleContract {
     static func main() throws {
         try browseReadinessAndFailureAreOneShot()
         try browseFoundChangedAndLostAreObservable()
+        try peerShapedRecordsFlowThroughGenericBrowse()
         try browseStopRetiresCallbacks()
         try advertisementAcknowledgementsAndRaces()
         try advertisementUpdateFinishesBeforeStop()
         try genericAdvertisementUpdatePreservesIdentity()
         print("iOS generic DNS-SD lifecycle contract passed")
+    }
+
+    private static func peerShapedRecordsFlowThroughGenericBrowse() throws {
+        let browse = DiscoveryBrowseLifecycle(id: 12, callbackGeneration: 31)
+        browse.nativeReady(generation: 31)
+        let peer = DiscoveryDnsSdRecord(
+            serviceType: "_iroh._udp",
+            instanceName: "endpoint-instance",
+            txt: [
+                "pk": "endpoint-id",
+                "relay": "https://relay.example",
+                "address": "192.0.2.10:4433,[2001:db8::10]:4433",
+            ]
+        )
+
+        browse.nativeSnapshot(generation: 31, records: [peer])
+        try lifecycleRequire(
+            browse.poll().records == [peer],
+            "generic browse did not preserve peer-shaped TXT metadata"
+        )
+        browse.nativeSnapshot(generation: 31, records: [])
+        try lifecycleRequire(
+            browse.poll().records == [peer.inactive()],
+            "generic browse did not expire a peer-shaped record by instance"
+        )
     }
 
     private static func browseReadinessAndFailureAreOneShot() throws {
@@ -30,6 +56,11 @@ private struct DiscoveryLifecycleContract {
         let failed = DiscoveryBrowseLifecycle(id: 8, callbackGeneration: 12)
         failed.nativeFailure(generation: 12, message: "permission denied")
         failed.nativeReady(generation: 12)
+        try lifecycleRequire(
+            failed.startCompletion == .pending,
+            "failure-before-ready rejected browse start before native cancellation"
+        )
+        failed.nativeCancelled(generation: 12)
         try lifecycleRequire(
             failed.startCompletion == .rejected("permission denied"),
             "failure-before-ready did not reject browse start"
@@ -100,26 +131,62 @@ private struct DiscoveryLifecycleContract {
 
         browse.nativeReady(generation: 29)
         try lifecycleRequire(browse.startCompletion == .pending, "stale generation resolved browse start")
-        try lifecycleRequire(browse.stop(), "browse stop was not acknowledged")
         try lifecycleRequire(
-            browse.startCompletion == .rejected("browse closed before becoming ready"),
-            "stop-before-ready did not reject the pending start"
+            browse.requestStop() == .cancelNow,
+            "browse stop was not accepted"
+        )
+        try lifecycleRequire(
+            browse.stopCompletion == .pending,
+            "browse stop resolved before NWBrowser cancellation"
+        )
+        try lifecycleRequire(
+            browse.startCompletion == .pending,
+            "stop-before-ready rejected start before native cancellation"
         )
 
         let late = DiscoveryDnsSdRecord(serviceType: "_demo._udp", instanceName: "late")
         browse.nativeReady(generation: 30)
         browse.nativeSnapshot(generation: 30, records: [late])
         browse.nativeFailure(generation: 30, message: "late failure")
+        try lifecycleRequire(
+            browse.stopCompletion == .pending,
+            "NWBrowser failure acknowledged stop before cancellation"
+        )
         browse.nativeCancelled(generation: 30)
         try lifecycleRequire(browse.state == .closed, "late callback revived a stopped browse")
+        try lifecycleRequire(
+            browse.stopCompletion == .resolved,
+            "NWBrowser cancellation did not acknowledge browse stop"
+        )
         try lifecycleRequire(browse.poll().records.isEmpty, "late callback enqueued after stop")
         try lifecycleRequire(
             browse.startCompletion == .rejected("browse closed before becoming ready"),
             "close race completed browse start twice"
         )
 
-        try lifecycleRequire(browse.stop(), "idempotent browse stop was not acknowledged")
+        try lifecycleRequire(
+            browse.requestStop() == .alreadyTerminal,
+            "terminal browse accepted another native stop"
+        )
         try lifecycleRequire(browse.state == .closed, "idempotent stop changed terminal state")
+
+        let failed = DiscoveryBrowseLifecycle(id: 12, callbackGeneration: 31)
+        failed.nativeReady(generation: 31)
+        failed.nativeFailure(generation: 31, message: "network failed")
+        failed.nativeCancelled(generation: 31)
+        try lifecycleRequire(
+            failed.requestStop() == .alreadyTerminal,
+            "stop requested a second cancellation after terminal acknowledgement"
+        )
+        try lifecycleRequire(
+            failed.state == .closed && failed.stopCompletion == .resolved,
+            "stop did not consume and retire the acknowledged terminal failure"
+        )
+        let stoppedFailure = failed.poll()
+        try lifecycleRequire(
+            stoppedFailure.status == "closed" && stoppedFailure.error == nil,
+            "stop-before-poll left a retained terminal failure"
+        )
     }
 
     private static func advertisementAcknowledgementsAndRaces() throws {
@@ -128,7 +195,15 @@ private struct DiscoveryLifecycleContract {
         ready.nativePublished(generation: 40)
         try lifecycleRequire(ready.startCompletion == .resolved(21), "publish did not resolve advertise start")
         try lifecycleRequire(ready.requestStop() == .stopNow, "advertise stop was not immediate")
+        try lifecycleRequire(
+            ready.stopCompletion == .pending,
+            "advertise stop resolved before netServiceDidStop"
+        )
         ready.nativeStopped(generation: 40)
+        try lifecycleRequire(
+            ready.stopCompletion == .resolved,
+            "netServiceDidStop did not acknowledge advertise stop"
+        )
         ready.nativeFailure(generation: 40, message: "late failure")
         try lifecycleRequire(ready.state == .closed, "late callback revived stopped advertisement")
         try lifecycleRequire(ready.startCompletion == .resolved(21), "advertise start completed twice")
@@ -136,6 +211,11 @@ private struct DiscoveryLifecycleContract {
         let failed = DiscoveryAdvertisementLifecycle(id: 22, callbackGeneration: 41)
         failed.nativeFailure(generation: 41, message: "name conflict")
         failed.nativePublished(generation: 41)
+        try lifecycleRequire(
+            failed.startCompletion == .pending,
+            "failure-before-publish rejected advertise start before netServiceDidStop"
+        )
+        failed.nativeStopped(generation: 41)
         try lifecycleRequire(
             failed.startCompletion == .rejected("name conflict"),
             "failure-before-publish did not reject advertise start"
@@ -151,6 +231,10 @@ private struct DiscoveryLifecycleContract {
             "stop-before-publish was not immediate"
         )
         stoppedWhileStarting.nativePublished(generation: 42)
+        try lifecycleRequire(
+            stoppedWhileStarting.startCompletion == .pending,
+            "stop-before-publish rejected start before netServiceDidStop"
+        )
         stoppedWhileStarting.nativeStopped(generation: 42)
         try lifecycleRequire(
             stoppedWhileStarting.startCompletion
@@ -189,14 +273,23 @@ private struct DiscoveryLifecycleContract {
             "finishing the update did not release the deferred stop"
         )
         try lifecycleRequire(
-            advertisement.state == .closed,
-            "advertisement remained active after update-before-stop completed"
+            advertisement.state == .stopping,
+            "advertisement did not retain native ownership after update-before-stop"
+        )
+        try lifecycleRequire(
+            advertisement.stopCompletion == .pending,
+            "update-deferred stop resolved before netServiceDidStop"
         )
 
         advertisement.nativeFailure(generation: 43, message: "late failure")
         try lifecycleRequire(
-            advertisement.state == .closed,
-            "late update/stop callback revived the advertisement"
+            advertisement.stopCompletion == .pending,
+            "failure during advertisement stop resolved it before netServiceDidStop"
+        )
+        advertisement.nativeStopped(generation: 43)
+        try lifecycleRequire(
+            advertisement.state == .closed && advertisement.stopCompletion == .resolved,
+            "netServiceDidStop did not finish update-deferred stop"
         )
     }
 

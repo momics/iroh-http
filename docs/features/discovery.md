@@ -181,10 +181,10 @@ before mDNS works on a device. See
 [Mobile mDNS / DNS-SD setup](../guidelines/mobile-mdns-setup.md) for the exact
 iOS `Info.plist` and Android `AndroidManifest.xml` entries.
 
-Both the peer path (`advertisePeer` / `browsePeers`) and the generic path
-(`advertise` / `browse`) run on mobile through the native bridge. Android
-resolves full generic records (host, port, TXT, addresses); iOS surfaces the
-instance name, service type and TXT but leaves host/port/addresses unresolved
-(`NWBrowser` does not resolve endpoints without an `NWConnection`). A single
-`iroh-http:discovery` capability permission grants both paths.
-
+Mobile has one native generic browse engine and one native generic advertisement
+engine. The peer APIs use those same adapters, then apply the iroh-specific TXT,
+identity, and endpoint-lookup projection in Rust. Android resolves full generic
+records (host, port, TXT, addresses); iOS surfaces the instance name, service
+type and TXT but leaves host/port/addresses unresolved (`NWBrowser` does not
+resolve endpoints without an `NWConnection`). A single `iroh-http:discovery`
+capability permission grants both paths.
