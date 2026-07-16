@@ -20,18 +20,13 @@ impl IrohEndpoint {
         if let Some(h) = handle {
             h.drain().await;
         }
-        // Preserve the graceful-drain contract: an in-flight handler may still
-        // need DNS. Stop resolver helpers only after every handler has drained,
-        // but before closing the transport itself.
-        self.inner.transport.shutdown_scoped_dns_proxies();
         self.clear_local_service();
-        self.inner.transport.ep.close().await;
+        self.inner.transport.close().await;
         let _ = self.inner.session.closed_tx.send(true);
     }
 
     /// Immediate close: abort the serve loop with no drain period.
     pub async fn close_force(&self) {
-        self.inner.transport.shutdown_scoped_dns_proxies();
         let handle = self
             .inner
             .session
@@ -43,7 +38,7 @@ impl IrohEndpoint {
             h.abort();
         }
         self.clear_local_service();
-        self.inner.transport.ep.close().await;
+        self.inner.transport.close().await;
         let _ = self.inner.session.closed_tx.send(true);
     }
 

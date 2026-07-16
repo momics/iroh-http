@@ -35,13 +35,13 @@ pub struct DiscoveryOptions {
     pub dns_server: Option<String>,
     /// Whether to enable DNS discovery. Default: `true`.
     pub enabled: bool,
-    /// Explicit DNS nameserver IPs (e.g. `"8.8.8.8"`) for iroh's resolver.
+    /// Explicit ordinary-DNS nameservers for iroh's resolver.
     ///
-    /// iroh's default resolver reads the host's system DNS config, but that is
-    /// unavailable on some platforms — notably Android, which has no
-    /// `/etc/resolv.conf` and requires a JNI-initialised `ndk_context`. When
-    /// non-empty, a resolver is built from these servers so relay, pkarr, and
-    /// DNS-discovery lookups work. Empty means use iroh's default resolver.
+    /// Accepts IPs such as `"8.8.8.8"` and numeric scoped IPv6 addresses such
+    /// as `"fe80::1%17"`. This setting is unrelated to DNS-SD/mDNS: it supplies
+    /// the resolver used for relay, pkarr, and DNS-discovery hostnames when the
+    /// platform's system DNS config is unavailable. Empty means use iroh's
+    /// default resolver.
     pub dns_nameservers: Vec<String>,
 }
 

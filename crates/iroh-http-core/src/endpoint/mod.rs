@@ -23,10 +23,12 @@
 use std::sync::Arc;
 
 pub(in crate::endpoint) mod bind;
+mod dns_nameservers;
 pub(in crate::endpoint) mod ffi_bridge;
 pub(in crate::endpoint) mod http_runtime;
 pub(in crate::endpoint) mod lifecycle;
 pub(in crate::endpoint) mod observe;
+mod scoped_dns_compat;
 pub(in crate::endpoint) mod session_runtime;
 mod source_scoped_lookup;
 pub(in crate::endpoint) mod transport;
