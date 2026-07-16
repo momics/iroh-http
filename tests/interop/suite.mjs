@@ -349,14 +349,32 @@ export function buildSuite(ctx) {
         }
         const t = now();
         let status = null;
+        let transport = "unknown";
+        let probeNode = node;
+        let isolated = false;
         try {
-          const res = await fetch(`httpi://${peer.nodeId}/hello`, {
+          // A warmed application endpoint may already have a pooled relay
+          // connection to this peer. Probe from a fresh endpoint so the
+          // supplied direct addresses are the only available dial path and the
+          // transport snapshot describes this probe rather than an older one.
+          if (ctx.createIsolatedNode) {
+            probeNode = await ctx.createIsolatedNode({
+              purpose: "direct-dial",
+              nodeOptions: { discovery: { dns: false } },
+            });
+            isolated = true;
+          }
+          const probeFetch = isolated
+            ? (url, init) => probeNode.fetch(url, init)
+            : fetch;
+          const res = await probeFetch(`httpi://${peer.nodeId}/hello`, {
             method: "GET",
             directAddrs: peerDirect,
-            ...(peerRelayUrl ? { relayUrl: peerRelayUrl } : {}),
+            ...(!isolated && peerRelayUrl ? { relayUrl: peerRelayUrl } : {}),
           });
           status = res.status;
           await res.arrayBuffer();
+          transport = await detectTransport(probeNode, peer.nodeId);
         } catch (e) {
           return {
             ok: false,
@@ -364,9 +382,10 @@ export function buildSuite(ctx) {
             transport: "unknown",
             detail: `fetch failed: ${e}`,
           };
+        } finally {
+          if (isolated) await probeNode.close().catch(() => {});
         }
         const latencyMs = round(now() - t);
-        const transport = await detectTransport(node, peer.nodeId);
         const fetchOk = status != null && status < 500;
         // F19: only a measured DIRECT transport proves direct dial. An "unknown"
         // transport (peerStats unavailable) must NOT be counted as a direct pass —

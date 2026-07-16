@@ -369,16 +369,35 @@ test("result events expose live progress and aggregate outcome counts", async ()
   );
 });
 
-test("direct-dial evidence describes supplied hints without claiming the chosen path", async () => {
+test("direct dial uses a fresh node so a warmed relay path cannot mask direct evidence", async () => {
+  const calls = [];
+  let isolationRequest = null;
+  const isolated = {
+    fetch: async (_url, init) => {
+      calls.push(init);
+      return new Response("ok");
+    },
+    peerStats: async () => ({ paths: [{ active: true, relay: false }] }),
+    close: async () => calls.push("closed"),
+  };
   const groups = buildSuite({
     node: {
-      peerStats: async () => ({ paths: [{ active: true, relay: false }] }),
+      fetch: async () => {
+        throw new Error("warmed primary node must not be used");
+      },
     },
     self: { nodeId: "self", platform: "test" },
-    peer: { nodeId: "peer", platform: "test", addrs: ["192.0.2.1:443"] },
-    fetch: async () => new Response("ok"),
+    peer: {
+      nodeId: "peer",
+      platform: "test",
+      addrs: ["192.0.2.1:443", "https://relay.example"],
+    },
     cases: [],
     selfLoopbackCase: { id: "self-loopback" },
+    createIsolatedNode: async (request) => {
+      isolationRequest = request;
+      return isolated;
+    },
   });
   const direct = groups
     .find((group) => group.id === "direct-dial")
@@ -389,6 +408,13 @@ test("direct-dial evidence describes supplied hints without claiming the chosen 
   assert.equal(result.ok, true);
   assert.match(result.detail, /1 advertised direct address hint supplied/);
   assert.doesNotMatch(result.detail, /via 192\.0\.2\.1:443/);
+  assert.deepEqual(isolationRequest, {
+    purpose: "direct-dial",
+    nodeOptions: { discovery: { dns: false } },
+  });
+  assert.deepEqual(calls[0].directAddrs, ["192.0.2.1:443"]);
+  assert.equal(calls[0].relayUrl, undefined);
+  assert.equal(calls.at(-1), "closed");
 });
 
 test("peer compliance fetches retain the advertised relay URL", async () => {
