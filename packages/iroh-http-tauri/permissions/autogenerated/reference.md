@@ -11,6 +11,7 @@ Node lifecycle and introspection. Covers createNode() and close(). Add iroh-http
 - `allow-node-addr`
 - `allow-node-ticket`
 - `allow-home-relay`
+- `allow-discovery-info`
 - `allow-peer-info`
 - `allow-peer-stats`
 - `allow-endpoint-stats`
@@ -439,6 +440,32 @@ Enables the create_fetch_token command without any pre-configured scope.
 <td>
 
 Denies the create_fetch_token command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`iroh-http:allow-discovery-info`
+
+</td>
+<td>
+
+Enables the discovery_info command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`iroh-http:deny-discovery-info`
+
+</td>
+<td>
+
+Denies the discovery_info command without any pre-configured scope.
 
 </td>
 </tr>

@@ -14,10 +14,26 @@
 import {
   asIrohPeer,
   createNode,
+  isDialableSocketAddr,
   PublicKey,
   SecretKey,
+  TXT_KEY_ADDRESS,
+  TXT_KEY_RELAY,
 } from "@momics/iroh-http-tauri";
-import type { IrohSession } from "@momics/iroh-http-shared";
+import {
+  type IrohSession,
+  isRelayUrl,
+  type NodeOptions,
+} from "@momics/iroh-http-shared";
+// @ts-ignore — .mjs from the shared cross-runtime compliance suite (pure WHATWG).
+import { handleRequest as handleComplianceRequest } from "../../../tests/http-compliance/handler.mjs";
+// @ts-ignore — .mjs from the shared compliance suite (pure WHATWG).
+import { runCases as runComplianceCases } from "../../../tests/http-compliance/harness.mjs";
+import complianceCases from "../../../tests/http-compliance/cases.json";
+// @ts-ignore — .mjs from the shared interop suite (pure WHATWG).
+import { buildSuite, runSuite } from "../../../tests/interop/suite.mjs";
+import { getPeers, type RegistryPeer, upsertPeer } from "./peer-registry.js";
+import { createPeerPicker } from "./peer-picker.js";
 
 // ── Utilities ──────────────────────────────────────────────────────────────────
 
@@ -36,6 +52,38 @@ function setStatus(
 ): void {
   el.textContent = msg;
   el.className = kind ? `status ${kind}` : "status";
+}
+
+/** Split mixed registry addresses into the two independent dialing hints. */
+function dialHints(addrs: string[]): {
+  directAddrs?: string[];
+  relayUrl?: string;
+} {
+  const directAddrs = addrs.filter(isDialableSocketAddr);
+  const relayUrl = addrs.find(isRelayUrl);
+  return {
+    ...(directAddrs.length ? { directAddrs } : {}),
+    ...(relayUrl ? { relayUrl } : {}),
+  };
+}
+
+// Stable, greppable structured log prefix for the on-device DNS-SD checks
+// (#334). Lines reach `adb logcat` / iOS device logs via the webview→tracing
+// wiring, and are mirrored into a visible <pre> so the operator can read them
+// without a cable. Format: `IROH_DNSSD_CHECK <k>=<v> …`. Keep it single-line and
+// space-separated so it stays trivially greppable.
+const IROH_DNSSD_CHECK = "IROH_DNSSD_CHECK";
+
+function dnssdCheck(
+  logEl: HTMLElement | null,
+  fields: Record<string, string | number | boolean>,
+): void {
+  const line = `${IROH_DNSSD_CHECK} ` +
+    Object.entries(fields)
+      .map(([k, v]) => `${k}=${v}`)
+      .join(" ");
+  console.log(line);
+  if (logEl) appendLog(logEl, line);
 }
 
 function toHex(bytes: Uint8Array): string {
@@ -112,6 +160,51 @@ persistKey(node.secretKey.toBytes());
   });
 }
 
+// ── Keyboard-aware viewport (mobile) ─────────────────────────────────────────
+//
+// Tauri renders edge-to-edge on Android, so the native soft keyboard slides
+// over the webview instead of resizing it — a focused input near the bottom
+// (e.g. the peer node-id field) ends up hidden behind the keyboard and can't be
+// pasted into. The `visualViewport` API reports the region left visible above
+// the keyboard; pad the body by the keyboard's height so the page can scroll
+// far enough, and pull the focused field up into view. Works on iOS too.
+
+{
+  const vv = window.visualViewport;
+  if (vv) {
+    const isTextField = (node: EventTarget | null): node is HTMLElement =>
+      node instanceof HTMLElement &&
+      (node.tagName === "INPUT" || node.tagName === "TEXTAREA");
+
+    const keyboardHeight = (): number =>
+      Math.max(0, window.innerHeight - vv.height - vv.offsetTop);
+
+    const syncInset = (): void => {
+      const kb = keyboardHeight();
+      document.body.style.paddingBottom = kb > 0 ? `${kb}px` : "";
+      if (kb > 0 && isTextField(document.activeElement)) {
+        document.activeElement.scrollIntoView({ block: "center" });
+      }
+    };
+
+    vv.addEventListener("resize", syncInset);
+    vv.addEventListener("scroll", syncInset);
+
+    document.addEventListener("focusin", (e) => {
+      if (!isTextField(e.target)) return;
+      // Wait for the keyboard to animate in and update `visualViewport`.
+      window.setTimeout(() => {
+        syncInset();
+        (e.target as HTMLElement).scrollIntoView({ block: "center" });
+      }, 300);
+    });
+
+    document.addEventListener("focusout", () => {
+      document.body.style.paddingBottom = "";
+    });
+  }
+}
+
 // ── Identity ───────────────────────────────────────────────────────────────────
 
 async function copyText(
@@ -123,6 +216,24 @@ async function copyText(
   const prev = btn.textContent!;
   btn.textContent = "Copied!";
   setTimeout(() => (btn.textContent = prev), 1500);
+}
+
+// Mount the reusable, registry-backed peer-picker into a container. On select,
+// `onPick` fills that tab's target field so a peer discovered anywhere can be
+// targeted here without pasting an id.
+function mountPeerPicker(
+  mountId: string,
+  onPick: (peer: RegistryPeer) => void,
+  opts?: { placeholder?: string; compact?: boolean },
+): void {
+  const mount = document.querySelector<HTMLElement>(`#${mountId}`);
+  if (!mount) return;
+  const picker = createPeerPicker({
+    onSelect: onPick,
+    placeholder: opts?.placeholder,
+    compact: opts?.compact,
+  });
+  mount.append(picker.element);
 }
 
 const nodeIdEl = document.querySelector<HTMLElement>("#node-id")!;
@@ -312,10 +423,17 @@ fetchForm.addEventListener("submit", async (e) => {
 
   setStatus(responseStatus, "fetching…");
   responseBody.textContent = "";
+  // A manually-entered target counts as a discovered peer for the registry so
+  // it can be re-targeted from other tabs via the picker.
+  if (/^[0-9a-z]{40,}$/i.test(peer)) {
+    upsertPeer({ nodeId: peer, source: "manual" });
+  }
 
   try {
+    const known = getPeers().find((candidate) => candidate.nodeId === peer);
     const res = await node.fetch(`httpi://${peer}${path}`, {
       method: methodSelect.value,
+      ...dialHints(known?.addrs ?? []),
     });
     setStatus(responseStatus, `HTTP ${res.status}`, res.ok ? "ok" : "error");
     responseBody.textContent = await res.text();
@@ -323,6 +441,11 @@ fetchForm.addEventListener("submit", async (e) => {
     setStatus(responseStatus, "error", "error");
     responseBody.textContent = String(e);
   }
+});
+
+mountPeerPicker("http-peer-picker", (p) => {
+  peerInput.value = p.nodeId;
+  peerInput.focus();
 });
 
 // ── Stream files (httpi:// scheme) ───────────────────────────────────────────────
@@ -348,8 +471,15 @@ function filesUrl(rawPath: string, fallback: string): string | null {
     return null;
   }
   const p = rawPath.trim() || fallback;
+  if (/^[0-9a-z]{40,}$/i.test(host)) {
+    upsertPeer({ nodeId: host, source: "manual" });
+  }
   return `httpi://${host}${p.startsWith("/") ? p : `/${p}`}`;
 }
+
+mountPeerPicker("files-peer-picker", (p) => {
+  filesHostInput.value = p.nodeId;
+});
 
 // Fill the host field with this node's own ID so the Stream-files tab targets
 // the local server — exercising the self-request loopback. Requires serving
@@ -431,6 +561,10 @@ const peerLookupInput = document.querySelector<HTMLInputElement>(
 const peerInfoOutput = document.querySelector<HTMLElement>(
   "#peer-info-output",
 )!;
+
+mountPeerPicker("peer-peer-picker", (p) => {
+  peerLookupInput.value = p.nodeId;
+});
 
 document.querySelector<HTMLButtonElement>("#peer-info-btn")!.addEventListener(
   "click",
@@ -602,6 +736,14 @@ browsePeersBtn.addEventListener("click", async () => {
       if (ev.isActive) addDiscoveredPeer(ev.nodeId);
       else removeDiscoveredPeer(ev.nodeId);
 
+      if (ev.isActive) {
+        upsertPeer({
+          nodeId: ev.nodeId,
+          source: "discovery",
+          addrs: ev.addrs,
+        });
+      }
+
       const icon = ev.isActive ? "+" : "-";
       appendLog(
         browsePeersLog,
@@ -634,6 +776,12 @@ const genericLog = document.querySelector<HTMLElement>("#generic-log")!;
 let genericAdvertiseAbort: AbortController | null = null;
 let genericBrowseAbort: AbortController | null = null;
 
+function genericDemoInstance(): string {
+  return `Front Desk Printer (${detectPlatform()}-${
+    node.publicKey.toString().slice(0, 6)
+  })`;
+}
+
 genericAdvertiseBtn.addEventListener("click", async () => {
   if (genericAdvertiseAbort) {
     genericAdvertiseAbort.abort();
@@ -644,11 +792,12 @@ genericAdvertiseBtn.addEventListener("click", async () => {
   }
 
   const serviceName = genericServiceInput.value.trim() || "demo-printer";
+  const instanceName = genericDemoInstance();
   genericAdvertiseAbort = new AbortController();
   genericAdvertiseBtn.textContent = "Stop advertising";
   setStatus(
     genericStatus,
-    `Advertising "Front Desk Printer" on _${serviceName}._tcp`,
+    `Advertising "${instanceName}" on _${serviceName}._tcp`,
     "ok",
   );
 
@@ -657,10 +806,15 @@ genericAdvertiseBtn.addEventListener("click", async () => {
     // protocol — this is not an iroh node.
     await node.advertise({
       serviceName,
-      instanceName: "Front Desk Printer",
+      instanceName,
       port: 9100,
       protocol: "tcp",
-      txt: { model: "LaserJet 9000", color: "true", pdl: "application/pdf" },
+      txt: {
+        model: "LaserJet 9000",
+        color: "true",
+        pdl: "application/pdf",
+        platform: detectPlatform(),
+      },
       signal: genericAdvertiseAbort.signal,
     });
   } catch { /* aborted or error */ }
@@ -695,8 +849,39 @@ genericBrowseBtn.addEventListener("click", async () => {
       const txt = Object.entries(record.txt)
         .map(([k, v]) => `${k}=${v}`)
         .join(", ");
-      const peer = asIrohPeer(record);
+      // Generic DNS-SD instance labels are human service names, not implicit
+      // iroh identities. Only classify/register records carrying a valid `pk`.
+      let peer = null;
+      const advertisedPk = record.txt.pk;
+      if (advertisedPk) {
+        try {
+          PublicKey.fromString(advertisedPk);
+          peer = asIrohPeer(record);
+        } catch {
+          /* ordinary non-iroh DNS-SD service */
+        }
+      }
       const tag = peer ? `  (iroh peer ${peer.nodeId.slice(0, 12)}…)` : "";
+      if (peer && record.isActive) {
+        upsertPeer({
+          nodeId: peer.nodeId,
+          source: "generic",
+          platform: record.txt.platform,
+          addrs: peer.addrs,
+        });
+      }
+      // Greppable line for criterion 5 — on iOS a generic browse surfaces
+      // metadata only, so expect `port=0 host=undefined`; on Android/desktop
+      // these resolve to real values.
+      dnssdCheck(null, {
+        check: "generic",
+        role: "browse",
+        instance: record.instanceName,
+        port: record.port,
+        host: record.host ?? "undefined",
+        addrs: record.addrs.length,
+        isActive: record.isActive,
+      });
       appendLog(
         genericLog,
         `${icon} ${record.instanceName} :${record.port}${tag}` +
@@ -731,6 +916,10 @@ const datagramInput = document.querySelector<HTMLInputElement>(
   "#datagram-input",
 )!;
 
+mountPeerPicker("session-peer-picker", (p) => {
+  sessionPeerInput.value = p.nodeId;
+});
+
 let activeSession: IrohSession | null = null;
 let bidiWriter: WritableStreamDefaultWriter<Uint8Array> | null = null;
 
@@ -739,6 +928,9 @@ sessionConnectBtn.addEventListener("click", async () => {
   if (!peer) {
     sessionPeerInput.focus();
     return;
+  }
+  if (/^[0-9a-z]{40,}$/i.test(peer)) {
+    upsertPeer({ nodeId: peer, source: "session" });
   }
 
   setStatus(sessionStatus, "Connecting…");
@@ -897,3 +1089,752 @@ document.querySelector<HTMLButtonElement>("#gen-key-btn")!.addEventListener(
     ].join("\n");
   },
 );
+
+// ── Test (cross-device interop harness, #340) ────────────────────────────────
+//
+// An opt-in, LAN-scoped "testing mode". While enabled this node BOTH serves the
+// shared HTTP compliance handler AND advertises a `test=1` intent over generic
+// DNS-SD so peer test-mode devices can discover it and run the suite against it.
+// Pressing "Run" executes the suite one-way (this device = client) against a
+// selected discovered peer and renders a per-case grid + structured JSON log.
+//
+// Safety: OFF by default, clearly indicated while on, and force-disabled on page
+// teardown so it can never be left silently serving to the LAN.
+
+const TEST_SERVICE = "iroh-http-test";
+const TEST_TXT_KEY = "test";
+
+type TestPlatform = "android" | "ios" | "desktop";
+
+function detectPlatform(): TestPlatform {
+  const ua = navigator.userAgent;
+  if (/android/i.test(ua)) return "android";
+  // iPadOS 13+ presents a Mac UA but reports touch points.
+  if (/iphone|ipad|ipod/i.test(ua)) return "ios";
+  if (/mac/i.test(ua) && navigator.maxTouchPoints > 1) return "ios";
+  return "desktop";
+}
+
+// ── Test tab: interop suite runner ───────────────────────────────────────────
+//
+// Replaces the old per-case grid + disconnected DNS-SD check-cards with a single
+// cohesive suite runner. Testing mode (opt-in, LAN-scoped) serves the shared
+// compliance handler and advertises a `test=1` intent — now WITH the node's
+// dialable `address` TXT (via `discoveryInfo()`) so peers can dial directly
+// instead of over relay. The runner drives the structured `tests/interop`
+// suite against a peer picked from the shared registry, grouped by suite group
+// with status pills, latency, transport badges, a sticky summary, and a JSON
+// export. The former #334 DNS-SD checks now live in the suite's `discovery`
+// group. Greppable device tokens are preserved: `IROH_INTEROP_CASE` (per test,
+// via the suite runner), `[iroh-http-interop]` (the JSON report), and
+// `IROH_DNSSD_CHECK` (generic browse).
+{
+  const selfPlatform = detectPlatform();
+  const selfId = node.publicKey.toString();
+
+  const banner = document.querySelector<HTMLElement>("#test-mode-banner")!;
+  const toggle = document.querySelector<HTMLInputElement>("#test-mode-toggle")!;
+  const modeStatus = document.querySelector<HTMLElement>("#test-mode-status")!;
+  const selfPlatformEl = document.querySelector<HTMLElement>(
+    "#test-self-platform",
+  )!;
+  const selfIdEl = document.querySelector<HTMLElement>("#test-self-id")!;
+  const testTabBtn = document.querySelector<HTMLButtonElement>(
+    '[data-tab="test"]',
+  )!;
+
+  const runBtn = document.querySelector<HTMLButtonElement>("#suite-run-btn")!;
+  const runAllBtn = document.querySelector<HTMLButtonElement>(
+    "#suite-run-all-btn",
+  )!;
+  const autorunToggle = document.querySelector<HTMLInputElement>(
+    "#suite-autorun-toggle",
+  )!;
+  const copyJsonBtn = document.querySelector<HTMLButtonElement>(
+    "#suite-copy-json-btn",
+  )!;
+  const submitBtn = document.querySelector<HTMLButtonElement>(
+    "#suite-submit-btn",
+  )!;
+  const autosubmitToggle = document.querySelector<HTMLInputElement>(
+    "#suite-autosubmit-toggle",
+  )!;
+  const collectorIdInput = document.querySelector<HTMLInputElement>(
+    "#suite-collector-id",
+  )!;
+  const collectorStatus = document.querySelector<HTMLElement>(
+    "#suite-collector-status",
+  )!;
+  const targetLabel = document.querySelector<HTMLElement>("#suite-target")!;
+  const summaryBar = document.querySelector<HTMLElement>("#suite-summary")!;
+  const sumPass = document.querySelector<HTMLElement>("#suite-sum-pass")!;
+  const sumFail = document.querySelector<HTMLElement>("#suite-sum-fail")!;
+  const sumSkip = document.querySelector<HTMLElement>("#suite-sum-skip")!;
+  const runStatus = document.querySelector<HTMLElement>("#suite-run-status")!;
+  const sumMix = document.querySelector<HTMLElement>("#suite-sum-mix")!;
+  const progressEl = document.querySelector<HTMLProgressElement>(
+    "#suite-progress",
+  )!;
+  const groupsEl = document.querySelector<HTMLElement>("#suite-groups")!;
+  const jsonLog = document.querySelector<HTMLElement>("#test-json-log")!;
+
+  selfPlatformEl.textContent = selfPlatform;
+  selfIdEl.textContent = `${selfId.slice(0, 16)}…`;
+  selfIdEl.title = selfId;
+
+  let testAbort: AbortController | null = null;
+  // F10: retain the testing-mode serve handle so stop can await its shutdown
+  // contract (ServeHandle.finished) instead of racing the next transition.
+  let testServeHandle: { finished?: Promise<void> } | null = null;
+  let running = false;
+  let selectedPeerId: string | null = null;
+  // Peers seen while testing mode is on — used for "Run all peers" and the
+  // auto-run-on-new-peer trigger.
+  const testPeers = new Map<string, RegistryPeer>();
+  // F21: instance-name → nodeId, so an expiry event (empty TXT, so `asIrohPeer`
+  // yields no pk) can still be mapped back to the peer it retires.
+  const testInstanceToNodeId = new Map<string, string>();
+  // A peer can be advertised under several DNS-SD instance names at once — iOS
+  // renames its Bonjour instance on conflict (e.g. `pk` → `pk-<suffix>`), so the
+  // same nodeId is briefly live under two names. Track the live instances per
+  // nodeId so a stale instance's expiry only retires the peer once its *last*
+  // instance is gone, instead of evicting a peer that is still advertised.
+  const testNodeIdToInstances = new Map<string, Set<string>>();
+
+  // F24: testing mode serves the compliance handler on the app's real,
+  // relay-reachable node. The right exposure control here is *resource* bounds,
+  // not an identity allow-list: every caller is already cryptographically
+  // authenticated by QUIC (its public-key `Peer-Id`), and testing mode is an
+  // explicit, ephemeral opt-in the operator toggles on. An earlier `testPeers`
+  // allow-list 403-ed legitimately-authenticated peers whose generic test-mode
+  // DNS-SD record failed to reach this node (iOS Bonjour instance renaming drops
+  // the peer out of `testPeers`), which blocked the entire suite for an
+  // iOS-as-client run. QUIC authentication already keeps the open internet from
+  // reaching an unknown node id, so we drop the allow-list and keep only the
+  // body-size + concurrency caps that stop an authenticated peer from
+  // exhausting memory. Relay stays enabled so the relay-fallback group is
+  // testable. `TEST_MAX_BODY_BYTES` is ≥ the largest fixture (body-size-5mb).
+  const TEST_MAX_BODY_BYTES = 8 * 1024 * 1024;
+  const TEST_MAX_INFLIGHT = 16;
+  let testInflight = 0;
+
+  async function handleTestingRequest(req: Request): Promise<Response> {
+    // Reject oversized declared bodies before reading them.
+    const declared = Number(req.headers.get("Content-Length") ?? "0");
+    if (Number.isFinite(declared) && declared > TEST_MAX_BODY_BYTES) {
+      return new Response("Payload too large\n", { status: 413 });
+    }
+    // Cap concurrent in-flight fixtures.
+    if (testInflight >= TEST_MAX_INFLIGHT) {
+      return new Response("Too many requests\n", { status: 429 });
+    }
+    testInflight += 1;
+    try {
+      return await handleComplianceRequest(req);
+    } finally {
+      testInflight -= 1;
+    }
+  }
+
+  // ── Peer picker (top bar) ──────────────────────────────────────────────────
+  mountPeerPicker(
+    "test-peer-picker",
+    (p) => {
+      selectedPeerId = p.nodeId;
+      refreshTarget();
+      refreshRunEnabled();
+    },
+    { compact: true, placeholder: "Pick a peer to test against…" },
+  );
+
+  function refreshTarget(): void {
+    if (!selectedPeerId) {
+      targetLabel.textContent = "No peer selected — pick one above.";
+      return;
+    }
+    const p = getPeers().find((x) => x.nodeId === selectedPeerId);
+    targetLabel.textContent = p
+      ? `Target: ${p.label} · ${p.platform} · ${
+        p.addrs[0] ?? "no direct addr (relay only)"
+      }`
+      : `Target: ${selectedPeerId.slice(0, 16)}…`;
+  }
+
+  function refreshRunEnabled(): void {
+    runBtn.disabled = running || selectedPeerId === null;
+    // F21: batch runs target only active testing-mode peers, not the global
+    // registry (which includes manual/session/generic peers).
+    runAllBtn.disabled = running || testPeers.size === 0;
+    refreshSubmitEnabled();
+  }
+
+  // ── Testing mode ───────────────────────────────────────────────────────────
+  async function startTestingMode(): Promise<void> {
+    if (testAbort) return;
+    const ac = new AbortController();
+    testAbort = ac;
+
+    banner.classList.remove("hidden");
+    testTabBtn.classList.add("testing-live");
+    setStatus(modeStatus, "Serving compliance handler + advertising…", "ok");
+
+    // (a) Serve the shared compliance handler so remote peers can run cases here.
+    //     F10: if serve() rejects (e.g. the Server tab is already bound, or a
+    //     previous test server is still draining), we must NOT advertise a
+    //     compliance target we cannot actually serve. Abort, reset, and return.
+    try {
+      testServeHandle = node.serve(
+        { signal: ac.signal },
+        handleTestingRequest,
+      );
+    } catch (e) {
+      ac.abort();
+      testAbort = null;
+      testServeHandle = null;
+      banner.classList.add("hidden");
+      testTabBtn.classList.remove("testing-live");
+      toggle.checked = false;
+      setStatus(
+        modeStatus,
+        `serve failed — testing mode not started: ${e}`,
+        "error",
+      );
+      refreshRunEnabled();
+      return;
+    }
+
+    // (b) Advertise our testing intent over generic DNS-SD alongside our pk.
+    //     Attach our *dialable* direct address (and relay) via TXT so browsing
+    //     peers resolve a real `ip:port` and can exercise a direct LAN dial
+    //     instead of falling back to relay (the #350 "W1" gap). `discoveryInfo`
+    //     surfaces the true bound QUIC port from core, which `node.addr()`
+    //     cannot (its `ip_addrs()` ports are placeholders). The SRV `port: 1`
+    //     stays a generic-record placeholder; the dialable address rides in the
+    //     `address` TXT, which `asIrohPeer()` reads back on browse.
+    const di = await node.discoveryInfo().catch(() => null);
+    const dialable = di
+      ? (di.directAddresses.length > 0
+        ? di.directAddresses.join(",")
+        : di.directAddress ?? undefined)
+      : undefined;
+    void node.advertise({
+      serviceName: TEST_SERVICE,
+      instanceName: selfId,
+      port: 1,
+      protocol: "udp",
+      txt: {
+        pk: selfId,
+        [TEST_TXT_KEY]: "1",
+        platform: selfPlatform,
+        caps: "http-compliance",
+        ...(dialable ? { [TXT_KEY_ADDRESS]: dialable } : {}),
+        ...(di?.relayUrl ? { [TXT_KEY_RELAY]: di.relayUrl } : {}),
+      },
+      signal: ac.signal,
+    }).catch(() => {/* aborted or error */});
+
+    // (c) Browse for other test-mode peers → upsert into the shared registry.
+    void (async () => {
+      try {
+        for await (
+          const rec of node.browse({
+            serviceName: TEST_SERVICE,
+            protocol: "udp",
+            signal: ac.signal,
+          })
+        ) {
+          // F21: handle expiry/inactive events BEFORE the `test=1` TXT filter.
+          // An expiry record carries empty TXT, so the marker check would skip
+          // it and the peer would never be retired. Map it back by instance name.
+          if (!rec.isActive) {
+            const goneId = testInstanceToNodeId.get(rec.instanceName);
+            if (goneId) {
+              testInstanceToNodeId.delete(rec.instanceName);
+              const live = testNodeIdToInstances.get(goneId);
+              live?.delete(rec.instanceName);
+              // Only retire the peer once its last live instance is gone: iOS
+              // conflict-renames its Bonjour instance, so a stale instance's
+              // expiry must not evict a peer still advertised under a new name.
+              if (!live || live.size === 0) {
+                testNodeIdToInstances.delete(goneId);
+                testPeers.delete(goneId);
+                if (selectedPeerId === goneId) refreshTarget();
+                refreshRunEnabled();
+              }
+            }
+            continue;
+          }
+
+          // Active records must carry the testing-mode marker to count.
+          if (rec.txt[TEST_TXT_KEY] !== "1") continue;
+          const peer = asIrohPeer(rec);
+          if (!peer || peer.nodeId === selfId) continue;
+
+          const isNew = !testPeers.has(peer.nodeId);
+          const entry = upsertPeer({
+            nodeId: peer.nodeId,
+            source: "test",
+            platform: rec.txt.platform,
+            addrs: peer.addrs,
+          });
+          testPeers.set(peer.nodeId, entry);
+          testInstanceToNodeId.set(rec.instanceName, peer.nodeId);
+          let live = testNodeIdToInstances.get(peer.nodeId);
+          if (!live) {
+            live = new Set();
+            testNodeIdToInstances.set(peer.nodeId, live);
+          }
+          live.add(rec.instanceName);
+          refreshRunEnabled();
+          if (isNew && autorunToggle.checked && !running) {
+            selectedPeerId = peer.nodeId;
+            refreshTarget();
+            void runAgainstSelected();
+          }
+        }
+      } catch { /* aborted */ }
+    })();
+
+    refreshRunEnabled();
+  }
+
+  async function stopTestingMode(): Promise<void> {
+    if (!testAbort) return;
+    testAbort.abort();
+    testAbort = null;
+    testPeers.clear();
+    testInstanceToNodeId.clear();
+    testNodeIdToInstances.clear();
+    banner.classList.add("hidden");
+    testTabBtn.classList.remove("testing-live");
+    // F10: await the serve loop's shutdown contract (bounded) so a subsequent
+    // start doesn't race a still-draining server on the same endpoint.
+    const handle = testServeHandle;
+    testServeHandle = null;
+    if (handle?.finished) {
+      try {
+        await Promise.race([
+          handle.finished,
+          new Promise((r) => setTimeout(r, 5000)),
+        ]);
+      } catch {
+        /* stop errors are non-fatal for the UI */
+      }
+    }
+    setStatus(modeStatus, "Testing mode off.");
+    refreshRunEnabled();
+  }
+
+  toggle.addEventListener("change", () => {
+    if (toggle.checked) void startTestingMode();
+    else void stopTestingMode();
+  });
+
+  // Force testing mode off on teardown — it must never outlive the page.
+  const forceOff = () => {
+    if (testAbort) {
+      testAbort.abort();
+      testAbort = null;
+    }
+  };
+  globalThis.addEventListener("pagehide", forceOff);
+  globalThis.addEventListener("beforeunload", forceOff);
+
+  // ── Suite corpus ───────────────────────────────────────────────────────────
+  // deno-lint-ignore no-explicit-any
+  const allCases = (complianceCases as any[]).filter((c) =>
+    c && c.id && !c.skip
+  );
+  const selfLoopbackCase = {
+    id: "self-loopback",
+    description: "self-request baseline (ADR-015)",
+    request: { method: "GET", path: "/hello", headers: {}, body: null },
+    response: { status: 200, bodyExact: "hello" },
+  };
+
+  // ── Result rendering ───────────────────────────────────────────────────────
+  interface RowEls {
+    row: HTMLDetailsElement;
+    pill: HTMLElement;
+    lat: HTMLElement;
+    badge: HTMLElement;
+    detail: HTMLElement;
+  }
+  const rowEls = new Map<string, RowEls>();
+  const groupRolls = new Map<string, HTMLElement>();
+  // deno-lint-ignore no-explicit-any
+  let lastResults: any[] = [];
+
+  // deno-lint-ignore no-explicit-any
+  function renderSkeleton(groups: any[]): void {
+    groupsEl.replaceChildren();
+    rowEls.clear();
+    groupRolls.clear();
+    for (const group of groups) {
+      const details = document.createElement("details");
+      details.className = "suite-group";
+      details.open = true;
+      const summary = document.createElement("summary");
+      const title = document.createElement("span");
+      title.className = "suite-group-title";
+      title.textContent = group.name;
+      const roll = document.createElement("span");
+      roll.className = "suite-group-roll";
+      summary.append(title, roll);
+      details.append(summary);
+      groupRolls.set(group.id, roll);
+
+      for (const test of group.tests) {
+        const row = document.createElement("details");
+        row.className = "suite-row";
+        const rs = document.createElement("summary");
+        const pill = document.createElement("span");
+        pill.className = "pill pill-idle";
+        pill.textContent = "•";
+        const name = document.createElement("span");
+        name.className = "suite-row-name";
+        name.textContent = test.name;
+        const lat = document.createElement("span");
+        lat.className = "suite-row-lat";
+        const badge = document.createElement("span");
+        badge.className = "badge hidden";
+        rs.append(pill, name, lat, badge);
+        const detail = document.createElement("div");
+        detail.className = "suite-row-detail";
+        row.append(rs, detail);
+        details.append(row);
+        rowEls.set(test.id, { row, pill, lat, badge, detail });
+      }
+      groupsEl.append(details);
+    }
+  }
+
+  // deno-lint-ignore no-explicit-any
+  function updateRow(result: any): void {
+    const els = rowEls.get(result.id);
+    if (!els) return;
+    const outcome = result.outcome as string;
+    els.pill.className = `pill pill-${outcome}`;
+    els.pill.textContent = outcome === "pass"
+      ? "pass"
+      : outcome === "fail"
+      ? "fail"
+      : outcome === "skip"
+      ? "skip"
+      : "run";
+    els.lat.textContent = result.latencyMs != null
+      ? `${result.latencyMs}ms`
+      : "";
+    if (result.transport) {
+      els.badge.className = `badge badge-${result.transport}`;
+      els.badge.textContent = result.transport;
+      els.badge.classList.remove("hidden");
+    }
+    els.detail.textContent = result.detail ?? "";
+    if (outcome === "fail") els.row.open = true;
+  }
+
+  function markRunning(id: string): void {
+    const els = rowEls.get(id);
+    if (!els) return;
+    els.pill.className = "pill pill-running";
+    els.pill.textContent = "…";
+  }
+
+  // deno-lint-ignore no-explicit-any
+  function updateRollups(results: any[], groups: any[]): void {
+    for (const group of groups) {
+      const roll = groupRolls.get(group.id);
+      if (!roll) continue;
+      const ids = new Set(group.tests.map((t: { id: string }) => t.id));
+      const rs = results.filter((r) => ids.has(r.id));
+      const pass = rs.filter((r) => r.outcome === "pass").length;
+      const fail = rs.filter((r) => r.outcome === "fail").length;
+      const skip = rs.filter((r) => r.outcome === "skip").length;
+      roll.textContent = `${pass}/${group.tests.length}` +
+        (fail ? ` · ${fail} fail` : "") + (skip ? ` · ${skip} skip` : "");
+      roll.className = "suite-group-roll" + (fail ? " has-fail" : "");
+    }
+  }
+
+  // deno-lint-ignore no-explicit-any
+  function updateSummary(summary: any): void {
+    summaryBar.classList.remove("hidden");
+    sumPass.textContent = `${summary.pass} pass`;
+    sumFail.textContent = `${summary.fail} fail`;
+    sumSkip.textContent = `${summary.skip} skip`;
+    const t = summary.transport;
+    sumMix.textContent =
+      `transport: ${t.direct} direct · ${t.relay} relay · ${t.unknown} unknown`;
+    const completed = summary.completed ?? summary.total;
+    progressEl.max = Math.max(1, summary.total);
+    progressEl.value = completed;
+    runStatus.textContent = completed < summary.total
+      ? `Running ${completed}/${summary.total}`
+      : `Complete ${completed}/${summary.total}`;
+    summaryBar.setAttribute(
+      "aria-busy",
+      completed < summary.total ? "true" : "false",
+    );
+  }
+
+  function resetRunView(total: number): void {
+    lastResults = [];
+    lastPayload = null;
+    jsonLog.textContent = "Suite running…";
+    updateSummary({
+      total,
+      completed: 0,
+      pass: 0,
+      fail: 0,
+      skip: 0,
+      transport: { direct: 0, relay: 0, unknown: 0 },
+    });
+    refreshSubmitEnabled();
+  }
+
+  function markRunInterrupted(): void {
+    runStatus.textContent = "Run interrupted";
+    summaryBar.setAttribute("aria-busy", "false");
+  }
+
+  // ── Run ────────────────────────────────────────────────────────────────────
+  // deno-lint-ignore no-explicit-any
+  const reports: any[] = [];
+
+  // ── Collector submit ───────────────────────────────────────────────────────
+  // Post the run's JSON report to a standalone iroh-http collector node so
+  // device results land on disk automatically instead of being copied by hand.
+  // The collector id is remembered across launches. It may carry optional
+  // address hints as `id|ip:port,https://relay` for direct and relay dialing.
+  const COLLECTOR_STORAGE = "iroh-http-collector-id";
+  // deno-lint-ignore no-explicit-any
+  let lastPayload: any = null;
+
+  // A build may bake in a default collector id (VITE_IROH_COLLECTOR_ID) so the
+  // field is pre-filled and the operator can submit with one tap — no pasting a
+  // 52-char node id on a phone. A user-entered value (localStorage) wins.
+  const bakedCollector = (() => {
+    try {
+      // deno-lint-ignore no-explicit-any
+      const env = (import.meta as any).env;
+      const v = env?.VITE_IROH_COLLECTOR_ID;
+      return typeof v === "string" ? v.trim() : "";
+    } catch {
+      return "";
+    }
+  })();
+  const storedCollector = (() => {
+    try {
+      return localStorage.getItem(COLLECTOR_STORAGE) ?? "";
+    } catch {
+      return "";
+    }
+  })();
+  const initialCollector = storedCollector || bakedCollector;
+  if (initialCollector) collectorIdInput.value = initialCollector;
+
+  function parseCollectorTarget(
+    raw: string,
+  ): { nodeId: string; addrs: string[] } | null {
+    const trimmed = raw.trim();
+    if (!trimmed) return null;
+    const [idPart, addrPart] = trimmed.split("|");
+    const nodeId = idPart.trim();
+    if (!nodeId) return null;
+    const addrs = (addrPart ?? "")
+      .split(",")
+      .map((a) => a.trim())
+      .filter((a) => a.length > 0);
+    return { nodeId, addrs };
+  }
+
+  function refreshSubmitEnabled(): void {
+    const hasTarget = parseCollectorTarget(collectorIdInput.value) !== null;
+    submitBtn.disabled = running || !hasTarget || lastPayload === null;
+  }
+
+  async function submitToCollector(auto = false): Promise<void> {
+    const target = parseCollectorTarget(collectorIdInput.value);
+    if (!target || lastPayload === null) return;
+    try {
+      localStorage.setItem(COLLECTOR_STORAGE, collectorIdInput.value.trim());
+    } catch {
+      // Non-fatal: persistence is a convenience only.
+    }
+    setStatus(collectorStatus, auto ? "Auto-submitting…" : "Submitting…", "");
+    try {
+      const res = await node.fetch(`httpi://${target.nodeId}/results`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        ...dialHints(target.addrs),
+        body: JSON.stringify(lastPayload),
+      });
+      if (res.ok) {
+        // deno-lint-ignore no-explicit-any
+        let saved: any = null;
+        try {
+          saved = await res.json();
+        } catch {
+          saved = null;
+        }
+        const n = Array.isArray(saved?.saved) ? saved.saved.length : "?";
+        setStatus(collectorStatus, `Submitted ✓ (${n} saved)`, "ok");
+      } else {
+        setStatus(
+          collectorStatus,
+          `Collector responded ${res.status}`,
+          "error",
+        );
+      }
+    } catch (e) {
+      setStatus(collectorStatus, `Submit failed: ${e}`, "error");
+    }
+  }
+
+  collectorIdInput.addEventListener("input", () => {
+    try {
+      localStorage.setItem(COLLECTOR_STORAGE, collectorIdInput.value.trim());
+    } catch {
+      // ignore
+    }
+    refreshSubmitEnabled();
+  });
+  submitBtn.addEventListener("click", () => void submitToCollector(false));
+
+  // deno-lint-ignore no-explicit-any
+  function setLastPayload(payload: any): void {
+    lastPayload = payload;
+    refreshSubmitEnabled();
+    if (autosubmitToggle.checked) void submitToCollector(true);
+  }
+
+  // deno-lint-ignore no-explicit-any
+  async function runAgainst(peer: RegistryPeer | null): Promise<any> {
+    const startedAt = new Date().toISOString();
+    const groups = buildSuite({
+      node,
+      self: { nodeId: selfId, platform: selfPlatform },
+      peer: peer
+        ? { nodeId: peer.nodeId, platform: peer.platform, addrs: peer.addrs }
+        : null,
+      // deno-lint-ignore no-explicit-any
+      fetch: (url: string, init: any) => node.fetch(url, init),
+      cases: allCases,
+      selfLoopbackCase,
+      runCases: runComplianceCases,
+      handler: handleComplianceRequest,
+      createIsolatedNode: (request: { nodeOptions?: NodeOptions }) =>
+        createNode(request.nodeOptions),
+      helpers: { TXT_KEY_ADDRESS, TXT_KEY_RELAY, isDialableSocketAddr },
+      isServing: testAbort !== null,
+      // Tauri (mobile + desktop) has a working DNS-SD stack, so a discovery
+      // round-trip that observes nothing is a real regression, not a skip.
+      mdnsCapable: true,
+    });
+
+    renderSkeleton(groups);
+    resetRunView(
+      groups.reduce((sum: number, group: any) => sum + group.tests.length, 0),
+    );
+
+    const report = await runSuite(groups, {
+      // deno-lint-ignore no-explicit-any
+      onResult: (ev: any) => {
+        if (ev.phase === "start") {
+          markRunning(ev.test.id);
+        } else if (ev.phase === "result") {
+          updateRow(ev.result);
+          lastResults = lastResults.filter((r) => r.id !== ev.result.id);
+          lastResults.push(ev.result);
+          updateRollups(lastResults, groups);
+          updateSummary(ev.summary);
+        }
+      },
+    });
+    updateRollups(report.results, groups);
+    updateSummary(report.summary);
+
+    const full = {
+      schema: "iroh-http-interop/2",
+      startedAt,
+      finishedAt: new Date().toISOString(),
+      self: { publicKey: selfId, platform: selfPlatform },
+      target: peer
+        ? { publicKey: peer.nodeId, platform: peer.platform, addrs: peer.addrs }
+        : null,
+      summary: report.summary,
+      results: report.results,
+    };
+    // Compact JSON to the console → reaches logcat/stdout on device.
+    console.log("[iroh-http-interop]", JSON.stringify(full));
+    return full;
+  }
+
+  async function runAgainstSelected(): Promise<void> {
+    if (running) return;
+    const peer = selectedPeerId
+      ? getPeers().find((p) => p.nodeId === selectedPeerId) ?? null
+      : null;
+    running = true;
+    lastResults = [];
+    refreshRunEnabled();
+    try {
+      const report = await runAgainst(peer);
+      reports.length = 0;
+      reports.push(report);
+      jsonLog.textContent = JSON.stringify(report, null, 2);
+      setLastPayload(report);
+    } catch (e) {
+      markRunInterrupted();
+      setStatus(modeStatus, `Run error: ${e}`, "error");
+    } finally {
+      running = false;
+      refreshRunEnabled();
+    }
+  }
+
+  runBtn.addEventListener("click", () => void runAgainstSelected());
+
+  runAllBtn.addEventListener("click", async () => {
+    if (running) return;
+    // F21: only run against active testing-mode peers, not every registry peer.
+    const peers = [...testPeers.values()];
+    if (!peers.length) return;
+    running = true;
+    reports.length = 0;
+    refreshRunEnabled();
+    try {
+      for (const peer of peers) {
+        selectedPeerId = peer.nodeId;
+        refreshTarget();
+        lastResults = [];
+        const report = await runAgainst(peer);
+        reports.push(report);
+      }
+      jsonLog.textContent = JSON.stringify(
+        { schema: "iroh-http-interop/2-batch", reports },
+        null,
+        2,
+      );
+      setLastPayload({
+        schema: "iroh-http-interop/2-batch",
+        reports: [...reports],
+      });
+    } catch (e) {
+      markRunInterrupted();
+      setStatus(modeStatus, `Run error: ${e}`, "error");
+    } finally {
+      running = false;
+      refreshRunEnabled();
+    }
+  });
+
+  copyJsonBtn.addEventListener("click", () => {
+    const text = jsonLog.textContent ?? "";
+    if (text) copyText(copyJsonBtn, () => text);
+  });
+
+  refreshTarget();
+  refreshRunEnabled();
+}

@@ -11,11 +11,16 @@ mod common;
 
 use std::convert::Infallible;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
 use bytes::Bytes;
+use http_body::{Frame, SizeHint};
 use http_body_util::BodyExt;
-use iroh_http_core::{fetch_request, serve, Body, RemoteNodeId, ServeOptions, StackConfig};
+use iroh_http_core::{
+    fetch_request, serve, Body, FetchError, RemoteNodeId, ServeOptions, StackConfig,
+};
 use tower::Service;
 
 #[derive(Clone)]
@@ -148,6 +153,151 @@ async fn pure_rust_fetch_timeout_returns_typed_error() {
     assert!(
         matches!(err, FetchError::Timeout),
         "expected FetchError::Timeout, got {err:?}"
+    );
+}
+
+struct ZeroDataErrorBody {
+    server_started: tokio::sync::oneshot::Receiver<()>,
+    emitted: bool,
+}
+
+impl http_body::Body for ZeroDataErrorBody {
+    type Data = Bytes;
+    type Error = std::io::Error;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        let this = self.get_mut();
+        if this.emitted {
+            return Poll::Ready(None);
+        }
+        match std::future::Future::poll(Pin::new(&mut this.server_started), cx) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(_) => {
+                this.emitted = true;
+                Poll::Ready(Some(Err(std::io::Error::other("request body failed"))))
+            }
+        }
+    }
+
+    fn is_end_stream(&self) -> bool {
+        false
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        SizeHint::with_exact(0)
+    }
+}
+
+/// A body can promise zero DATA bytes while still yielding a trailer or error
+/// frame. Such a body is not replayable as `Body::empty()`: doing so turns a
+/// local body-production failure into a successful, semantically different
+/// request on the retry connection.
+#[tokio::test]
+async fn zero_data_body_error_surfaces_and_is_not_replayed() {
+    let (server_ep, client_ep) = common::make_pair().await;
+    let server_calls = Arc::new(AtomicUsize::new(0));
+    let completed_bodies = Arc::new(AtomicUsize::new(0));
+    let (server_started_tx, server_started_rx) = tokio::sync::oneshot::channel();
+    let server_started_tx = Arc::new(Mutex::new(Some(server_started_tx)));
+    let service_calls = Arc::clone(&server_calls);
+    let service_completed_bodies = Arc::clone(&completed_bodies);
+    let service_server_started = Arc::clone(&server_started_tx);
+    let _handle = serve(
+        server_ep.clone(),
+        ServeOptions::default(),
+        tower::service_fn(move |req: hyper::Request<Body>| {
+            let service_calls = Arc::clone(&service_calls);
+            let service_completed_bodies = Arc::clone(&service_completed_bodies);
+            let service_server_started = Arc::clone(&service_server_started);
+            async move {
+                let is_failed_path = req.uri().path() == "/must-fail";
+                if is_failed_path {
+                    service_calls.fetch_add(1, Ordering::SeqCst);
+                    if let Some(tx) = service_server_started
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .take()
+                    {
+                        let _ = tx.send(());
+                    }
+                }
+                let body_completed = req.into_body().collect().await.is_ok();
+                if is_failed_path && body_completed {
+                    service_completed_bodies.fetch_add(1, Ordering::SeqCst);
+                }
+                Ok::<_, Infallible>(hyper::Response::new(Body::empty()))
+            }
+        }),
+    );
+
+    let mut addr = iroh::EndpointAddr::new(server_ep.raw().id());
+    for socket in common::server_addrs(&server_ep) {
+        addr = addr.with_ip_addr(socket);
+    }
+    let cfg = StackConfig::default();
+
+    // Warm the pool so the failing request is eligible for the transparent
+    // reused-connection retry path.
+    let warm = hyper::Request::builder()
+        .method("GET")
+        .uri("/warm")
+        .body(Body::empty())
+        .expect("valid warm-up request");
+    fetch_request(&client_ep, &addr, warm, &cfg)
+        .await
+        .expect("warm-up fetch")
+        .into_body()
+        .collect()
+        .await
+        .expect("drain warm-up response");
+
+    let request = hyper::Request::builder()
+        .method("PUT")
+        .uri("/must-fail")
+        .body(Body::new(ZeroDataErrorBody {
+            server_started: server_started_rx,
+            emitted: false,
+        }))
+        .expect("valid request");
+    let error = match fetch_request(&client_ep, &addr, request, &cfg).await {
+        Err(error) => error,
+        Ok(_) => panic!("the request body error must reach the caller"),
+    };
+    assert!(
+        matches!(&error, FetchError::RequestBodyFailed { .. }),
+        "a caller request-body failure needs its non-transport variant: {error:?}",
+    );
+    let mut chain = Vec::new();
+    let mut current: Option<&(dyn std::error::Error + 'static)> = Some(&error);
+    while let Some(source) = current {
+        chain.push(source.to_string());
+        current = source.source();
+    }
+    assert!(
+        chain
+            .iter()
+            .any(|item| item.contains("request body failed")),
+        "the injected request-body error must survive in the source chain: {chain:?}",
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while server_calls.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the server should observe the single failed attempt");
+    assert_eq!(
+        server_calls.load(Ordering::SeqCst),
+        1,
+        "the failed request must reach the server exactly once, never replay",
+    );
+    assert_eq!(
+        completed_bodies.load(Ordering::SeqCst),
+        0,
+        "the failed body must never complete as a substituted empty body",
     );
 }
 

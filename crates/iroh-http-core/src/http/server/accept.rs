@@ -10,7 +10,7 @@
 use std::{
     collections::HashMap,
     sync::{
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Mutex,
     },
     time::Duration,
@@ -48,6 +48,8 @@ pub(super) async fn accept_loop<S>(
     svc: S,
     on_connection_event: Option<ConnectionEventFn>,
     shutdown_listen: Arc<tokio::sync::Notify>,
+    close_flag: Arc<std::sync::atomic::AtomicBool>,
+    close_connections: Arc<tokio::sync::Notify>,
     done_tx: tokio::sync::watch::Sender<bool>,
 ) where
     S: Service<
@@ -68,6 +70,16 @@ pub(super) async fn accept_loop<S>(
     // Used for graceful drain (wait until zero or timeout).
     let in_flight: Arc<AtomicUsize> = Arc::new(AtomicUsize::new(0));
     let drain_notify: Arc<tokio::sync::Notify> = Arc::new(tokio::sync::Notify::new());
+
+    // F3: set when a graceful stop BEGINS (the accept loop breaks below), before
+    // the drain starts. Per-connection tasks check it at the top of their loop
+    // and stop pulling NEW bistreams, so a stream accepted *after* the drain
+    // observes `in_flight == 0` can't slip in and get truncated by the
+    // subsequent force-close. Streams already in flight when the flag is set are
+    // still counted and waited for by the drain; only brand-new accepts are
+    // suppressed. Distinct from `close_flag`, which severs the connection
+    // outright — this one only stops new work while in-flight requests drain.
+    let no_new_streams: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
 
     // SEC-002: build the concurrency limiter as a *layer* once so every
     // per-connection stack we wrap with it shares the same `Arc<Semaphore>`,
@@ -205,6 +217,10 @@ pub(super) async fn accept_loop<S>(
         // means "no request timeout configured" → unbounded head read.
         let header_read_timeout = stack_cfg.timeout;
 
+        let close_flag_conn = close_flag.clone();
+        let close_conns_conn = close_connections.clone();
+        let no_new_streams_conn = no_new_streams.clone();
+
         tokio::spawn(async move {
             // Owns the per-peer count, total-connection counter, and
             // connect/disconnect event firing for this connection's
@@ -220,9 +236,74 @@ pub(super) async fn accept_loop<S>(
             };
 
             loop {
-                let (send, recv) = match conn.accept_bi().await {
-                    Ok(pair) => pair,
-                    Err(_) => break,
+                // F1: register the close waiter BEFORE reading `close_flag`.
+                //
+                // Teardown does `close_flag.store(true, Release);
+                // close_connections.notify_waiters()`. `notify_waiters()`
+                // stores NO permit — it only wakes tasks already registered as
+                // waiters. If we registered the waiter *inside* the select
+                // (after the flag load), a store+notify landing in the gap
+                // between the load and the registration would be lost: this
+                // task would then park in `accept_bi()` with no pending wakeup
+                // and, if the peer is idle, never re-check the flag — leaving a
+                // stopped/replaced loop serving a later request over this
+                // connection (the exact serve-after-stop bug) and leaking the
+                // task + connection.
+                //
+                // `Notified::enable()` registers the waiter up front. The
+                // Notify's internal lock serializes `enable()` against
+                // `notify_waiters()`, so afterwards either we were woken, or we
+                // observe `close_flag == true` on the load below (the store
+                // happens-before the notify, which happens-before our enable).
+                let close_fut = close_conns_conn.notified();
+                tokio::pin!(close_fut);
+                close_fut.as_mut().enable();
+
+                // #336: when the serve loop is stopped or replaced, force this
+                // connection closed so the peer redials and lands on the new
+                // loop instead of being served stale responses over a pooled
+                // connection.
+                if close_flag_conn.load(Ordering::Acquire) {
+                    conn.close(0u32.into(), b"serve loop replaced");
+                    break;
+                }
+
+                // F3: graceful stop has begun — stop accepting NEW bistreams so
+                // one can't be accepted after the drain reaches zero and then be
+                // truncated by the force-close. Park on the close signal (our
+                // waiter is already registered above) and loop back to hit the
+                // `close_flag` branch once the drain completes and close fires.
+                if no_new_streams_conn.load(Ordering::Acquire) {
+                    close_fut.as_mut().await;
+                    continue;
+                }
+
+                let accepted = tokio::select! {
+                    biased;
+                    _ = &mut close_fut => None,
+                    bi = conn.accept_bi() => Some(bi),
+                };
+                let (send, recv) = match accepted {
+                    // Close signal woke us; re-check the flag at the loop top.
+                    None => continue,
+                    Some(Ok(pair)) => {
+                        // M1: the flag check at the loop top can't catch a
+                        // stream that `accept_bi()` was already parked on when
+                        // graceful stop began — that call returns ONE more
+                        // stream. `no_new_streams` is stored BEFORE the drain's
+                        // zero-check, so re-loading it here (after accept_bi
+                        // returns, before we count the request in-flight)
+                        // closes the residual window: refuse the late stream and
+                        // fall through to the close branch instead of dispatching
+                        // it, so it is cleanly rejected rather than served and
+                        // then truncated mid-response by the force-close.
+                        if no_new_streams_conn.load(Ordering::Acquire) {
+                            drop(pair);
+                            continue;
+                        }
+                        pair
+                    }
+                    Some(Err(_)) => break,
                 };
 
                 let io = TokioIo::new(IrohStream::new(send, recv));
@@ -257,11 +338,33 @@ pub(super) async fn accept_loop<S>(
     // 0` check and `notified()`: if the last request finishes between the
     // load and the await, the loop re-checks immediately after the
     // timeout wakes it.
+    //
+    // F3: signal per-connection tasks to stop accepting NEW bistreams before we
+    // start counting down. Any stream already accepted is still counted here and
+    // waited for; each connection accepts at most one more in-progress stream
+    // (which the drain then waits for) before parking, so no new stream can push
+    // `in_flight` back above zero once it has drained and the force-close below
+    // can't truncate a freshly-accepted request.
+    no_new_streams.store(true, Ordering::Release);
     #[allow(clippy::arithmetic_side_effects)] // fallback: 86400s is safe
     let deadline = tokio::time::Instant::now()
         .checked_add(cfg.drain_timeout)
         .unwrap_or_else(|| tokio::time::Instant::now() + Duration::from_secs(86_400));
     loop {
+        // M2: register the drain waiter BEFORE loading `in_flight`, same shape
+        // as F1. `RequestTracker::drop` wakes us via `notify_waiters()`, which
+        // stores NO permit — it only wakes tasks already registered. If we
+        // created `notified()` *inside* the select (after the load), a
+        // last-request drain landing in the gap between the load and the
+        // registration would be lost, and we'd sleep the full `remaining`
+        // (up to the whole `drain_timeout`, default 30s) before re-checking —
+        // stalling `done_tx.send(true)` and, downstream, the JS `serveRunning`
+        // guard. `enable()` registers up front so any drain after the load
+        // wakes us and any before is caught by the `== 0` load.
+        let drain_fut = drain_notify.notified();
+        tokio::pin!(drain_fut);
+        drain_fut.as_mut().enable();
+
         if in_flight.load(Ordering::Acquire) == 0 {
             tracing::info!("iroh-http: all in-flight requests drained");
             break;
@@ -275,10 +378,28 @@ pub(super) async fn accept_loop<S>(
             break;
         }
         tokio::select! {
-            _ = drain_notify.notified() => {}
+            _ = &mut drain_fut => {}
             _ = tokio::time::sleep(remaining) => {}
         }
     }
+
+    // #336 (stop path): the drain above only stops the *accept* loop and waits
+    // for in-flight requests to finish. The per-connection tasks spawned above
+    // are detached and keep `accept_bi()`-ing on already-open (pooled) QUIC
+    // connections, so without closing them a peer whose connection is still
+    // open keeps getting served AFTER stop — requests dispatched seconds after
+    // "all in-flight requests drained" (the "serve keeps answering post-stop"
+    // symptom). Now that in-flight work has drained, force the active
+    // connections closed so no new request is served on this stopped loop and
+    // the peer must redial (landing on a fresh loop if serve is restarted).
+    //
+    // This is the graceful, drain-THEN-close counterpart to the replace path's
+    // `shutdown_and_close()`, which sets `close_flag` up front for an immediate
+    // sever. Setting it here (idempotent: replace may have set it already) is
+    // harmless and unifies the invariant: a stopped serve loop never serves.
+    close_flag.store(true, Ordering::Release);
+    close_connections.notify_waiters();
+
     let _ = done_tx.send(true);
 }
 

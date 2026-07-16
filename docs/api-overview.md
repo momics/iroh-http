@@ -123,7 +123,9 @@ const { value: inStream } = await reader.read();
 
 ## mDNS peer discovery
 
-Find peers on the local network. Works on macOS, Linux, and Windows desktop. Not available on iOS/Android (use platform-native service discovery there).
+Find peers on the local network. Desktop uses the Rust DNS-SD transport; the
+Tauri adapter uses Android `NsdManager` and Apple Network/Bonjour APIs on mobile.
+All platforms feed the same Rust peer projection and endpoint lookup.
 
 ### Advertise
 

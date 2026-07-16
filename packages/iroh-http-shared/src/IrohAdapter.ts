@@ -58,6 +58,26 @@ export interface NodeAddrInfo {
   addrs: string[];
 }
 
+/**
+ * A node's discovery info: its id, its first dialable direct `ip:port` address
+ * (or `null` when only loopback/link-local addresses are available), all of its
+ * routable dialable direct addresses, and its home relay URL (or `null`).
+ *
+ * The `directAddress`/`directAddresses` carry the real bound QUIC port — unlike
+ * the placeholder ports (`:0`/`:1`) that raw address enumeration can report — so
+ * they can be advertised directly for LAN direct-dial instead of relay-only
+ * fallback. `directAddresses` lists *every* routable candidate (a device may be
+ * on several interfaces, e.g. a VPN `10.x` and the real LAN `192.168.x`), so an
+ * advertiser can publish them all and let the dialing peer race the paths (#348).
+ * `directAddress` is retained as the first candidate for back-compat.
+ */
+export interface DiscoveryInfo {
+  nodeId: string;
+  directAddress: string | null;
+  directAddresses: string[];
+  relayUrl: string | null;
+}
+
 export interface IrohFetchInit extends RequestInit {
   /**
    * Known direct QUIC addresses for the target peer in `"ip:port"` notation.
@@ -66,6 +86,12 @@ export interface IrohFetchInit extends RequestInit {
    * whose address is already known out-of-band.
    */
   directAddrs?: string[];
+  /**
+   * Home relay URL for the target peer, usually obtained from discovery.
+   * Supplying it lets a fresh node connect without first resolving the peer
+   * through DNS. Iroh may still upgrade the connection to a direct path.
+   */
+  relayUrl?: string;
   /** Per-request timeout in milliseconds.  Overrides the endpoint-wide default. */
   requestTimeout?: number;
   /**
@@ -173,6 +199,19 @@ export abstract class IrohAdapter {
   abstract nodeAddr(endpointHandle: number): Promise<NodeAddrInfo>;
   abstract nodeTicket(endpointHandle: number): Promise<string>;
   abstract homeRelay(endpointHandle: number): Promise<string | null>;
+
+  /**
+   * Discovery info for this node: id, dialable direct address, and relay URL.
+   *
+   * The base implementation rejects; concrete adapters (node, deno, tauri)
+   * override it with a real FFI call. Kept non-abstract so adapters that predate
+   * this method — or lightweight test doubles — still type-check.
+   */
+  discoveryInfo(_endpointHandle: number): Promise<DiscoveryInfo> {
+    return Promise.reject(
+      new Error("discoveryInfo is not supported by this adapter"),
+    );
+  }
   abstract peerInfo(
     endpointHandle: number,
     nodeId: string,
@@ -199,7 +238,7 @@ export abstract class IrohAdapter {
       new Error(`browsePeersNext() not supported by this adapter`),
     );
   }
-  browsePeersClose(_browseHandle: number): void {/* no-op */}
+  browsePeersClose(_browseHandle: number): void | Promise<void> {/* no-op */}
   advertisePeer(
     _endpointHandle: number,
     _serviceName: string,
@@ -208,7 +247,9 @@ export abstract class IrohAdapter {
       new Error(`advertisePeer() not supported by this adapter`),
     );
   }
-  advertisePeerClose(_advertiseHandle: number): void {/* no-op */}
+  advertisePeerClose(_advertiseHandle: number): void | Promise<void> {
+    /* no-op */
+  }
 
   // ── Optional: generic DNS-SD ────────────────────────────────────────────────
   advertise(_config: ServiceConfig): Promise<number> {
@@ -216,7 +257,7 @@ export abstract class IrohAdapter {
       new Error(`advertise() not supported by this adapter`),
     );
   }
-  advertiseClose(_advertiseHandle: number): void {/* no-op */}
+  advertiseClose(_advertiseHandle: number): void | Promise<void> {/* no-op */}
   browse(
     _serviceName: string,
     _protocol?: DnsSdProtocol,
@@ -230,7 +271,7 @@ export abstract class IrohAdapter {
       new Error(`browseNext() not supported by this adapter`),
     );
   }
-  browseClose(_browseHandle: number): void {/* no-op */}
+  browseClose(_browseHandle: number): void | Promise<void> {/* no-op */}
 
   // ── Optional: transport events ──────────────────────────────────────────────
   // Transport events are delivered via a Rust-driven push mechanism: the

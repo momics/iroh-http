@@ -6,6 +6,7 @@
 
 import { dirname, fromFileUrl, resolve } from "@std/path";
 import type {
+  DiscoveryInfo,
   EndpointInfo,
   EndpointStats,
   NodeAddrInfo,
@@ -363,6 +364,7 @@ const METHOD_BUFS: Record<string, Uint8Array> = Object.fromEntries(
     "endpointStats",
     "nodeAddr",
     "homeRelay",
+    "discoveryInfo",
     "peerInfo",
     "startTransportEvents",
     "nextTransportEvent",
@@ -1061,6 +1063,12 @@ export const denoAddrFns = {
     });
     return res;
   },
+  discoveryInfo: async (handle: number) => {
+    const res = await call<DiscoveryInfo>("discoveryInfo", {
+      endpointHandle: handle,
+    });
+    return res;
+  },
   peerInfo: async (handle: number, nodeId: string) => {
     const res = await call<NodeAddrInfo | null>("peerInfo", {
       endpointHandle: handle,
@@ -1087,10 +1095,8 @@ export const denoDiscoveryFns = {
   browsePeersNext: async (browseHandle: number) => {
     return call<PeerDiscoveryEvent | null>("browsePeersNext", { browseHandle });
   },
-  browsePeersClose: (browseHandle: number) => {
-    call<Record<never, never>>("browsePeersClose", { browseHandle }).catch(
-      () => {},
-    );
+  browsePeersClose: async (browseHandle: number) => {
+    await call<Record<never, never>>("browsePeersClose", { browseHandle });
   },
   advertisePeer: async (handle: number, serviceName: string) => {
     return call<number>("advertisePeer", {
@@ -1098,10 +1104,8 @@ export const denoDiscoveryFns = {
       serviceName,
     });
   },
-  advertisePeerClose: (advertiseHandle: number) => {
-    call<Record<never, never>>("advertisePeerClose", { advertiseHandle }).catch(
-      () => {},
-    );
+  advertisePeerClose: async (advertiseHandle: number) => {
+    await call<Record<never, never>>("advertisePeerClose", { advertiseHandle });
   },
   advertise: async (config: ServiceConfig) => {
     return call<number>("advertise", {
@@ -1113,11 +1117,8 @@ export const denoDiscoveryFns = {
       protocol: config.protocol,
     });
   },
-  advertiseClose: (advertiseHandle: number) => {
-    call<Record<never, never>>("advertiseClose", { advertiseHandle })
-      .catch(
-        () => {},
-      );
+  advertiseClose: async (advertiseHandle: number) => {
+    await call<Record<never, never>>("advertiseClose", { advertiseHandle });
   },
   browse: async (serviceName: string, protocol?: DnsSdProtocol) => {
     return call<number>("browse", { serviceName, protocol });
@@ -1125,10 +1126,8 @@ export const denoDiscoveryFns = {
   browseNext: async (browseHandle: number) => {
     return call<ServiceRecord | null>("browseNext", { browseHandle });
   },
-  browseClose: (browseHandle: number) => {
-    call<Record<never, never>>("browseClose", { browseHandle }).catch(
-      () => {},
-    );
+  browseClose: async (browseHandle: number) => {
+    await call<Record<never, never>>("browseClose", { browseHandle });
   },
 };
 
@@ -1427,6 +1426,10 @@ export class DenoAdapter extends IrohAdapter {
     return call<string | null>("homeRelay", { endpointHandle: handle });
   }
 
+  override async discoveryInfo(handle: number): Promise<DiscoveryInfo> {
+    return call<DiscoveryInfo>("discoveryInfo", { endpointHandle: handle });
+  }
+
   async peerInfo(handle: number, nodeId: string): Promise<NodeAddrInfo | null> {
     return call<NodeAddrInfo | null>("peerInfo", {
       endpointHandle: handle,
@@ -1460,10 +1463,8 @@ export class DenoAdapter extends IrohAdapter {
     return call<PeerDiscoveryEvent | null>("browsePeersNext", { browseHandle });
   }
 
-  override browsePeersClose(browseHandle: number): void {
-    call<Record<never, never>>("browsePeersClose", { browseHandle }).catch(
-      () => {},
-    );
+  override async browsePeersClose(browseHandle: number): Promise<void> {
+    await call<Record<never, never>>("browsePeersClose", { browseHandle });
   }
 
   override advertisePeer(
@@ -1473,10 +1474,8 @@ export class DenoAdapter extends IrohAdapter {
     return call<number>("advertisePeer", { endpointHandle, serviceName });
   }
 
-  override advertisePeerClose(advertiseHandle: number): void {
-    call<Record<never, never>>("advertisePeerClose", { advertiseHandle }).catch(
-      () => {},
-    );
+  override async advertisePeerClose(advertiseHandle: number): Promise<void> {
+    await call<Record<never, never>>("advertisePeerClose", { advertiseHandle });
   }
 
   // ── Generic DNS-SD ────────────────────────────────────────────────
@@ -1492,11 +1491,8 @@ export class DenoAdapter extends IrohAdapter {
     });
   }
 
-  override advertiseClose(advertiseHandle: number): void {
-    call<Record<never, never>>("advertiseClose", { advertiseHandle })
-      .catch(
-        () => {},
-      );
+  override async advertiseClose(advertiseHandle: number): Promise<void> {
+    await call<Record<never, never>>("advertiseClose", { advertiseHandle });
   }
 
   override browse(
@@ -1512,10 +1508,8 @@ export class DenoAdapter extends IrohAdapter {
     return call<ServiceRecord | null>("browseNext", { browseHandle });
   }
 
-  override browseClose(browseHandle: number): void {
-    call<Record<never, never>>("browseClose", { browseHandle }).catch(
-      () => {},
-    );
+  override async browseClose(browseHandle: number): Promise<void> {
+    await call<Record<never, never>>("browseClose", { browseHandle });
   }
 
   // ── Sessions ────────────────────────────────────────────────────────────────

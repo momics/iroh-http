@@ -1,6 +1,7 @@
 export type {
   BidirectionalStream,
   CloseOptions,
+  DiscoveryInfo,
   EndpointInfo,
   FetchOptions,
   FfiDuplexStream,
@@ -36,6 +37,9 @@ export type {
 export {
   asIrohPeer,
   IROH_HTTP_SERVICE,
+  isDialableSocketAddr,
+  isRelayUrl,
+  TXT_KEY_ADDRESS,
   TXT_KEY_PUBLIC_KEY,
   TXT_KEY_RELAY,
 } from "./discovery.js";

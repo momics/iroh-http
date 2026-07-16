@@ -73,6 +73,17 @@ export declare function closeEndpoint(endpointHandle: number, force?: boolean | 
  */
 export declare function createEndpoint(options?: JsNodeOptions | undefined | null): Promise<JsEndpointInfo>
 
+/**
+ * Discovery info: node id + dialable direct `ip:port` address + relay URL.
+ *
+ * `directAddress` carries the candidate's authoritative real port (or null
+ * when only loopback/link-local addresses are available); only `:0`/`:1`
+ * placeholders borrow a same-family bound port. `directAddresses` carries
+ * *all* routable candidates so an advertiser can publish them and let the
+ * dialer race the paths (#348/#350).
+ */
+export declare function discoveryInfo(endpointHandle: number): JsDiscoveryInfo
+
 /** Snapshot of current endpoint statistics (point-in-time). */
 export declare function endpointStats(endpointHandle: number): JsEndpointStats
 
@@ -136,6 +147,13 @@ export interface JsCloseInfo {
 export interface JsConnectionEvent {
   peerId: string
   connected: boolean
+}
+
+export interface JsDiscoveryInfo {
+  nodeId: string
+  directAddress?: string
+  directAddresses: Array<string>
+  relayUrl?: string
 }
 
 /** Info returned after a successful `createEndpoint` call. */

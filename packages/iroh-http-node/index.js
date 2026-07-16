@@ -598,6 +598,7 @@ module.exports.browsePeersClose = nativeBinding.browsePeersClose
 module.exports.browsePeersNext = nativeBinding.browsePeersNext
 module.exports.closeEndpoint = nativeBinding.closeEndpoint
 module.exports.createEndpoint = nativeBinding.createEndpoint
+module.exports.discoveryInfo = nativeBinding.discoveryInfo
 module.exports.endpointStats = nativeBinding.endpointStats
 module.exports.generateSecretKey = nativeBinding.generateSecretKey
 module.exports.homeRelay = nativeBinding.homeRelay

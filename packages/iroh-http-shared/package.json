@@ -19,6 +19,7 @@
   "scripts": {
     "build": "tsc --project tsconfig.json",
     "prepare": "tsc --project tsconfig.json",
+    "test": "deno test test",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {},

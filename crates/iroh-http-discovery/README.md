@@ -19,10 +19,13 @@ discoverable from mobile.
 - **Desktop apps** (macOS, Linux, Windows) that need local peer discovery
 - **Node.js** servers on a LAN
 
-## When not to use
+## Platform architecture
 
-- **iOS/Android** — use native service discovery APIs (`NSDNetService`, `NsdManager`) via Tauri mobile plugins instead
-- **Environments with only relay/DNS discovery** — this crate isn't needed
+- **Desktop** uses this crate's `mdns-sd` transport.
+- **iOS/Android** use `NWBrowser`/`NetService` and `NsdManager` as transport
+  adapters, then reuse this crate's platform-neutral session engine and peer
+  projection through the Tauri plugin.
+- **Environments with only relay/DNS discovery** do not need local DNS-SD.
 
 ## Usage
 
@@ -30,7 +33,7 @@ This crate is typically not used directly. Enable the `mdns` feature in your pla
 
 ```ts
 const node = await createNode({
-  discovery: { mdns: true, serviceName: "my-app.iroh-http" }
+  discovery: { mdns: true, serviceName: "my-app" }
 });
 ```
 

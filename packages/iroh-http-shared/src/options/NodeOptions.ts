@@ -111,6 +111,22 @@ export interface NodeOptions {
     auto?: boolean;
     /** Maximum reconnect attempts before giving up. @default 3 */
     maxRetries?: number;
+    /**
+     * Called (Tauri adapter only) when a foreground transport probe finds the
+     * connection dead, so the application can recreate the node — e.g.
+     * `createNode({ key })` with the same identity — instead of the node being
+     * closed. When omitted, an unrecoverable transport closes the node so its
+     * `closed` promise resolves and the app can react. Honored only when the
+     * reconnect listener is enabled (see `auto`).
+     */
+    onReconnectNeeded?: () => void | Promise<void>;
+    /**
+     * Called (Tauri adapter only) when `onReconnectNeeded` throws/rejects, or
+     * when the fail-safe close of the unusable node fails. If both operations
+     * fail, this callback is invoked twice in that order. When omitted,
+     * failures are reported to `console.error`.
+     */
+    onReconnectError?: (error: unknown) => void;
   };
 
   /**

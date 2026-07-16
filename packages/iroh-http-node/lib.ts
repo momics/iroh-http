@@ -15,6 +15,7 @@ import {
   browsePeersNext as napiBrowsePeersNext,
   closeEndpoint,
   createEndpoint,
+  discoveryInfo as napiDiscoveryInfo,
   endpointStats as napiEndpointStats,
   homeRelay as napiHomeRelay,
   jsAllocBodyWriter,
@@ -53,6 +54,7 @@ import {
 
 import {
   classifyBindError,
+  type DiscoveryInfo,
   IrohNode,
   type IrohNodeWithSecret,
   type NodeAddrInfo,
@@ -331,6 +333,15 @@ class NodeAdapter extends IrohAdapter {
   async homeRelay(handle: number): Promise<string | null> {
     return napiHomeRelay(handle) ?? null;
   }
+  override async discoveryInfo(handle: number): Promise<DiscoveryInfo> {
+    const info = napiDiscoveryInfo(handle);
+    return {
+      nodeId: info.nodeId,
+      directAddress: info.directAddress ?? null,
+      directAddresses: info.directAddresses ?? [],
+      relayUrl: info.relayUrl ?? null,
+    } satisfies DiscoveryInfo;
+  }
   async peerInfo(handle: number, nodeId: string): Promise<NodeAddrInfo | null> {
     const info = await napiPeerInfo(handle, nodeId);
     return info
@@ -475,6 +486,7 @@ export {
   IROH_HTTP_SERVICE,
   PublicKey,
   SecretKey,
+  TXT_KEY_ADDRESS,
   TXT_KEY_PUBLIC_KEY,
   TXT_KEY_RELAY,
 } from "@momics/iroh-http-shared";
@@ -490,6 +502,7 @@ export type {
   ServiceConfig,
   ServiceRecord,
 };
+export type { DiscoveryInfo };
 
 /**
  * Create an Iroh node — the entry point for peer-to-peer HTTP.
