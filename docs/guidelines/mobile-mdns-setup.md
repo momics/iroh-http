@@ -10,8 +10,9 @@ iOS) and need the same permissions and service-type declarations below.
 > TXT, addresses). On iOS, `NWBrowser` yields the instance name, service type
 > and TXT but not the host/port/addresses (resolving those needs an
 > `NWConnection`), so iOS generic records arrive with `host = null`, `port = 0`
-> and best-effort `addrs`. The iroh peer path is unaffected — it resolves peers
-> by node id through the in-process address lookup.
+> and empty `addrs`. The iroh peer path is unaffected: the shared Rust
+> projection reads the peer identity and dial addresses from its canonical TXT
+> record and feeds them into the endpoint lookup.
 
 > **Tauri permission.** Grant `iroh-http:discovery` in your capability file; it
 > covers both the peer and generic discovery commands.

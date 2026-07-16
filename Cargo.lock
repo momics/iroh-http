@@ -1827,7 +1827,6 @@ dependencies = [
  "iroh-http-discovery",
  "serde",
  "serde_json",
- "slab",
  "tokio",
  "tracing",
 ]
@@ -1838,9 +1837,10 @@ version = "0.6.0"
 dependencies = [
  "base32",
  "futures",
+ "if-addrs",
  "iroh",
+ "iroh-http-core",
  "mdns-sd",
- "n0-future",
  "tokio",
  "tracing",
 ]
@@ -1859,7 +1859,6 @@ dependencies = [
  "napi-build",
  "napi-derive",
  "serde_json",
- "slab",
  "tokio",
  "tracing",
 ]

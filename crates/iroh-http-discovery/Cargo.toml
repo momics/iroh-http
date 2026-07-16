@@ -9,30 +9,52 @@ documentation = "https://docs.rs/iroh-http-discovery"
 keywords = ["iroh", "p2p", "mdns", "discovery", "peer-to-peer"]
 categories = ["network-programming"]
 
+[[example]]
+name = "advertise"
+required-features = ["mdns"]
+
+[[test]]
+name = "dns_sd_interop"
+required-features = ["mdns"]
+
 [features]
 default = ["mdns"]
-mdns = ["dep:mdns-sd", "dep:n0-future", "dep:base32"]
+runtime = [
+    "dep:tokio",
+    "dep:iroh-http-core",
+    "dep:iroh",
+    "dep:futures",
+    "dep:tracing",
+    "dep:base32",
+]
+mdns = [
+    "runtime",
+    "dep:mdns-sd",
+    "dep:if-addrs",
+]
 
 [dependencies]
-iroh = { workspace = true }
-tokio = { workspace = true }
-futures = { workspace = true }
+iroh-http-core = { path = "../iroh-http-core", version = "0.6.0", optional = true }
+iroh = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+futures = { workspace = true, optional = true }
 # Standard DNS-SD (RFC 6763) mDNS: emits PTR + SRV + TXT + A/AAAA so Apple
 # mDNSResponder (iOS `NWBrowser`) and Android `NsdManager` can discover desktop
 # nodes. Replaces the previous swarm-discovery-based lookup, which omitted the
 # PTR record and was therefore invisible to those browsers. See ADR / issue #329.
 mdns-sd = { version = "0.20", optional = true }
-# `BoxStream` / `stream::once` for the in-process `AddressLookup` impl that feeds
-# discovered peers back to iroh's dialer. Pinned to the version iroh 1.0.x uses.
-n0-future = { version = "0.3", optional = true }
 # Node ids are lowercase RFC 4648 base32 (no padding) throughout iroh-http — a
 # 52-char label that fits a DNS-SD instance name, unlike iroh's 64-char hex
 # `Display`. Same encoding used by `iroh-http-core`.
 base32 = { version = "0.5", optional = true }
+# Enumerate host interfaces explicitly for peer SRV/A records. `mdns-sd`'s
+# automatic expansion cannot be constrained to the endpoint's bound address
+# families or per-family ports.
+if-addrs = { version = "0.15", optional = true }
 
 # Structured warnings when a discovered address is unusable (e.g. port 0, #346).
 # Already present in the build via iroh; pinned to the workspace 0.1 line.
-tracing = "0.1"
+tracing = { version = "0.1", optional = true }
 
 [dev-dependencies]
 # The `advertise` example and interop test drive a real endpoint and wait on

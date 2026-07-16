@@ -20,7 +20,11 @@ import {
   TXT_KEY_ADDRESS,
   TXT_KEY_RELAY,
 } from "@momics/iroh-http-tauri";
-import type { IrohSession } from "@momics/iroh-http-shared";
+import {
+  type IrohSession,
+  isRelayUrl,
+  type NodeOptions,
+} from "@momics/iroh-http-shared";
 // @ts-ignore — .mjs from the shared cross-runtime compliance suite (pure WHATWG).
 import { handleRequest as handleComplianceRequest } from "../../../tests/http-compliance/handler.mjs";
 // @ts-ignore — .mjs from the shared compliance suite (pure WHATWG).
@@ -48,6 +52,19 @@ function setStatus(
 ): void {
   el.textContent = msg;
   el.className = kind ? `status ${kind}` : "status";
+}
+
+/** Split mixed registry addresses into the two independent dialing hints. */
+function dialHints(addrs: string[]): {
+  directAddrs?: string[];
+  relayUrl?: string;
+} {
+  const directAddrs = addrs.filter(isDialableSocketAddr);
+  const relayUrl = addrs.find(isRelayUrl);
+  return {
+    ...(directAddrs.length ? { directAddrs } : {}),
+    ...(relayUrl ? { relayUrl } : {}),
+  };
 }
 
 // Stable, greppable structured log prefix for the on-device DNS-SD checks
@@ -413,8 +430,10 @@ fetchForm.addEventListener("submit", async (e) => {
   }
 
   try {
+    const known = getPeers().find((candidate) => candidate.nodeId === peer);
     const res = await node.fetch(`httpi://${peer}${path}`, {
       method: methodSelect.value,
+      ...dialHints(known?.addrs ?? []),
     });
     setStatus(responseStatus, `HTTP ${res.status}`, res.ok ? "ok" : "error");
     responseBody.textContent = await res.text();
@@ -757,6 +776,12 @@ const genericLog = document.querySelector<HTMLElement>("#generic-log")!;
 let genericAdvertiseAbort: AbortController | null = null;
 let genericBrowseAbort: AbortController | null = null;
 
+function genericDemoInstance(): string {
+  return `Front Desk Printer (${detectPlatform()}-${
+    node.publicKey.toString().slice(0, 6)
+  })`;
+}
+
 genericAdvertiseBtn.addEventListener("click", async () => {
   if (genericAdvertiseAbort) {
     genericAdvertiseAbort.abort();
@@ -767,11 +792,12 @@ genericAdvertiseBtn.addEventListener("click", async () => {
   }
 
   const serviceName = genericServiceInput.value.trim() || "demo-printer";
+  const instanceName = genericDemoInstance();
   genericAdvertiseAbort = new AbortController();
   genericAdvertiseBtn.textContent = "Stop advertising";
   setStatus(
     genericStatus,
-    `Advertising "Front Desk Printer" on _${serviceName}._tcp`,
+    `Advertising "${instanceName}" on _${serviceName}._tcp`,
     "ok",
   );
 
@@ -780,10 +806,15 @@ genericAdvertiseBtn.addEventListener("click", async () => {
     // protocol — this is not an iroh node.
     await node.advertise({
       serviceName,
-      instanceName: "Front Desk Printer",
+      instanceName,
       port: 9100,
       protocol: "tcp",
-      txt: { model: "LaserJet 9000", color: "true", pdl: "application/pdf" },
+      txt: {
+        model: "LaserJet 9000",
+        color: "true",
+        pdl: "application/pdf",
+        platform: detectPlatform(),
+      },
       signal: genericAdvertiseAbort.signal,
     });
   } catch { /* aborted or error */ }
@@ -818,7 +849,18 @@ genericBrowseBtn.addEventListener("click", async () => {
       const txt = Object.entries(record.txt)
         .map(([k, v]) => `${k}=${v}`)
         .join(", ");
-      const peer = asIrohPeer(record);
+      // Generic DNS-SD instance labels are human service names, not implicit
+      // iroh identities. Only classify/register records carrying a valid `pk`.
+      let peer = null;
+      const advertisedPk = record.txt.pk;
+      if (advertisedPk) {
+        try {
+          PublicKey.fromString(advertisedPk);
+          peer = asIrohPeer(record);
+        } catch {
+          /* ordinary non-iroh DNS-SD service */
+        }
+      }
       const tag = peer ? `  (iroh peer ${peer.nodeId.slice(0, 12)}…)` : "";
       if (peer && record.isActive) {
         upsertPeer({
@@ -1128,7 +1170,11 @@ function detectPlatform(): TestPlatform {
   const sumPass = document.querySelector<HTMLElement>("#suite-sum-pass")!;
   const sumFail = document.querySelector<HTMLElement>("#suite-sum-fail")!;
   const sumSkip = document.querySelector<HTMLElement>("#suite-sum-skip")!;
+  const runStatus = document.querySelector<HTMLElement>("#suite-run-status")!;
   const sumMix = document.querySelector<HTMLElement>("#suite-sum-mix")!;
+  const progressEl = document.querySelector<HTMLProgressElement>(
+    "#suite-progress",
+  )!;
   const groupsEl = document.querySelector<HTMLElement>("#suite-groups")!;
   const jsonLog = document.querySelector<HTMLElement>("#test-json-log")!;
 
@@ -1520,6 +1566,36 @@ function detectPlatform(): TestPlatform {
     const t = summary.transport;
     sumMix.textContent =
       `transport: ${t.direct} direct · ${t.relay} relay · ${t.unknown} unknown`;
+    const completed = summary.completed ?? summary.total;
+    progressEl.max = Math.max(1, summary.total);
+    progressEl.value = completed;
+    runStatus.textContent = completed < summary.total
+      ? `Running ${completed}/${summary.total}`
+      : `Complete ${completed}/${summary.total}`;
+    summaryBar.setAttribute(
+      "aria-busy",
+      completed < summary.total ? "true" : "false",
+    );
+  }
+
+  function resetRunView(total: number): void {
+    lastResults = [];
+    lastPayload = null;
+    jsonLog.textContent = "Suite running…";
+    updateSummary({
+      total,
+      completed: 0,
+      pass: 0,
+      fail: 0,
+      skip: 0,
+      transport: { direct: 0, relay: 0, unknown: 0 },
+    });
+    refreshSubmitEnabled();
+  }
+
+  function markRunInterrupted(): void {
+    runStatus.textContent = "Run interrupted";
+    summaryBar.setAttribute("aria-busy", "false");
   }
 
   // ── Run ────────────────────────────────────────────────────────────────────
@@ -1530,8 +1606,7 @@ function detectPlatform(): TestPlatform {
   // Post the run's JSON report to a standalone iroh-http collector node so
   // device results land on disk automatically instead of being copied by hand.
   // The collector id is remembered across launches. It may carry optional
-  // direct-address hints as `id|ip:port,ip:port` to help a peer whose only
-  // discovery path would otherwise be the relay.
+  // address hints as `id|ip:port,https://relay` for direct and relay dialing.
   const COLLECTOR_STORAGE = "iroh-http-collector-id";
   // deno-lint-ignore no-explicit-any
   let lastPayload: any = null;
@@ -1592,7 +1667,7 @@ function detectPlatform(): TestPlatform {
       const res = await node.fetch(`httpi://${target.nodeId}/results`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        directAddrs: target.addrs.length ? target.addrs : undefined,
+        ...dialHints(target.addrs),
         body: JSON.stringify(lastPayload),
       });
       if (res.ok) {
@@ -1649,6 +1724,8 @@ function detectPlatform(): TestPlatform {
       selfLoopbackCase,
       runCases: runComplianceCases,
       handler: handleComplianceRequest,
+      createIsolatedNode: (request: { nodeOptions?: NodeOptions }) =>
+        createNode(request.nodeOptions),
       helpers: { TXT_KEY_ADDRESS, TXT_KEY_RELAY, isDialableSocketAddr },
       isServing: testAbort !== null,
       // Tauri (mobile + desktop) has a working DNS-SD stack, so a discovery
@@ -1657,7 +1734,9 @@ function detectPlatform(): TestPlatform {
     });
 
     renderSkeleton(groups);
-    for (const g of groups) for (const t of g.tests) markRunning(t.id);
+    resetRunView(
+      groups.reduce((sum: number, group: any) => sum + group.tests.length, 0),
+    );
 
     const report = await runSuite(groups, {
       // deno-lint-ignore no-explicit-any
@@ -1669,6 +1748,7 @@ function detectPlatform(): TestPlatform {
           lastResults = lastResults.filter((r) => r.id !== ev.result.id);
           lastResults.push(ev.result);
           updateRollups(lastResults, groups);
+          updateSummary(ev.summary);
         }
       },
     });
@@ -1706,6 +1786,7 @@ function detectPlatform(): TestPlatform {
       jsonLog.textContent = JSON.stringify(report, null, 2);
       setLastPayload(report);
     } catch (e) {
+      markRunInterrupted();
       setStatus(modeStatus, `Run error: ${e}`, "error");
     } finally {
       running = false;
@@ -1741,6 +1822,7 @@ function detectPlatform(): TestPlatform {
         reports: [...reports],
       });
     } catch (e) {
+      markRunInterrupted();
       setStatus(modeStatus, `Run error: ${e}`, "error");
     } finally {
       running = false;

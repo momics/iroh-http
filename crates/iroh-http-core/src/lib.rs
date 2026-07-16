@@ -51,9 +51,10 @@ pub use ffi::types::{FfiDuplexStream, FfiResponse, RequestPayload};
 
 // ── Other re-exports kept at crate root ───────────────────────────────────────
 pub use endpoint::{
-    parse_direct_addrs, ConnectionEvent, DiscoveryOptions, EndpointStats, IrohEndpoint,
+    parse_direct_addrs, AddressLookupRemoval, AddressLookupSource, AddressLookupUpsert,
+    AddressLookupUpsertError, ConnectionEvent, DiscoveryOptions, EndpointStats, IrohEndpoint,
     NetworkingOptions, NodeAddrInfo, NodeOptions, PathInfo, PeerStats, PoolOptions,
-    StreamingOptions,
+    SourceScopedAddressLookup, StreamingOptions,
 };
 pub use events::TransportEvent;
 pub use http::server::stack::{CompressionOptions, StackConfig};

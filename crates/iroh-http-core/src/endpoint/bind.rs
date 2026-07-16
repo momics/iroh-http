@@ -20,8 +20,9 @@ use crate::http::transport::pool::ConnectionPool;
 use crate::{ALPN, ALPN_DUPLEX};
 
 use super::{
-    config::NodeOptions, ffi_bridge::FfiBridge, http_runtime::HttpRuntime,
-    session_runtime::SessionRuntime, transport::Transport, EndpointInner, IrohEndpoint,
+    config::NodeOptions, dns_nameservers::ConfiguredDns, ffi_bridge::FfiBridge,
+    http_runtime::HttpRuntime, session_runtime::SessionRuntime, transport::Transport,
+    EndpointInner, IrohEndpoint,
 };
 
 impl IrohEndpoint {
@@ -112,6 +113,8 @@ impl IrohEndpoint {
         let mut builder = Endpoint::builder(iroh::endpoint::presets::Minimal)
             .relay_mode(relay_mode)
             .alpns(alpns);
+        let configured_dns = ConfiguredDns::configure(&opts.discovery.dns_nameservers).await?;
+        let (dns_resolver, scoped_dns_compat) = configured_dns.into_parts();
 
         // DNS discovery (enabled by default unless networking.disabled).
         if !opts.networking.disabled && opts.discovery.enabled {
@@ -131,53 +134,8 @@ impl IrohEndpoint {
             }
         }
 
-        // Custom DNS nameservers. iroh's default resolver reads the system DNS
-        // config, but that is unavailable on some platforms (notably Android,
-        // which has no `/etc/resolv.conf` and needs a JNI-initialised
-        // `ndk_context`). When explicit nameservers are supplied, build a
-        // resolver from them so relay, pkarr, and DNS-discovery lookups resolve
-        // instead of timing out.
-        if !opts.discovery.dns_nameservers.is_empty() {
-            let mut resolver = iroh::dns::DnsResolver::builder();
-            let mut added = 0usize;
-            let mut rejected: Vec<&str> = Vec::new();
-            for ns in &opts.discovery.dns_nameservers {
-                // An IPv6 link-local nameserver (legitimately advertised via
-                // RDNSS/RA) arrives with a zone/scope suffix, e.g.
-                // `fe80::1%wlan0`. Rust's `IpAddr` parser rejects the `%zone`,
-                // so strip it before parsing — otherwise an IPv6-only network
-                // whose only DNS servers are zone-scoped would trip the
-                // `added == 0` hard-fail below and brick node creation.
-                let candidate = ns.split('%').next().unwrap_or(ns.as_str());
-                if let Ok(ip) = candidate.parse::<std::net::IpAddr>() {
-                    resolver = resolver.with_nameserver(
-                        std::net::SocketAddr::new(ip, 53),
-                        iroh::dns::DnsProtocol::Udp,
-                    );
-                    added = added.saturating_add(1);
-                } else {
-                    rejected.push(ns.as_str());
-                }
-            }
-            if !rejected.is_empty() {
-                tracing::warn!(
-                    "iroh-http: ignoring {} unparseable DNS nameserver(s): {}",
-                    rejected.len(),
-                    rejected.join(", "),
-                );
-            }
-            // F26: explicit nameservers were requested but NONE parsed. Failing
-            // silently would fall back to the default resolver — exactly the
-            // broken path (e.g. Android) these servers were supplied to avoid.
-            // Surface it instead of shipping a node that can't resolve.
-            if added == 0 {
-                return Err(crate::CoreError::invalid_input(format!(
-                    "all {} supplied dns_nameservers were invalid (expected IP addresses): {}",
-                    rejected.len(),
-                    rejected.join(", "),
-                )));
-            }
-            builder = builder.dns_resolver(resolver.build());
+        if let Some(resolver) = dns_resolver {
+            builder = builder.dns_resolver(resolver);
         }
 
         if let Some(key_bytes) = opts.key {
@@ -279,7 +237,11 @@ impl IrohEndpoint {
         };
 
         let inner = Arc::new(EndpointInner {
-            transport: Transport { ep, node_id_str },
+            transport: Transport {
+                ep,
+                node_id_str,
+                scoped_dns_compat,
+            },
             http: HttpRuntime {
                 pool,
                 max_header_size,
@@ -374,10 +336,9 @@ pub fn parse_direct_addrs(
 /// literal TCP-mux port 1 which never answers QUIC (#350 F5).
 ///
 /// For each candidate whose port is a placeholder, substitute a port taken from
-/// `bound_sockets` — preferring a bound socket of the same IP family (v4↔v4,
-/// v6↔v6), falling back to the first bound socket. A candidate that still has
-/// no usable port (no bound socket to borrow from) is dropped with a warning
-/// rather than advertised as a useless placeholder.
+/// `bound_sockets` of the same IP family (v4↔v4, v6↔v6). A candidate that has
+/// no usable same-family socket is dropped with a warning rather than paired
+/// with a port on which its address family is not listening.
 ///
 /// Candidates with a real (non-placeholder) port are returned **unchanged**.
 /// This is deliberate and is why we do *not* treat "any port not present among
@@ -398,11 +359,6 @@ pub(crate) fn reconcile_direct_addr_ports(
         bound_sockets
             .iter()
             .find(|s| s.is_ipv6() == ipv6 && !is_placeholder_port(s.port()))
-            .or_else(|| {
-                bound_sockets
-                    .iter()
-                    .find(|s| !is_placeholder_port(s.port()))
-            })
             .map(|s| s.port())
     };
 
@@ -423,7 +379,7 @@ pub(crate) fn reconcile_direct_addr_ports(
             }
             None => {
                 tracing::warn!(
-                    "iroh-http: dropping direct address {addr} with placeholder port (no bound port to borrow) (#346/#350)"
+                    "iroh-http: dropping direct address {addr} with placeholder port (no same-family bound port to borrow) (#346/#350)"
                 );
             }
         }
@@ -463,6 +419,17 @@ mod direct_addr_tests {
         let out = reconcile_direct_addr_ports(&candidates, &bound);
         assert_eq!(out[0], sock("192.168.50.227:59234"));
         assert_eq!(out[1], sock("[fe80::1]:60000"));
+    }
+
+    // A placeholder address is only repairable with a real socket from the
+    // same address family. Borrowing an IPv4 listener's port for an IPv6
+    // candidate (or vice versa) advertises an address the endpoint never bound.
+    #[test]
+    fn reconcile_drops_placeholder_without_same_family_bound_socket() {
+        let candidates = vec![sock("[2001:db8::7]:1")];
+        let bound = vec![sock("0.0.0.0:62546")];
+
+        assert_eq!(reconcile_direct_addr_ports(&candidates, &bound), vec![]);
     }
 
     #[test]
@@ -598,83 +565,5 @@ mod direct_addr_tests {
                 "Rust must reject undialable {s:?} that the TS sanitiser rejects"
             );
         }
-    }
-}
-
-#[cfg(test)]
-mod dns_nameserver_tests {
-    use super::IrohEndpoint;
-    use crate::endpoint::config::{DiscoveryOptions, NodeOptions};
-
-    // Regression: #350 F26 — explicit DNS nameservers that all fail to parse
-    // must fail the bind, not silently fall back to the default resolver (which
-    // is exactly the broken path, e.g. Android with no /etc/resolv.conf, that
-    // supplying nameservers was meant to avoid).
-    #[tokio::test]
-    async fn bind_rejects_all_invalid_dns_nameservers() {
-        let discovery = {
-            let mut d = DiscoveryOptions::new(None, true);
-            d.dns_nameservers = vec!["not-an-ip".to_string(), "999.1.1.1".to_string()];
-            d
-        };
-        let opts = NodeOptions {
-            discovery,
-            ..Default::default()
-        };
-
-        let err = match IrohEndpoint::bind(opts).await {
-            Ok(_) => panic!("bind must fail when no supplied dns_nameserver parses"),
-            Err(e) => e,
-        };
-        let msg = err.to_string();
-        assert!(
-            msg.contains("dns_nameservers") && msg.contains("not-an-ip"),
-            "error should name the rejected nameservers, got: {msg}"
-        );
-    }
-
-    // A mix of valid + invalid entries binds successfully (invalid ones are
-    // warned and skipped) — only an all-invalid list is fatal.
-    #[tokio::test]
-    async fn bind_accepts_when_at_least_one_dns_nameserver_parses() {
-        let discovery = {
-            let mut d = DiscoveryOptions::new(None, true);
-            d.dns_nameservers = vec!["bogus".to_string(), "8.8.8.8".to_string()];
-            d
-        };
-        let opts = NodeOptions {
-            discovery,
-            ..Default::default()
-        };
-
-        let ep = match IrohEndpoint::bind(opts).await {
-            Ok(ep) => ep,
-            Err(e) => panic!("bind should succeed when at least one nameserver is valid: {e}"),
-        };
-        ep.close().await;
-    }
-
-    // Regression: an IPv6 link-local nameserver carries a zone/scope suffix
-    // (e.g. `fe80::1%wlan0`, as Android's RDNSS/RA can advertise). The zone must
-    // be stripped before parsing so a network whose *only* DNS servers are
-    // zone-scoped link-local addresses does not trip the all-invalid hard-fail
-    // and brick node creation.
-    #[tokio::test]
-    async fn bind_accepts_zone_scoped_ipv6_dns_nameserver() {
-        let discovery = {
-            let mut d = DiscoveryOptions::new(None, true);
-            d.dns_nameservers = vec!["fe80::1%wlan0".to_string()];
-            d
-        };
-        let opts = NodeOptions {
-            discovery,
-            ..Default::default()
-        };
-
-        let ep = match IrohEndpoint::bind(opts).await {
-            Ok(ep) => ep,
-            Err(e) => panic!("bind should accept a zone-scoped IPv6 nameserver: {e}"),
-        };
-        ep.close().await;
     }
 }

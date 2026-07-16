@@ -16,23 +16,25 @@ pub fn node_ticket(ep: &IrohEndpoint) -> Result<String, CoreError> {
 /// Parsed node address from a ticket string, bare node ID, or JSON address info.
 pub struct ParsedNodeAddr {
     pub node_id: iroh::PublicKey,
+    pub relay_urls: Vec<iroh::RelayUrl>,
     pub direct_addrs: Vec<std::net::SocketAddr>,
 }
 
 /// Parse a string that may be a bare node ID, a ticket string (JSON-encoded
 /// `NodeAddrInfo`), or a JSON object with `id` and `addrs` fields.
 ///
-/// ISS-023: malformed entries that look like socket addresses but fail to parse
-/// cause a deterministic error. Entries that are clearly not socket addresses
-/// (e.g. relay URLs containing `://`) are silently skipped and handled
-/// elsewhere in the protocol stack.
+/// ISS-023: malformed entries cause a deterministic error rather than being
+/// silently discarded before they reach iroh's dialer.
 pub fn parse_node_addr(s: &str) -> Result<ParsedNodeAddr, CoreError> {
     if let Ok(info) = serde_json::from_str::<NodeAddrInfo>(s) {
         let node_id = parse_node_id(&info.id)?;
+        let mut relay_urls = Vec::new();
         let mut direct_addrs = Vec::new();
         for addr_str in &info.addrs {
-            // Skip relay URLs — they are handled by the relay subsystem.
             if addr_str.contains("://") {
+                relay_urls.push(addr_str.parse::<iroh::RelayUrl>().map_err(|_| {
+                    CoreError::invalid_input(format!("malformed relay URL: {addr_str}"))
+                })?);
                 continue;
             }
             let addr = addr_str
@@ -49,12 +51,14 @@ pub fn parse_node_addr(s: &str) -> Result<ParsedNodeAddr, CoreError> {
         }
         return Ok(ParsedNodeAddr {
             node_id,
+            relay_urls,
             direct_addrs,
         });
     }
     let node_id = parse_node_id(s)?;
     Ok(ParsedNodeAddr {
         node_id,
+        relay_urls: Vec::new(),
         direct_addrs: Vec::new(),
     })
 }

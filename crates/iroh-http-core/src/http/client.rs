@@ -31,7 +31,9 @@ use crate::{
 /// byte-count against the endpoint's `max_header_size`. That check is
 /// deterministic and does not depend on hyper's error wording, so this
 /// enum no longer disambiguates header parse failures from other
-/// transport errors — they all surface as `ConnectionFailed`.
+/// transport errors — they all surface as `ConnectionFailed`. Failures yielded
+/// by the caller's request body are identified separately as
+/// [`FetchError::RequestBodyFailed`].
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum FetchError {
@@ -41,6 +43,13 @@ pub enum FetchError {
     ConnectionFailed {
         detail: String,
         source: Option<hyper::Error>,
+    },
+    /// The caller-supplied request body yielded an error while Hyper was
+    /// streaming it. This is a local request-production failure, not evidence
+    /// that the pooled transport is unhealthy.
+    RequestBodyFailed {
+        detail: String,
+        source: hyper::Error,
     },
     /// Response head exceeded the endpoint's `max_header_size` budget.
     /// Produced only by [`crate::ffi::fetch`]'s post-receive byte-count
@@ -64,6 +73,9 @@ impl std::fmt::Display for FetchError {
             FetchError::ConnectionFailed { detail, .. } => {
                 write!(f, "connection failed: {detail}")
             }
+            FetchError::RequestBodyFailed { detail, .. } => {
+                write!(f, "request body failed: {detail}")
+            }
             FetchError::HeaderTooLarge { detail } => {
                 write!(f, "response header too large: {detail}")
             }
@@ -81,9 +93,91 @@ impl std::error::Error for FetchError {
             FetchError::ConnectionFailed {
                 source: Some(s), ..
             } => Some(s),
+            FetchError::RequestBodyFailed { source, .. } => Some(source),
             _ => None,
         }
     }
+}
+
+/// Marker attached only to errors yielded by the caller-supplied request body.
+///
+/// Hyper's broad `is_user()` category also includes dispatch-channel failures
+/// caused by a dead connection task, so it cannot distinguish body production
+/// from transport death. This private marker survives in Hyper's source chain
+/// and gives retry/eviction logic an exact origin instead.
+#[derive(Debug)]
+struct CallerRequestBodyError {
+    source: crate::BoxError,
+}
+
+impl std::fmt::Display for CallerRequestBodyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "caller request body failed: {}", self.source)
+    }
+}
+
+impl std::error::Error for CallerRequestBodyError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.source.as_ref())
+    }
+}
+
+/// Tag caller-body failures and preserve non-DATA frames from an exact-zero
+/// DATA body that has not reached end-of-stream.
+///
+/// Hyper treats an exact-zero size hint as a framing decision and may not poll
+/// the body at all. That is correct for a body already at end-of-stream, but a
+/// still-live body can legally yield trailers or an error frame. Masking only
+/// that hint as unknown makes Hyper poll those frames without buffering or
+/// otherwise changing the request body.
+struct MarkCallerRequestBody {
+    body: Body,
+    mask_zero_data_hint: bool,
+}
+
+impl http_body::Body for MarkCallerRequestBody {
+    type Data = bytes::Bytes;
+    type Error = CallerRequestBodyError;
+
+    fn poll_frame(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
+        let this = self.get_mut();
+        match std::pin::Pin::new(&mut this.body).poll_frame(cx) {
+            std::task::Poll::Ready(Some(Err(source))) => {
+                std::task::Poll::Ready(Some(Err(CallerRequestBodyError { source })))
+            }
+            std::task::Poll::Ready(Some(Ok(frame))) => std::task::Poll::Ready(Some(Ok(frame))),
+            std::task::Poll::Ready(None) => std::task::Poll::Ready(None),
+            std::task::Poll::Pending => std::task::Poll::Pending,
+        }
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.body.is_end_stream()
+    }
+
+    fn size_hint(&self) -> http_body::SizeHint {
+        if self.mask_zero_data_hint {
+            http_body::SizeHint::default()
+        } else {
+            self.body.size_hint()
+        }
+    }
+}
+
+/// Return the original caller-body failure detail only when the private origin
+/// marker is present in Hyper's error source chain.
+fn caller_request_body_error_detail(error: &hyper::Error) -> Option<String> {
+    let mut current: Option<&(dyn std::error::Error + 'static)> = Some(error);
+    while let Some(source) = current {
+        if let Some(body_error) = source.downcast_ref::<CallerRequestBodyError>() {
+            return Some(body_error.source.to_string());
+        }
+        current = source.source();
+    }
+    None
 }
 
 // ── Pure-Rust fetch API ──────────────────────────────────────────────────────
@@ -103,7 +197,9 @@ impl std::error::Error for FetchError {
 ///
 /// Returns [`FetchError::Timeout`] if `cfg.timeout` is set and elapsed
 /// before the response head arrived. Connection / handshake / transport
-/// failures map to [`FetchError::ConnectionFailed`].
+/// failures map to [`FetchError::ConnectionFailed`]. A caller-supplied request
+/// body error maps to [`FetchError::RequestBodyFailed`] and retains the Hyper
+/// and original body-error source chain.
 pub async fn fetch_request(
     endpoint: &IrohEndpoint,
     addr: &iroh::EndpointAddr,
@@ -127,13 +223,27 @@ pub async fn fetch_request(
     // connection. A streaming body may have been partially read by a failed
     // attempt, so it is never resent.
     //
-    // F18: attempt 1 is sent as the *original* request (`from_parts`) so its
-    // extensions and real body — including any trailers or error frame a
-    // zero-data body may still emit — reach the peer unchanged. Only the
-    // transparent retry, which is gated on `retry_safe`, is rebuilt from the
+    // F18: attempt 1 retains the original request parts and real body. The body
+    // gets only a transparent error-origin marker (and, for a still-live
+    // exact-zero DATA body, an unknown size hint so Hyper polls trailers/errors).
+    // Only the transparent retry, gated on `retry_safe`, is rebuilt from the
     // cloned method/uri/version/headers with a fresh `Body::empty()`.
     let (parts, body) = req.into_parts();
-    let body_resendable = http_body::Body::size_hint(&body).exact() == Some(0);
+    let body_exact_size = http_body::Body::size_hint(&body).exact();
+    let body_at_end = http_body::Body::is_end_stream(&body);
+    // `SizeHint::exact(0)` constrains DATA bytes only: a body can still yield
+    // trailers or an error frame. `is_end_stream()` is the public guarantee
+    // that no frames remain, which is what makes replacing it with a fresh
+    // `Body::empty()` semantically safe on retry.
+    let body_resendable = body_at_end && body_exact_size == Some(0);
+    let body = if body_at_end {
+        body
+    } else {
+        Body::new(MarkCallerRequestBody {
+            body,
+            mask_zero_data_hint: body_exact_size == Some(0),
+        })
+    };
     let method = parts.method.clone();
     // P1: whether it is SAFE to transparently replay this request. RFC 9110
     // §9.2.2 only permits automatic replay when the method is idempotent AND no
@@ -184,7 +294,12 @@ pub async fn fetch_request(
         // as `ConnectionFailed`, and no response head was received so resending
         // is safe. A `Timeout` means the request was likely accepted but slow —
         // resending would double the work, so it is not retried here.
-        let retryable = matches!(first_err, FetchError::ConnectionFailed { .. });
+        // Caller-body failures are classified separately via an exact marker
+        // in Hyper's source chain. Do not use `hyper::Error::is_user()` here:
+        // that broad category includes dispatch-channel loss when the
+        // connection task dies, which is precisely a stale transport that
+        // should be evicted and retried when the request is replay-safe.
+        let retryable = matches!(&first_err, FetchError::ConnectionFailed { .. });
 
         // Evict the (now known-bad) pooled connection so attempt 2 — and any
         // concurrent/future request — dials a fresh one instead of reusing it.
@@ -343,13 +458,19 @@ async fn attempt_send(
     // Dispatch through the shared client stack (Slice B / #184).
     use tower::ServiceExt;
     let svc = crate::http::server::stack::build_client_stack(sender, cfg);
-    let result = svc
-        .oneshot(req)
-        .await
-        .map_err(|e| FetchError::ConnectionFailed {
-            detail: format!("send_request: {e}"),
-            source: Some(e),
-        });
+    let result = svc.oneshot(req).await.map_err(|error| {
+        if let Some(detail) = caller_request_body_error_detail(&error) {
+            FetchError::RequestBodyFailed {
+                detail,
+                source: error,
+            }
+        } else {
+            FetchError::ConnectionFailed {
+                detail: format!("send_request: {error}"),
+                source: Some(error),
+            }
+        }
+    });
     (result, reused)
 }
 

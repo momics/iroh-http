@@ -73,9 +73,9 @@ interface IrohNode {
   // signatures into one Rust call with the appropriate options struct.
 
   /** Open a WebTransport session to a peer. */
-  connect(
+  dial(
     peer: PublicKey | string,
-    init?: { directAddrs?: string[] },
+    init?: { directAddrs?: string[]; relayUrl?: string },
   ): Promise<IrohSession>;
 
   /** Discover iroh-http peers on the local network via mDNS. */
@@ -189,6 +189,8 @@ Extends the standard `RequestInit` with iroh-specific fields.
 interface IrohFetchInit extends RequestInit {
   /** Direct socket addresses to try before relay. */
   directAddrs?: string[];
+  /** Explicit home relay URL, usually obtained from peer discovery. */
+  relayUrl?: string;
 }
 ```
 

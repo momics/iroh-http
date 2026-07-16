@@ -35,6 +35,17 @@ const selfLoopbackCase = {
   response: { status: 200 },
 };
 
+async function discoveryInfoWithRelay(node, timeoutMs = 10_000) {
+  const deadline = Date.now() + timeoutMs;
+  let info = null;
+  do {
+    info = await node.discoveryInfo().catch(() => null);
+    if (info?.relayUrl) return info;
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  } while (Date.now() < deadline);
+  return info;
+}
+
 console.log("Creating server (peer) node…");
 const server = await createNode();
 server.serve({}, handleRequest);
@@ -45,16 +56,20 @@ console.log("Creating client node…");
 const client = await createNode();
 // Serve the compliance handler on the client too, so the ADR-015 self-loopback
 // baseline can dispatch to its own node id — mirrors the on-device testing mode,
-// which always serves while the suite runs. (With a local service bound, the
-// standalone serve→stop lifecycle test skips, as designed.)
+// which always serves while the suite runs. The serve→stop case uses the
+// isolated-node factory below, so the primary client can remain bound.
 client.serve({}, handleRequest);
 console.log(`  self: ${client.publicKey.toString()}\n`);
 
 // Resolve the peer's dialable direct addr so direct-dial has something to use.
-const serverDiscovery = await server.discoveryInfo().catch(() => null);
-const peerAddrs = serverDiscovery?.directAddresses?.length
+const serverDiscovery = await discoveryInfoWithRelay(server);
+const peerDirectAddrs = serverDiscovery?.directAddresses?.length
   ? serverDiscovery.directAddresses
   : (serverDiscovery?.directAddress ? [serverDiscovery.directAddress] : []);
+const peerAddrs = [
+  ...peerDirectAddrs,
+  ...(serverDiscovery?.relayUrl ? [serverDiscovery.relayUrl] : []),
+];
 
 let groups = buildSuite({
   node: client,
@@ -65,6 +80,7 @@ let groups = buildSuite({
   selfLoopbackCase,
   runCases,
   handler: handleRequest,
+  createIsolatedNode: (request) => createNode(request.nodeOptions),
   helpers: { TXT_KEY_ADDRESS: "address", TXT_KEY_RELAY: "relay" },
   isServing: true,
   // Headless Node runner has no guaranteed mDNS stack — discovery cases that

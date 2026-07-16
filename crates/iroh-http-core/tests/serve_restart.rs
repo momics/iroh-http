@@ -939,36 +939,33 @@ async fn serve_loop_serves_one_exchange_per_bistream() {
     );
 }
 
-/// F7 (deterministic): a `stop_serve()` that races a serve restart must stop the
-/// NEW cycle, not merely the stale previously-registered handle. The existing
-/// stress test cannot reliably interleave inside the synchronous
-/// `set_local_service → set_serve_handle` section, so this drives the primitives
-/// in the exact failing order on one task:
+/// A `stop_serve()` before the adapter's handle hand-off must stop the NEW
+/// cycle, not merely the stale previously-registered handle. The common server
+/// path now owns registration; this drives the exact adapter timing that used
+/// to lose the stop:
 ///
 ///  1. cycle A is registered,
-///  2. cycle B starts — `ffi_serve` installs B's local service and bumps the
-///     serve generation and spawns B's accept loop, but B's handle is NOT yet
-///     registered (A is still the stored handle),
-///  3. `stop_serve()` fires (sees A registered, records the stop generation),
-///  4. B registers via `set_serve_handle`.
+///  2. `ffi_serve` starts cycle B and the common server path atomically replaces
+///     A in the endpoint's token-scoped slot,
+///  3. `stop_serve()` fires before the adapter calls `set_serve_handle(B)`,
+///  4. the adapter performs its late, idempotent hand-off.
 ///
-/// Generation-scoped, the stop is honoured against B's generation, so B is shut
-/// down at registration and the endpoint ends fully stopped. Before the fix the
-/// stop targeted only the stale A and B kept running with its router cleared
-/// (partially live), so `wait_serve_stop` — armed with B's done signal — hung.
+/// The stop targets B directly, and the late hand-off must neither revive B nor
+/// disturb a later token. Before common registration, the stop targeted only A
+/// and B kept running with its router cleared (partially live).
 ///
 /// Runs on a multi-thread runtime (as the FFI adapters do) so B's spawned accept
 /// loop is actually polled and parked on `accept()` before the stop, matching
 /// the production scheduler rather than a current-thread test quirk.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn stop_between_restart_steps_stops_the_new_cycle() {
+async fn stop_before_adapter_handoff_stops_the_new_cycle() {
     let (server_ep, _client_ep) = common::make_pair().await;
 
     // Cycle A: fully registered.
     serve_router(&server_ep);
 
-    // Cycle B: ffi_serve installs B's local service, bumps the generation and
-    // spawns B's accept loop — but set_serve_handle(B) has NOT run yet.
+    // Cycle B: the common serve path installs B's token and spawns its accept
+    // loop, but the adapter's redundant set_serve_handle(B) has NOT run yet.
     let handler_ep = server_ep.clone();
     let handle_b = ffi_serve(
         server_ep.clone(),
@@ -985,21 +982,19 @@ async fn stop_between_restart_steps_stops_the_new_cycle() {
     let mut done_b = handle_b.subscribe_done();
 
     // Let B's accept loop reach its select and park on `accept()` — the state a
-    // real serve cycle is in between start and handle registration.
+    // real adapter cycle can reach before its redundant handle hand-off.
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    // Stop fires while A is the registered handle and B is mid-start.
+    // Stop fires after B is active but before the adapter confirms its handle.
     server_ep.stop_serve();
 
-    // B registers. The generation-scoped stop shuts it down here.
+    // The late adapter hand-off is idempotent and must not revive B.
     server_ep.set_serve_handle(handle_b);
 
-    // B must be shut down by the generation-scoped stop: its done signal fires.
-    // Before the fix the stop targeted only the stale A, so B kept running and
-    // this timed out.
+    // B must have been reached by the single stop: its done signal fires.
     tokio::time::timeout(Duration::from_secs(5), done_b.wait_for(|v| *v))
         .await
-        .expect("the racing stop must stop the new cycle B (F7), not leave it running")
+        .expect("the pre-handoff stop must stop the new cycle B, not leave it running")
         .expect("B's done watch channel must not be dropped");
 
     // And the endpoint's own stop wait resolves — no serve cycle is left live.

@@ -2,7 +2,7 @@
 //!
 //! On iOS and Android, raw UDP multicast (required by the Rust mdns-sd crate)
 //! is restricted by the OS. This module bridges to the platform's native mDNS
-//! APIs (NWBrowser/NWListener on iOS, NsdManager on Android) via Tauri's mobile
+//! APIs (NWBrowser/NetService on iOS, NsdManager on Android) via Tauri's mobile
 //! plugin system, providing the same browse/advertise API surface as the desktop
 //! implementation.
 
@@ -11,6 +11,12 @@ use tauri::{
     plugin::{PluginApi, PluginHandle},
     AppHandle, Runtime,
 };
+
+pub use crate::mobile_discovery_transport::{
+    DnsSdBrowsePollResponse, MobileServiceRecord, MobileSessionStatus,
+};
+use crate::mobile_discovery_transport::{NativeAdvertisementApi, NativeBrowseApi, NativeFuture};
+use iroh_http_discovery::engine::AdvertisementUpdate;
 
 // ---------------------------------------------------------------------------
 // iOS native binding
@@ -41,13 +47,15 @@ pub fn init<R: Runtime, C: serde::de::DeserializeOwned>(
 
 pub struct MobileMdns<R: Runtime>(PluginHandle<R>);
 
-// ── Outgoing payloads ────────────────────────────────────────────────────────
-
-#[derive(Serialize)]
-struct BrowseStartPayload<'a> {
-    #[serde(rename = "serviceName")]
-    service_name: &'a str,
+// A derived implementation would add the unnecessary `R: Clone` bound even
+// though `PluginHandle<R>` itself is cloneable for every Tauri runtime.
+impl<R: Runtime> Clone for MobileMdns<R> {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
 }
+
+// ── Outgoing payloads ────────────────────────────────────────────────────────
 
 #[derive(Serialize)]
 struct BrowsePollPayload {
@@ -59,22 +67,6 @@ struct BrowsePollPayload {
 struct BrowseStopPayload {
     #[serde(rename = "browseId")]
     browse_id: u64,
-}
-
-#[derive(Serialize)]
-struct AdvertiseStartPayload<'a> {
-    #[serde(rename = "serviceName")]
-    service_name: &'a str,
-    /// base32-encoded Ed25519 public key — required by browse parsers.
-    pk: &'a str,
-    /// Relay URL, if any. Optional.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    relay: Option<&'a str>,
-    /// Primary direct `ip:port` address, if known. Published as an `address`
-    /// TXT entry so browsing peers can dial this node over the LAN. Carries the
-    /// real bound QUIC port (never port 0). See #346.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    address: Option<&'a str>,
 }
 
 #[derive(Serialize)]
@@ -102,101 +94,49 @@ struct DnsServersResponse {
     servers: Vec<String>,
 }
 
-/// A single discovery event from the native layer.
 #[derive(Deserialize)]
-pub struct MobileDiscoveryEvent {
-    /// `"discovered"` or `"expired"`
-    #[serde(rename = "type")]
-    pub kind: String,
-    #[serde(rename = "nodeId")]
-    pub node_id: String,
-    pub addrs: Vec<String>,
-}
-
-#[derive(Deserialize)]
-struct BrowsePollResponse {
-    pub events: Vec<MobileDiscoveryEvent>,
+struct InterfaceAddressesResponse {
+    addresses: Vec<String>,
 }
 
 // ── Methods ──────────────────────────────────────────────────────────────────
 
 impl<R: Runtime> MobileMdns<R> {
-    /// Start a browse session on the native layer. Returns a `browse_id` handle.
-    pub fn browse_peers_start(&self, service_name: &str) -> Result<u64, String> {
-        let resp: BrowseStartResponse = self
-            .0
-            .run_mobile_plugin("browse_peers_start", BrowseStartPayload { service_name })
-            .map_err(|e| e.to_string())?;
-        Ok(resp.browse_id)
-    }
-
-    /// Drain all buffered events for a browse session. Non-blocking — returns `[]` if none.
-    pub fn browse_peers_poll(&self, browse_id: u64) -> Result<Vec<MobileDiscoveryEvent>, String> {
-        let resp: BrowsePollResponse = self
-            .0
-            .run_mobile_plugin("browse_peers_poll", BrowsePollPayload { browse_id })
-            .map_err(|e| e.to_string())?;
-        Ok(resp.events)
-    }
-
-    /// Stop a browse session.
-    pub fn browse_peers_stop(&self, browse_id: u64) -> Result<(), String> {
-        self.0
-            .run_mobile_plugin::<()>("browse_peers_stop", BrowseStopPayload { browse_id })
-            .map_err(|e| e.to_string())
-    }
-
-    /// Start advertising on the native layer. Returns an `advertise_id` handle.
-    pub fn advertise_peer_start(
-        &self,
-        service_name: &str,
-        pk: &str,
-        relay: Option<&str>,
-        address: Option<&str>,
-    ) -> Result<u64, String> {
-        let resp: AdvertiseStartResponse = self
-            .0
-            .run_mobile_plugin(
-                "advertise_peer_start",
-                AdvertiseStartPayload {
-                    service_name,
-                    pk,
-                    relay,
-                    address,
-                },
-            )
-            .map_err(|e| e.to_string())?;
-        Ok(resp.advertise_id)
-    }
-
-    /// Stop advertising.
-    pub fn advertise_peer_stop(&self, advertise_id: u64) -> Result<(), String> {
-        self.0
-            .run_mobile_plugin::<()>("advertise_peer_stop", AdvertiseStopPayload { advertise_id })
-            .map_err(|e| e.to_string())
-    }
-
     /// Query the platform's active-network DNS nameservers (IP strings).
     ///
     /// iroh's default resolver can't read the system DNS config on Android, so
     /// the native layer reads it (via `ConnectivityManager`/`LinkProperties`)
     /// and returns the servers to configure iroh's resolver explicitly.
-    pub fn get_dns_servers(&self) -> Result<Vec<String>, String> {
+    pub async fn get_dns_servers(&self) -> Result<Vec<String>, String> {
         let resp: DnsServersResponse = self
             .0
-            .run_mobile_plugin("get_dns_servers", ())
+            .run_mobile_plugin_async("get_dns_servers", ())
+            .await
             .map_err(|e| e.to_string())?;
         Ok(resp.servers)
+    }
+
+    /// Query operational interface IPs from the native mobile layer.
+    ///
+    /// Android implements this with API-21-safe `ConnectivityManager`,
+    /// `LinkProperties`, and `NetworkInterface` calls. It cannot use Rust's
+    /// `if-addrs` because Android did not expose `getifaddrs` until API 24.
+    pub async fn get_interface_addresses(&self) -> Result<Vec<String>, String> {
+        let resp: InterfaceAddressesResponse = self
+            .0
+            .run_mobile_plugin_async("get_interface_addresses", ())
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(resp.addresses)
     }
 }
 
 // ---------------------------------------------------------------------------
-// Generic DNS-SD — advertise/browse arbitrary services, not just iroh peers.
+// Generic DNS-SD — advertise/browse arbitrary services, including iroh peers.
 //
 // Mirrors the desktop `iroh_http_discovery::{advertise, browse}` surface over
-// the same native NsdManager / NWBrowser bridge. Unlike the peer path, records
-// carry the full DNS-SD payload (instance name, host, port, TXT, addresses)
-// rather than a reduced `(nodeId, addrs)` tuple.
+// the same native NsdManager / NWBrowser bridge. Records carry the full DNS-SD
+// payload; Rust projects peer-shaped records into iroh endpoint discovery.
 // ---------------------------------------------------------------------------
 
 // ── Outgoing payloads ────────────────────────────────────────────────────────
@@ -214,6 +154,15 @@ struct DnsSdAdvertiseStartPayload<'a> {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+struct DnsSdAdvertiseUpdatePayload<'a> {
+    advertise_id: u64,
+    port: u16,
+    addrs: &'a [String],
+    txt: &'a std::collections::HashMap<String, String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct DnsSdBrowseStartPayload<'a> {
     service_name: &'a str,
     protocol: &'a str,
@@ -221,33 +170,10 @@ struct DnsSdBrowseStartPayload<'a> {
 
 // ── Incoming responses ───────────────────────────────────────────────────────
 
-/// A single generic DNS-SD record polled from the native layer.
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MobileServiceRecord {
-    /// `true` when the service appeared, `false` when it went away.
-    pub is_active: bool,
-    pub service_type: String,
-    pub instance_name: String,
-    #[serde(default)]
-    pub host: Option<String>,
-    #[serde(default)]
-    pub port: u16,
-    #[serde(default)]
-    pub addrs: Vec<String>,
-    #[serde(default)]
-    pub txt: std::collections::HashMap<String, String>,
-}
-
-#[derive(Deserialize)]
-struct DnsSdBrowsePollResponse {
-    records: Vec<MobileServiceRecord>,
-}
-
 impl<R: Runtime> MobileMdns<R> {
     /// Advertise a generic DNS-SD service. Returns an `advertise_id` handle.
     #[allow(clippy::too_many_arguments)]
-    pub fn advertise_start(
+    pub async fn advertise_start(
         &self,
         service_name: &str,
         instance_name: &str,
@@ -258,7 +184,7 @@ impl<R: Runtime> MobileMdns<R> {
     ) -> Result<u64, String> {
         let resp: AdvertiseStartResponse = self
             .0
-            .run_mobile_plugin(
+            .run_mobile_plugin_async(
                 "advertise_start",
                 DnsSdAdvertiseStartPayload {
                     service_name,
@@ -269,45 +195,110 @@ impl<R: Runtime> MobileMdns<R> {
                     txt,
                 },
             )
+            .await
             .map_err(|e| e.to_string())?;
         Ok(resp.advertise_id)
     }
 
-    /// Stop a generic DNS-SD advertisement.
-    pub fn advertise_stop(&self, advertise_id: u64) -> Result<(), String> {
+    /// Update the mutable port/TXT snapshot without changing service identity.
+    pub async fn advertise_update(
+        &self,
+        advertise_id: u64,
+        port: u16,
+        addrs: &[String],
+        txt: &std::collections::HashMap<String, String>,
+    ) -> Result<(), String> {
         self.0
-            .run_mobile_plugin::<()>("advertise_stop", AdvertiseStopPayload { advertise_id })
+            .run_mobile_plugin_async::<()>(
+                "advertise_update",
+                DnsSdAdvertiseUpdatePayload {
+                    advertise_id,
+                    port,
+                    addrs,
+                    txt,
+                },
+            )
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    /// Stop a generic DNS-SD advertisement.
+    pub async fn advertise_stop(&self, advertise_id: u64) -> Result<(), String> {
+        self.0
+            .run_mobile_plugin_async::<()>("advertise_stop", AdvertiseStopPayload { advertise_id })
+            .await
             .map_err(|e| e.to_string())
     }
 
     /// Start a generic DNS-SD browse session. Returns a `browse_id` handle.
-    pub fn browse_start(&self, service_name: &str, protocol: &str) -> Result<u64, String> {
+    pub async fn browse_start(&self, service_name: &str, protocol: &str) -> Result<u64, String> {
         let resp: BrowseStartResponse = self
             .0
-            .run_mobile_plugin(
+            .run_mobile_plugin_async(
                 "browse_start",
                 DnsSdBrowseStartPayload {
                     service_name,
                     protocol,
                 },
             )
+            .await
             .map_err(|e| e.to_string())?;
         Ok(resp.browse_id)
     }
 
-    /// Drain all buffered records for a browse session. Non-blocking.
-    pub fn browse_poll(&self, browse_id: u64) -> Result<Vec<MobileServiceRecord>, String> {
+    /// Drain buffered records and observe the native session's terminal state.
+    pub async fn browse_poll(&self, browse_id: u64) -> Result<DnsSdBrowsePollResponse, String> {
         let resp: DnsSdBrowsePollResponse = self
             .0
-            .run_mobile_plugin("browse_poll", BrowsePollPayload { browse_id })
+            .run_mobile_plugin_async("browse_poll", BrowsePollPayload { browse_id })
+            .await
             .map_err(|e| e.to_string())?;
-        Ok(resp.records)
+        Ok(resp)
     }
 
     /// Stop a generic DNS-SD browse session.
-    pub fn browse_stop(&self, browse_id: u64) -> Result<(), String> {
+    pub async fn browse_stop(&self, browse_id: u64) -> Result<(), String> {
         self.0
-            .run_mobile_plugin::<()>("browse_stop", BrowseStopPayload { browse_id })
+            .run_mobile_plugin_async::<()>("browse_stop", BrowseStopPayload { browse_id })
+            .await
             .map_err(|e| e.to_string())
+    }
+}
+
+impl<R: Runtime> NativeBrowseApi for MobileMdns<R> {
+    fn poll(&self, browse_id: u64) -> NativeFuture<Result<DnsSdBrowsePollResponse, String>> {
+        let mdns = self.clone();
+        Box::pin(async move { mdns.browse_poll(browse_id).await })
+    }
+
+    fn stop(&self, browse_id: u64) -> NativeFuture<Result<(), String>> {
+        let mdns = self.clone();
+        Box::pin(async move { mdns.browse_stop(browse_id).await })
+    }
+}
+
+impl<R: Runtime> NativeAdvertisementApi for MobileMdns<R> {
+    fn update(
+        &self,
+        advertise_id: u64,
+        update: AdvertisementUpdate,
+    ) -> NativeFuture<Result<(), String>> {
+        let mdns = self.clone();
+        Box::pin(async move {
+            if !update.addrs.is_empty() {
+                return Err(
+                    "native mobile DNS-SD advertisements do not support explicit addresses"
+                        .to_string(),
+                );
+            }
+            let txt = update.txt.into_iter().collect();
+            mdns.advertise_update(advertise_id, update.port, &[], &txt)
+                .await
+        })
+    }
+
+    fn stop(&self, advertise_id: u64) -> NativeFuture<Result<(), String>> {
+        let mdns = self.clone();
+        Box::pin(async move { mdns.advertise_stop(advertise_id).await })
     }
 }

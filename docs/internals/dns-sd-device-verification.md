@@ -1,9 +1,10 @@
 # On-device DNS-SD verification runbook (#334)
 
 Standard DNS-SD discovery ([ADR-017](../adr/017-standard-dns-sd-discovery.md),
-#330) shipped mobile-native Tauri plugin code that **no CI job compiles or
-runs** — there is no iOS or Android runner. This runbook drives the real
-hardware pass from the example app's **Test** tab **Suite runner**, which
+#330) includes mobile-native Tauri adapters. CI compiles both adapters and runs
+deterministic host lifecycle contracts, but it has no physical iOS or Android
+device runner. This runbook drives the real hardware pass from the example
+app's **Test** tab **Suite runner**, which
 executes the structured interop suite
 ([`tests/interop/suite.mjs`](../../tests/interop/suite.mjs)) against a
 discovered peer and reports grouped pass/fail/skip results plus a greppable log

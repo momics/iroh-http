@@ -56,7 +56,9 @@ export interface ServiceConfig {
   txt?: Record<string, string>;
   /**
    * Extra IP addresses to advertise. Local interface addresses are added
-   * automatically, so this is usually left empty.
+   * automatically, so this is usually left empty. Desktop accepts explicit
+   * addresses; iOS and Android reject a non-empty list because their native
+   * DNS-SD APIs own A/AAAA publication and cannot honour this field.
    */
   addrs?: string[];
   /** Transport protocol. Defaults to `"udp"`. */
@@ -90,10 +92,10 @@ export interface DnsSdBrowseOptions {
  * even on `"discovered"` (active) records. Resolving the target host/port/IP
  * would require opening an `NWConnection` per result, which this surface does
  * not do. Desktop and Android fully resolve these fields. See ADR-018 §8 for
- * the rationale; consumers that need addresses on iOS should rely on a
- * `relay`/`address` TXT entry surfaced through `addrs` as a best effort, or
- * use `asIrohPeer()` / `node.browsePeers()` for the iroh-peer specialization,
- * which resolves addresses via `AddressLookup` instead of DNS-SD.
+ * the rationale; consumers that use the iroh TXT convention can call
+ * `asIrohPeer()` to validate `relay`/`address` TXT values, or use
+ * `node.browsePeers()` for the iroh-peer specialization, which feeds those
+ * values into the endpoint `AddressLookup`.
  */
 export interface ServiceRecord {
   /** `true` when the service appeared or was updated; `false` on expiry. */
@@ -232,12 +234,13 @@ export function isRelayUrl(s: string): boolean {
  * Reads the peer's public key from the `pk` TXT property, falling back to the
  * instance label. Returns `null` when neither yields a node id.
  *
- * Addresses are sanitised for the dialer (#346): the dialable `address` TXT
- * entry (which carries the real bound QUIC port) is surfaced first, then any
- * well-formed `ip:port` socket addresses from the resolved set. Bare,
- * port-less hosts (an iOS A-record resolves to a portless IP) and `:0`
- * addresses are dropped so they can never fail `parse_direct_addrs` and poison
- * the whole list.
+ * Addresses are sanitised for the dialer (#346): dialable `address` TXT
+ * candidates carry the authoritative QUIC endpoints. When present, they
+ * replace resolved SRV socket addresses, whose port can belong only to the
+ * DNS-SD carrier (the test service intentionally advertises port `1`). Without
+ * an authoritative TXT address, well-formed resolved `ip:port` addresses are
+ * used. Bare, port-less hosts and `:0` addresses are dropped so they can never
+ * fail `parse_direct_addrs` and poison the whole list.
  *
  * Relay URLs are preserved (the `relay` TXT entry and any relay-scheme entry in
  * `addrs`) so an off-LAN / NAT'd peer stays reachable via its home relay —
@@ -262,8 +265,11 @@ export function asIrohPeer(record: ServiceRecord): DiscoveredPeer | null {
   for (const a of (record.txt[TXT_KEY_ADDRESS] ?? "").split(",")) {
     push(a.trim());
   }
+  const hasAuthoritativeDirectAddr = addrs.some(isDialableSocketAddr);
   push(record.txt[TXT_KEY_RELAY]);
-  for (const a of record.addrs) push(a);
+  for (const a of record.addrs) {
+    if (!hasAuthoritativeDirectAddr || isRelayUrl(a)) push(a);
+  }
 
   return { nodeId, addrs, isActive: record.isActive };
 }

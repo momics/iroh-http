@@ -119,7 +119,14 @@ export interface NodeOptions {
      * `closed` promise resolves and the app can react. Honored only when the
      * reconnect listener is enabled (see `auto`).
      */
-    onReconnectNeeded?: () => void;
+    onReconnectNeeded?: () => void | Promise<void>;
+    /**
+     * Called (Tauri adapter only) when `onReconnectNeeded` throws/rejects, or
+     * when the fail-safe close of the unusable node fails. If both operations
+     * fail, this callback is invoked twice in that order. When omitted,
+     * failures are reported to `console.error`.
+     */
+    onReconnectError?: (error: unknown) => void;
   };
 
   /**

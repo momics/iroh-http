@@ -5,8 +5,8 @@
  * received a BARE, port-less IP (the resolved mDNS A-record host, e.g.
  * "192.168.50.227") in `ServiceRecord.addrs`. That value fails to parse as a
  * socket address at dial time ("invalid socket address syntax"), poisoning the
- * whole direct-address list — while the dialable `address` TXT entry (which
- * carries the real bound QUIC port) was ignored entirely.
+ * whole direct-address list — while the complete dialable `address` TXT entry
+ * (which carries its authoritative candidate port) was ignored entirely.
  */
 
 import { describe, expect, it } from "vitest";
@@ -90,7 +90,7 @@ describe("asIrohPeer address handling (#346)", () => {
     // The bare, port-less host must not appear — it is undialable and would
     // fail `parse_direct_addrs` for the entire list.
     expect(peer?.addrs).not.toContain("192.168.50.227");
-    // The dialable address (with the real bound QUIC port) is what survives.
+    // The complete dialable candidate is what survives.
     expect(peer?.addrs).toContain("192.168.50.227:62546");
   });
 

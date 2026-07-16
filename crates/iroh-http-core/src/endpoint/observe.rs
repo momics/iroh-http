@@ -67,10 +67,10 @@ impl IrohEndpoint {
 
     /// Reconciled direct socket addresses for this endpoint.
     ///
-    /// These are the endpoint's derived local IP addresses with their ports
-    /// reconciled against the real bound sockets, so a platform that enumerates
-    /// an address with port 0 (iOS, #346) yields the real bound QUIC port. Any
-    /// address that cannot be given a usable port is omitted. Relay URLs are not
+    /// Real candidate ports are authoritative and preserved, including
+    /// reflexive QAD ports that differ from the local listener. Only platform
+    /// placeholders (`:0`/`:1`, observed on iOS in #346) borrow a same-family
+    /// bound port; an unrepairable placeholder is omitted. Relay URLs are not
     /// included. This is the direct-address list that should be advertised.
     pub fn direct_socket_addrs(&self) -> Vec<std::net::SocketAddr> {
         let candidates: Vec<std::net::SocketAddr> =
@@ -81,11 +81,9 @@ impl IrohEndpoint {
 
     /// Full node address: node ID + relay URL(s) + direct socket addresses.
     ///
-    /// Direct-address ports are reconciled against the endpoint's bound sockets
-    /// so a platform that enumerates a local address with port 0 (iOS, #346)
-    /// still advertises the real bound QUIC port. Any address that cannot be
-    /// given a usable port is dropped rather than advertised as an undialable
-    /// `:0`.
+    /// Real candidate ports are preserved. A platform placeholder such as the
+    /// `:0` observed on iOS (#346) borrows a same-family bound port; one that
+    /// cannot be repaired is dropped rather than advertised as undialable.
     pub fn node_addr(&self) -> NodeAddrInfo {
         let addr = self.inner.transport.ep.addr();
         let mut addrs = Vec::new();
@@ -334,8 +332,8 @@ impl IrohEndpoint {
 /// Pick the first routable `ip:port` from a set of already port-reconciled
 /// direct addresses, formatted for advertisement.
 ///
-/// The input addresses come from [`IrohEndpoint::direct_socket_addrs`], so
-/// their ports are already the real bound QUIC port. This only applies the
+/// The input addresses come from [`IrohEndpoint::direct_socket_addrs`], so each
+/// already carries its authoritative dialable port. This only applies the
 /// routability filter. Kept in sync with `select_advertise_address` in
 /// `iroh-http-discovery`; the two cannot share a single helper without
 /// introducing a cross-crate dependency (both crates depend on `iroh`, neither
@@ -391,7 +389,7 @@ mod dialable_tests {
 
     #[test]
     fn selects_first_routable_ip_with_reconciled_port() {
-        // A reconciled address already carries the real bound QUIC port; the
+        // A reconciled address already carries its authoritative real port; the
         // selector just filters for routability and formats it.
         let addrs: Vec<SocketAddr> = vec![
             "127.0.0.1:59234".parse().unwrap(),

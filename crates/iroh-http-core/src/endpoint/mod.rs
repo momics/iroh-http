@@ -23,11 +23,14 @@
 use std::sync::Arc;
 
 pub(in crate::endpoint) mod bind;
+mod dns_nameservers;
 pub(in crate::endpoint) mod ffi_bridge;
 pub(in crate::endpoint) mod http_runtime;
 pub(in crate::endpoint) mod lifecycle;
 pub(in crate::endpoint) mod observe;
+mod scoped_dns_compat;
 pub(in crate::endpoint) mod session_runtime;
+mod source_scoped_lookup;
 pub(in crate::endpoint) mod transport;
 
 pub mod config;
@@ -36,6 +39,10 @@ pub mod stats;
 pub use bind::parse_direct_addrs;
 pub use config::{DiscoveryOptions, NetworkingOptions, NodeOptions, PoolOptions, StreamingOptions};
 pub use http::server::stack::CompressionOptions;
+pub use source_scoped_lookup::{
+    AddressLookupRemoval, AddressLookupSource, AddressLookupUpsert, AddressLookupUpsertError,
+    SourceScopedAddressLookup,
+};
 pub use stats::{ConnectionEvent, EndpointStats, NodeAddrInfo, PathInfo, PeerStats};
 
 use crate::ffi::handles::HandleStore;
@@ -89,34 +96,41 @@ impl IrohEndpoint {
 
     // ── Local serve service (self-request loopback) ──────────────────────────
 
-    /// Register the locally-running serve service so a self-request
-    /// (`fetch()` to this node's own id) can be dispatched in-process.
-    /// Called when `serve()` starts; see ADR-015.
+    /// Allocate the stable identity for a new serve cycle on this endpoint.
+    pub(crate) fn next_serve_token(&self) -> crate::http::server::handle::ServeToken {
+        self.inner.session.next_serve_token()
+    }
+
+    /// Register the FFI service for in-process self-requests, but only while
+    /// `handle` is still the active, unstopped serve cycle.
     ///
-    /// F7: this is the first observable step of a serve cycle, so it bumps the
-    /// serve-cycle generation and installs the service under the `serve_handle`
-    /// lock. That serializes cycle-start with `stop_serve` / `set_serve_handle`:
-    /// a `stop_serve` racing between here and `set_serve_handle` can then no
-    /// longer clear this cycle's service while shutting only the *previous*
-    /// handle — it observes this cycle's generation and the new handle is shut
-    /// down when it registers, rather than being left running without a router.
-    pub(crate) fn set_local_service(&self, svc: &crate::ffi::dispatcher::IrohHttpService) {
-        let _serve_guard = self
+    /// The common server path has already installed the token before this is
+    /// called. Holding the serve slot while checking identity and installing
+    /// the weak service makes a concurrent `stop_serve` linearizable: either
+    /// the service is installed and then cleared, or the stopped token rejects
+    /// the late install.
+    pub(crate) fn set_local_service_for(
+        &self,
+        handle: &crate::http::server::ServeHandle,
+        svc: &crate::ffi::dispatcher::IrohHttpService,
+    ) {
+        let serve_guard = self
             .inner
             .session
             .serve_handle
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        self.inner
-            .session
-            .serve_started_gen
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        *self
-            .inner
-            .ffi
-            .local_service
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = Some(svc.downgrade());
+        let is_current = serve_guard
+            .as_ref()
+            .is_some_and(|current| current.is_same_cycle(handle));
+        if is_current && !handle.is_shutdown_requested() {
+            *self
+                .inner
+                .ffi
+                .local_service
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = Some(svc.downgrade());
+        }
     }
 
     /// Clear the registered serve service. Called on serve stop / close so a

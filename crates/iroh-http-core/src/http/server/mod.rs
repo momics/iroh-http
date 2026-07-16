@@ -63,7 +63,9 @@ pub struct RemoteNodeId(pub Arc<String>);
 
 /// Pure-Rust serve entry — convenience 3-arg wrapper that omits the
 /// connection-event callback. Equivalent to `serve_with_events(ep,
-/// opts, svc, None)`.
+/// opts, svc, None)`. The endpoint owns the returned serve cycle immediately,
+/// so [`IrohEndpoint::stop_serve`] works without a separate handle-registration
+/// call.
 pub fn serve<S>(endpoint: IrohEndpoint, options: ServeOptions, svc: S) -> ServeHandle
 where
     S: Service<
@@ -91,6 +93,9 @@ where
 ///
 /// `on_connection_event` is called on 0→1 (first connection from a peer)
 /// and 1→0 (last connection from a peer closed) count transitions.
+/// The cycle is installed in `endpoint` before this function returns; adapter
+/// code may retain the returned handle, but need not register it for endpoint
+/// lifecycle methods to reach the server.
 ///
 /// # Security
 ///
@@ -149,6 +154,20 @@ where
     let drain_dur = cfg.drain_timeout;
     let (done_tx, done_rx) = tokio::sync::watch::channel(false);
 
+    // Register the cycle before spawning it. A stop racing after this point
+    // targets this exact token; Notify retains the shutdown permit if the task
+    // has not begun polling yet. The returned handle is a clone of the one in
+    // the endpoint slot, so adapter-side `set_serve_handle` is idempotent.
+    let handle = ServeHandle::pending(
+        endpoint.next_serve_token(),
+        shutdown_notify.clone(),
+        close_flag.clone(),
+        close_connections.clone(),
+        drain_dur,
+        done_rx,
+    );
+    endpoint.register_serve_handle(handle.clone());
+
     let join = tokio::spawn(accept_loop(
         endpoint,
         cfg,
@@ -159,13 +178,6 @@ where
         close_connections.clone(),
         done_tx,
     ));
-
-    ServeHandle {
-        join,
-        shutdown_notify,
-        close_flag,
-        close_connections,
-        drain_timeout: drain_dur,
-        done_rx,
-    }
+    handle.attach_join(join);
+    handle
 }
