@@ -180,6 +180,13 @@ impl Drop for ScopedDnsProxy {
 }
 
 async fn start_scoped_dns_proxy(upstream: SocketAddr) -> io::Result<ScopedDnsProxy> {
+    start_scoped_dns_proxy_forwarding_to(upstream, upstream).await
+}
+
+async fn start_scoped_dns_proxy_forwarding_to(
+    upstream: SocketAddr,
+    forwarding_upstream: SocketAddr,
+) -> io::Result<ScopedDnsProxy> {
     let SocketAddr::V6(v6) = upstream else {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -202,7 +209,7 @@ async fn start_scoped_dns_proxy(upstream: SocketAddr) -> io::Result<ScopedDnsPro
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let task = tokio::spawn(run_scoped_dns_proxy(
         listener,
-        upstream,
+        forwarding_upstream,
         Arc::clone(&load),
         shutdown_rx,
     ));
@@ -331,8 +338,8 @@ mod tests {
     };
 
     use super::{
-        start_scoped_dns_proxy, IrohEndpoint, ScopedDnsCompat, MAX_SCOPED_DNS_IN_FLIGHT,
-        MAX_SCOPED_DNS_UDP_PAYLOAD,
+        start_scoped_dns_proxy_forwarding_to, IrohEndpoint, ScopedDnsCompat, ScopedDnsProxy,
+        MAX_SCOPED_DNS_IN_FLIGHT, MAX_SCOPED_DNS_UDP_PAYLOAD,
     };
     use crate::endpoint::config::{DiscoveryOptions, NodeOptions};
 
@@ -364,6 +371,30 @@ mod tests {
         response
     }
 
+    /// Start the production proxy with a scoped address retained for the
+    /// configured destination, but route this synthetic test server through
+    /// its actual loopback address. A scope ID on `::1` is meaningless and
+    /// Windows rejects an invented interface index instead of ignoring it as
+    /// Unix kernels do. Real link-local scope routing remains a device gate.
+    async fn start_loopback_test_proxy(
+        upstream: &tokio::net::UdpSocket,
+    ) -> (ScopedDnsProxy, SocketAddr) {
+        let forwarding_upstream = upstream.local_addr().expect("loopback upstream address");
+        let SocketAddr::V6(forwarding_v6) = forwarding_upstream else {
+            panic!("test upstream must be IPv6");
+        };
+        let configured_upstream = SocketAddr::V6(SocketAddrV6::new(
+            *forwarding_v6.ip(),
+            forwarding_v6.port(),
+            forwarding_v6.flowinfo(),
+            17,
+        ));
+        let proxy = start_scoped_dns_proxy_forwarding_to(configured_upstream, forwarding_upstream)
+            .await
+            .expect("start scoped DNS proxy");
+        (proxy, configured_upstream)
+    }
+
     #[tokio::test]
     async fn scoped_proxy_integrates_with_iroh_dns_and_retains_configured_scope() {
         // Loopback does not exercise kernel scope routing; the stored-address
@@ -371,9 +402,7 @@ mod tests {
         let upstream = tokio::net::UdpSocket::bind((Ipv6Addr::LOCALHOST, 0))
             .await
             .expect("bind fake IPv6 DNS server");
-        let upstream_port = upstream.local_addr().unwrap().port();
-        let exact_upstream =
-            SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::LOCALHOST, upstream_port, 0, 17));
+        let (proxy, exact_upstream) = start_loopback_test_proxy(&upstream).await;
         let expected = Ipv4Addr::new(192, 0, 2, 44);
         let upstream_task = tokio::spawn(async move {
             let mut query = [0u8; 4096];
@@ -388,9 +417,6 @@ mod tests {
                 .expect("send fake DNS response");
         });
 
-        let proxy = start_scoped_dns_proxy(exact_upstream)
-            .await
-            .expect("start scoped DNS proxy");
         assert_eq!(
             proxy.upstream(),
             exact_upstream,
@@ -416,15 +442,7 @@ mod tests {
         let silent_upstream = tokio::net::UdpSocket::bind((Ipv6Addr::LOCALHOST, 0))
             .await
             .expect("bind silent IPv6 upstream");
-        let upstream = SocketAddr::V6(SocketAddrV6::new(
-            Ipv6Addr::LOCALHOST,
-            silent_upstream.local_addr().unwrap().port(),
-            0,
-            17,
-        ));
-        let proxy = start_scoped_dns_proxy(upstream)
-            .await
-            .expect("start scoped DNS proxy");
+        let (proxy, _) = start_loopback_test_proxy(&silent_upstream).await;
         let client = tokio::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
             .await
             .expect("bind flood client");
@@ -480,18 +498,7 @@ mod tests {
         let silent_upstream = tokio::net::UdpSocket::bind((Ipv6Addr::LOCALHOST, 0))
             .await
             .expect("bind silent IPv6 upstream");
-        let upstream = SocketAddr::V6(SocketAddrV6::new(
-            Ipv6Addr::LOCALHOST,
-            silent_upstream
-                .local_addr()
-                .expect("silent upstream address")
-                .port(),
-            0,
-            17,
-        ));
-        let proxy = start_scoped_dns_proxy(upstream)
-            .await
-            .expect("start scoped DNS proxy");
+        let (proxy, _) = start_loopback_test_proxy(&silent_upstream).await;
         let abort_handle = proxy.abort_handle();
         let load = Arc::clone(&proxy._load);
         let client = tokio::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
@@ -525,18 +532,7 @@ mod tests {
         let silent_upstream = tokio::net::UdpSocket::bind((Ipv6Addr::LOCALHOST, 0))
             .await
             .expect("bind silent IPv6 upstream");
-        let upstream = SocketAddr::V6(SocketAddrV6::new(
-            Ipv6Addr::LOCALHOST,
-            silent_upstream
-                .local_addr()
-                .expect("silent upstream address")
-                .port(),
-            0,
-            17,
-        ));
-        let proxy = start_scoped_dns_proxy(upstream)
-            .await
-            .expect("start scoped DNS proxy");
+        let (proxy, _) = start_loopback_test_proxy(&silent_upstream).await;
         let load = Arc::clone(&proxy._load);
         let client = tokio::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
             .await
@@ -572,15 +568,7 @@ mod tests {
         let upstream = tokio::net::UdpSocket::bind((Ipv6Addr::LOCALHOST, 0))
             .await
             .expect("bind fake IPv6 upstream");
-        let upstream_addr = SocketAddr::V6(SocketAddrV6::new(
-            Ipv6Addr::LOCALHOST,
-            upstream.local_addr().unwrap().port(),
-            0,
-            17,
-        ));
-        let proxy = start_scoped_dns_proxy(upstream_addr)
-            .await
-            .expect("start scoped DNS proxy");
+        let (proxy, _) = start_loopback_test_proxy(&upstream).await;
         let client = tokio::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
             .await
             .expect("bind local DNS client");
