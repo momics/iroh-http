@@ -557,7 +557,7 @@ Deno.test("abort settles a pending advertisement and closes its late handle once
   const advertising = advertise(adapter, controller.signal);
   await waitFor(() => starts === 1, "native advertisement did not start");
   controller.abort();
-  let timer: number | undefined;
+  let timer: ReturnType<typeof setTimeout> | undefined;
   const outcome = await Promise.race([
     advertising.then(() => "settled" as const),
     new Promise<"timeout">((resolve) => {
