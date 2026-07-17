@@ -36,6 +36,9 @@ use std::{
     },
 };
 
+#[cfg(feature = "mdns")]
+use std::{future::Future, time::Duration};
+
 #[cfg(feature = "runtime")]
 use futures::stream::BoxStream;
 
@@ -664,32 +667,20 @@ fn is_routable_ip(ip: &IpAddr) -> bool {
 }
 
 #[cfg(feature = "mdns")]
-fn desktop_peer_service_config(
-    service_name: &str,
-    instance_name: &str,
-    bound_sockets: &[SocketAddr],
-    node_addr: &iroh::EndpointAddr,
-) -> Result<ServiceConfig, DiscoveryError> {
-    let interface_ips = operational_interface_ips(
-        if_addrs::get_if_addrs()
-            .unwrap_or_default()
-            .into_iter()
-            .map(|interface| {
-                let usable = mdns_interface_is_usable(
-                    &interface.name,
-                    interface.is_oper_up(),
-                    interface.is_p2p(),
-                );
-                (interface.ip(), usable)
-            }),
-    );
-    peer_service_config_from_snapshot(
-        service_name,
-        instance_name,
-        bound_sockets,
-        node_addr,
-        &interface_ips,
-    )
+fn desktop_interface_ips() -> Result<Vec<IpAddr>, DiscoveryError> {
+    let interfaces = if_addrs::get_if_addrs().map_err(|error| {
+        DiscoveryError::Setup(format!("cannot enumerate network interfaces: {error}"))
+    })?;
+    Ok(operational_interface_ips(interfaces.into_iter().map(
+        |interface| {
+            let usable = mdns_interface_is_usable(
+                &interface.name,
+                interface.is_oper_up(),
+                interface.is_p2p(),
+            );
+            (interface.ip(), usable)
+        },
+    )))
 }
 
 #[cfg(feature = "mdns")]
@@ -716,7 +707,38 @@ fn peer_service_config_from_snapshot(
     node_addr: &iroh::EndpointAddr,
     interface_ips: &[IpAddr],
 ) -> Result<ServiceConfig, DiscoveryError> {
-    let socket_addrs: Vec<SocketAddr> = node_addr.ip_addrs().copied().collect();
+    peer_service_config_from_reconciled_snapshot(
+        service_name,
+        instance_name,
+        bound_sockets,
+        node_addr,
+        interface_ips,
+        interface_ips,
+    )
+}
+
+#[cfg(feature = "runtime")]
+fn peer_service_config_from_reconciled_snapshot(
+    service_name: &str,
+    instance_name: &str,
+    bound_sockets: &[SocketAddr],
+    node_addr: &iroh::EndpointAddr,
+    interface_ips: &[IpAddr],
+    known_local_ips: &[IpAddr],
+) -> Result<ServiceConfig, DiscoveryError> {
+    // EndpointAddr intentionally does not expose candidate provenance. Retain
+    // reflexive paths, but retract an endpoint candidate once this advertise
+    // session has observed that IP locally and it has left the live interface
+    // inventory. This prevents a stale local address from surviving in TXT
+    // when the endpoint watcher does not publish an interface-only change.
+    let socket_addrs: Vec<SocketAddr> = node_addr
+        .ip_addrs()
+        .filter(|address| {
+            let ip = address.ip();
+            !known_local_ips.contains(&ip) || interface_ips.contains(&ip)
+        })
+        .copied()
+        .collect();
     let direct_sockets = peer_direct_addresses(&socket_addrs, bound_sockets, interface_ips);
     let direct: Vec<String> = direct_sockets
         .iter()
@@ -839,6 +861,114 @@ pub fn peer_service_config_with_ips(
     )
 }
 
+#[cfg(feature = "mdns")]
+#[allow(clippy::too_many_arguments)]
+async fn run_peer_advertisement_refresh<W, C, I>(
+    mut watcher: W,
+    mut node_addr: iroh::EndpointAddr,
+    closed: C,
+    cancel: futures::channel::oneshot::Receiver<()>,
+    refresh_session: Arc<engine::AdvertisementSession>,
+    service_name: String,
+    instance: String,
+    bound_sockets: Vec<SocketAddr>,
+    initial_interface_ips: Vec<IpAddr>,
+    poll_interval: Duration,
+    mut interface_inventory: I,
+) -> bool
+where
+    W: Watcher<Value = iroh::EndpointAddr> + Send,
+    C: Future<Output = ()> + Send,
+    I: FnMut() -> Result<Vec<IpAddr>, DiscoveryError> + Send,
+{
+    let mut known_local_ips = initial_interface_ips;
+    let cancel = cancel.fuse();
+    let closed = closed.fuse();
+    futures::pin_mut!(cancel, closed);
+    let mut interface_poll = tokio::time::interval(poll_interval);
+    interface_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // `interval` fires immediately once. The initial snapshot is already
+    // registered, so consume that tick before waiting for actual changes.
+    interface_poll.tick().await;
+
+    loop {
+        let updated = watcher.updated().fuse();
+        let interface_tick = interface_poll.tick().fuse();
+        futures::pin_mut!(updated, interface_tick);
+        futures::select_biased! {
+            _ = cancel => return false,
+            _ = closed => return true,
+            updated = updated => match updated {
+                Ok(updated) => node_addr = updated,
+                Err(_) => return true,
+            },
+            _ = interface_tick => {},
+        };
+
+        let interface_ips = match interface_inventory() {
+            Ok(interface_ips) => interface_ips,
+            Err(error) => {
+                // A transient enumeration error is not evidence that every
+                // local address disappeared. Keep the last published record
+                // and try again on the next tick or endpoint update.
+                tracing::warn!(%error, "iroh-http-discovery: cannot refresh interface inventory");
+                continue;
+            }
+        };
+        for ip in &interface_ips {
+            if !known_local_ips.contains(ip) {
+                known_local_ips.push(*ip);
+            }
+        }
+        let config = match peer_service_config_from_reconciled_snapshot(
+            &service_name,
+            &instance,
+            &bound_sockets,
+            &node_addr,
+            &interface_ips,
+            &known_local_ips,
+        ) {
+            Ok(config) => config,
+            Err(error) => {
+                tracing::warn!(%error, "iroh-http-discovery: cannot refresh peer advertisement");
+                continue;
+            }
+        };
+        enum UpdateEvent<T> {
+            Cancelled,
+            EndpointClosed,
+            Completed(T),
+        }
+        let update = dns_sd::update_advertisement(&refresh_session, &config).fuse();
+        futures::pin_mut!(update);
+        let event = futures::select_biased! {
+            _ = cancel => UpdateEvent::Cancelled,
+            _ = closed => UpdateEvent::EndpointClosed,
+            result = update => UpdateEvent::Completed(result),
+        };
+        match event {
+            UpdateEvent::Cancelled => {
+                refresh_session.close();
+                let _ = update.await;
+                return false;
+            }
+            UpdateEvent::EndpointClosed => {
+                refresh_session.close();
+                let _ = update.await;
+                return true;
+            }
+            UpdateEvent::Completed(Err(error)) => {
+                tracing::warn!(%error, "iroh-http-discovery: peer advertisement refresh failed");
+                // A live handle must never silently represent stale TXT.
+                // Ending the worker runs its unregister finalizer; a caller
+                // can then explicitly start a fresh advertisement.
+                return true;
+            }
+            UpdateEvent::Completed(Ok(_)) => {}
+        }
+    }
+}
+
 /// Start advertising this node on the local network via DNS-SD.
 ///
 /// Publishes `_<service_name>._udp.local` with the instance name and `pk` TXT
@@ -862,8 +992,19 @@ pub fn advertise_peer(
     let instance = node_id_label(&ep.id());
     let bound_sockets: Vec<SocketAddr> = ep.bound_sockets();
     let mut watcher = ep.watch_addr();
-    let initial = watcher.get();
-    let config = desktop_peer_service_config(service_name, &instance, &bound_sockets, &initial)?;
+    let node_addr = watcher.get();
+    let initial_interface_ips = desktop_interface_ips().unwrap_or_else(|error| {
+        tracing::warn!(%error, "iroh-http-discovery: cannot read initial interface inventory");
+        Vec::new()
+    });
+    let config = peer_service_config_from_reconciled_snapshot(
+        service_name,
+        &instance,
+        &bound_sockets,
+        &node_addr,
+        &initial_interface_ips,
+        &initial_interface_ips,
+    )?;
     // The config already enumerates only endpoint-backed interface families
     // and ports. mdns-sd's unconstrained auto-expansion could add an unbound
     // family, so it stays disabled for the peer specialization.
@@ -872,42 +1013,20 @@ pub fn advertise_peer(
     let refresh_session = Arc::clone(&engine_session);
     let service_name = service_name.to_string();
     let closed = ep.closed();
-    let refresh = move |cancel: futures::channel::oneshot::Receiver<()>| async move {
-        let cancel = cancel.fuse();
-        let closed = closed.fuse();
-        futures::pin_mut!(cancel, closed);
-        loop {
-            let updated = watcher.updated().fuse();
-            futures::pin_mut!(updated);
-            let node_addr = futures::select_biased! {
-                _ = cancel => return false,
-                _ = closed => return true,
-                node_addr = updated => match node_addr {
-                    Ok(node_addr) => node_addr,
-                    Err(_) => return true,
-                },
-            };
-            let config = match desktop_peer_service_config(
-                &service_name,
-                &instance,
-                &bound_sockets,
-                &node_addr,
-            ) {
-                Ok(config) => config,
-                Err(error) => {
-                    tracing::warn!(%error, "iroh-http-discovery: cannot refresh peer advertisement");
-                    continue;
-                }
-            };
-            if let Err(error) = dns_sd::update_advertisement(&refresh_session, &config).await {
-                tracing::warn!(%error, "iroh-http-discovery: peer advertisement refresh failed");
-                // A live handle must never silently represent stale TXT. Ending
-                // the worker runs its unregister finalizer; a caller can then
-                // explicitly start a fresh advertisement.
-                break;
-            }
-        }
-        true
+    let refresh = move |cancel: futures::channel::oneshot::Receiver<()>| {
+        run_peer_advertisement_refresh(
+            watcher,
+            node_addr,
+            closed,
+            cancel,
+            refresh_session,
+            service_name,
+            instance,
+            bound_sockets,
+            initial_interface_ips,
+            Duration::from_secs(5),
+            desktop_interface_ips,
+        )
     };
     let finish = Arc::clone(&engine_session);
     let worker = dns_sd::spawn_refresh_worker(refresh, move || {
@@ -940,6 +1059,73 @@ mod runtime_peer_tests {
     use iroh_http_core::SourceScopedAddressLookup;
 
     use super::*;
+
+    #[cfg(feature = "mdns")]
+    #[derive(Clone, Default)]
+    struct RecordingAdvertisement {
+        updates: Arc<Mutex<Vec<engine::AdvertisementUpdate>>>,
+        close_count: Arc<AtomicUsize>,
+    }
+
+    #[cfg(feature = "mdns")]
+    impl engine::AdvertisementHandle for RecordingAdvertisement {
+        fn update(
+            &self,
+            update: engine::AdvertisementUpdate,
+        ) -> engine::BoxFuture<'_, Result<(), engine::TransportError>> {
+            self.updates
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .push(update);
+            Box::pin(futures::future::ready(Ok(())))
+        }
+
+        fn request_close(&self) {
+            self.close_count.fetch_add(1, Ordering::AcqRel);
+        }
+
+        fn closed(&self) -> engine::BoxFuture<'_, Result<(), engine::TransportError>> {
+            Box::pin(futures::future::ready(Ok(())))
+        }
+    }
+
+    #[cfg(feature = "mdns")]
+    struct CloseAwareAdvertisement {
+        started: Mutex<Option<futures::channel::oneshot::Sender<()>>>,
+        closing: Arc<AtomicBool>,
+    }
+
+    #[cfg(feature = "mdns")]
+    impl engine::AdvertisementHandle for CloseAwareAdvertisement {
+        fn update(
+            &self,
+            _update: engine::AdvertisementUpdate,
+        ) -> engine::BoxFuture<'_, Result<(), engine::TransportError>> {
+            let started = self
+                .started
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .take();
+            let closing = Arc::clone(&self.closing);
+            Box::pin(async move {
+                if let Some(started) = started {
+                    let _ = started.send(());
+                }
+                while !closing.load(Ordering::Acquire) {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+                Err(engine::TransportError::new("advertisement is closed"))
+            })
+        }
+
+        fn request_close(&self) {
+            self.closing.store(true, Ordering::Release);
+        }
+
+        fn closed(&self) -> engine::BoxFuture<'_, Result<(), engine::TransportError>> {
+            Box::pin(futures::future::ready(Ok(())))
+        }
+    }
 
     struct ScriptedBrowse {
         events: Mutex<VecDeque<Result<Option<engine::RawEvent>, engine::TransportError>>>,
@@ -1029,6 +1215,187 @@ mod runtime_peer_tests {
 
         assert!(session.next_event().await.is_none());
         assert!(lookup.resolve(node_id).is_none());
+    }
+
+    #[cfg(feature = "mdns")]
+    #[tokio::test]
+    async fn interface_poll_retracts_a_stale_local_without_an_endpoint_update() {
+        use iroh::{EndpointAddr, TransportAddr};
+        use n0_watcher::Watchable;
+
+        let endpoint_id = SecretKey::from_bytes(&[43; 32]).public();
+        let endpoint_addr = EndpointAddr::from_parts(
+            endpoint_id,
+            [
+                TransportAddr::Ip("192.168.50.240:53371".parse().unwrap()),
+                TransportAddr::Ip("192.168.50.169:53371".parse().unwrap()),
+                TransportAddr::Ip("203.0.113.10:60097".parse().unwrap()),
+            ],
+        );
+        let bound = vec!["0.0.0.0:53371".parse().unwrap()];
+        let initial_interfaces = vec![
+            "192.168.50.169".parse().unwrap(),
+            "192.168.50.240".parse().unwrap(),
+        ];
+        let initial_config = peer_service_config_from_reconciled_snapshot(
+            "iroh-http",
+            "peer",
+            &bound,
+            &endpoint_addr,
+            &initial_interfaces,
+            &initial_interfaces,
+        )
+        .unwrap();
+        let initial_update = engine::AdvertisementUpdate {
+            port: initial_config.port,
+            addrs: initial_config.addrs,
+            txt: initial_config.txt,
+        };
+        let transport = RecordingAdvertisement::default();
+        let updates = Arc::clone(&transport.updates);
+        let session = Arc::new(engine::AdvertisementSession::with_initial(
+            transport,
+            initial_update,
+        ));
+        let watchable = Watchable::new(endpoint_addr.clone());
+        let watcher = watchable.watch();
+        let inventories = Arc::new(Mutex::new(VecDeque::from([
+            Err(DiscoveryError::Setup(
+                "temporary inventory failure".to_string(),
+            )),
+            Ok(initial_interfaces.clone()),
+            Ok(vec!["192.168.50.169".parse().unwrap()]),
+        ])));
+        let (cancel_tx, cancel_rx) = futures::channel::oneshot::channel();
+        let task = tokio::spawn(run_peer_advertisement_refresh(
+            watcher,
+            endpoint_addr,
+            futures::future::pending(),
+            cancel_rx,
+            session,
+            "iroh-http".to_string(),
+            "peer".to_string(),
+            bound,
+            initial_interfaces,
+            Duration::from_millis(5),
+            move || {
+                inventories
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .pop_front()
+                    .unwrap_or_else(|| Ok(vec!["192.168.50.169".parse().unwrap()]))
+            },
+        ));
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if !updates
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .is_empty()
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("interface-only refresh");
+        cancel_tx.send(()).unwrap();
+        assert!(!task.await.unwrap(), "cancellation is not terminal failure");
+
+        let updates = updates.lock().unwrap_or_else(|error| error.into_inner());
+        assert_eq!(
+            updates.len(),
+            1,
+            "inventory failure and unchanged ticks must not touch the transport"
+        );
+        let direct = updates[0]
+            .txt
+            .iter()
+            .find(|(key, _)| key == TXT_ADDRESS)
+            .expect("address TXT")
+            .1
+            .split(',')
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(direct.contains("192.168.50.169:53371"));
+        assert!(direct.contains("203.0.113.10:60097"));
+        assert!(!direct.contains("192.168.50.240:53371"));
+    }
+
+    #[cfg(feature = "mdns")]
+    #[tokio::test]
+    async fn endpoint_close_interrupts_an_in_flight_advertisement_refresh() {
+        use iroh::{EndpointAddr, TransportAddr};
+        use n0_watcher::Watchable;
+
+        let endpoint_addr = EndpointAddr::from_parts(
+            SecretKey::from_bytes(&[44; 32]).public(),
+            [
+                TransportAddr::Ip("192.168.50.240:53371".parse().unwrap()),
+                TransportAddr::Ip("192.168.50.169:53371".parse().unwrap()),
+            ],
+        );
+        let bound = vec!["0.0.0.0:53371".parse().unwrap()];
+        let initial_interfaces = vec![
+            "192.168.50.169".parse().unwrap(),
+            "192.168.50.240".parse().unwrap(),
+        ];
+        let initial_config = peer_service_config_from_reconciled_snapshot(
+            "iroh-http",
+            "peer",
+            &bound,
+            &endpoint_addr,
+            &initial_interfaces,
+            &initial_interfaces,
+        )
+        .unwrap();
+        let (started_tx, started_rx) = futures::channel::oneshot::channel();
+        let transport_closing = Arc::new(AtomicBool::new(false));
+        let session = Arc::new(engine::AdvertisementSession::with_initial(
+            CloseAwareAdvertisement {
+                started: Mutex::new(Some(started_tx)),
+                closing: Arc::clone(&transport_closing),
+            },
+            engine::AdvertisementUpdate {
+                port: initial_config.port,
+                addrs: initial_config.addrs,
+                txt: initial_config.txt,
+            },
+        ));
+        let watchable = Watchable::new(endpoint_addr.clone());
+        let watcher = watchable.watch();
+        let (closed_tx, closed_rx) = futures::channel::oneshot::channel();
+        let (cancel_tx, cancel_rx) = futures::channel::oneshot::channel();
+        let task = tokio::spawn(run_peer_advertisement_refresh(
+            watcher,
+            endpoint_addr,
+            async move {
+                let _ = closed_rx.await;
+            },
+            cancel_rx,
+            session,
+            "iroh-http".to_string(),
+            "peer".to_string(),
+            bound,
+            initial_interfaces,
+            Duration::from_millis(5),
+            || Ok(vec!["192.168.50.169".parse().unwrap()]),
+        ));
+
+        tokio::time::timeout(Duration::from_secs(1), started_rx)
+            .await
+            .expect("refresh started")
+            .expect("refresh worker alive");
+        closed_tx.send(()).unwrap();
+
+        assert!(tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("endpoint close interrupts refresh")
+            .unwrap());
+        assert!(transport_closing.load(Ordering::Acquire));
+        drop(cancel_tx);
+        drop(watchable);
     }
 }
 
@@ -2003,6 +2370,54 @@ mod tests {
             Some("10.8.0.24:59234,192.168.1.24:59234"),
             "mobile VPN and physical-LAN candidates must remain dialable even when iroh's endpoint snapshot omits them"
         );
+    }
+
+    #[test]
+    fn peer_service_config_retracts_a_disappeared_local_interface() {
+        use iroh::{EndpointAddr, SecretKey, TransportAddr};
+
+        let endpoint_id = SecretKey::from_bytes(&[25; 32]).public();
+        let bound = vec!["0.0.0.0:53371".parse().unwrap()];
+        let unchanged_endpoint_snapshot = EndpointAddr::from_parts(
+            endpoint_id,
+            [
+                TransportAddr::Ip("192.168.50.240:53371".parse().unwrap()),
+                TransportAddr::Ip("192.168.50.169:53371".parse().unwrap()),
+                TransportAddr::Ip("203.0.113.10:60097".parse().unwrap()),
+                TransportAddr::Relay("https://relay.example".parse().unwrap()),
+            ],
+        );
+        let current_interfaces = vec!["192.168.50.169".parse().unwrap()];
+        let known_local_interfaces = vec![
+            "192.168.50.169".parse().unwrap(),
+            "192.168.50.240".parse().unwrap(),
+        ];
+
+        let config = peer_service_config_from_reconciled_snapshot(
+            "iroh-http",
+            "peer",
+            &bound,
+            &unchanged_endpoint_snapshot,
+            &current_interfaces,
+            &known_local_interfaces,
+        )
+        .unwrap();
+        let direct = config
+            .txt
+            .iter()
+            .find(|(key, _)| key == TXT_ADDRESS)
+            .expect("address TXT")
+            .1
+            .split(',')
+            .collect::<std::collections::BTreeSet<_>>();
+
+        assert_eq!(config.addrs, current_interfaces);
+        assert!(direct.contains("192.168.50.169:53371"));
+        assert!(
+            direct.contains("203.0.113.10:60097"),
+            "a candidate never observed as local must remain available as a reflexive path"
+        );
+        assert!(!direct.contains("192.168.50.240:53371"));
     }
 
     #[test]
