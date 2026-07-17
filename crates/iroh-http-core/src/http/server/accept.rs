@@ -21,7 +21,7 @@ use tower::{limit::ConcurrencyLimitLayer, Service, ServiceBuilder, ServiceExt};
 
 use crate::{base32_encode, http::transport::io::IrohStream, Body, IrohEndpoint, ALPN};
 
-use super::lifecycle::{ConnectionTracker, RequestTracker};
+use super::lifecycle::{ConnectionTracker, DeliveryTracker, RequestTracker};
 use super::stack::{CompressionOptions, StackConfig};
 use super::{ConnectionEventFn, RemoteNodeId};
 
@@ -306,6 +306,15 @@ pub(super) async fn accept_loop<S>(
                     Some(Err(_)) => break,
                 };
 
+                // Register the transport-delivery waiter before handing the
+                // send stream to hyper. `serve_bistream` returning only means
+                // hyper queued the response bytes and FIN; it does not mean
+                // the peer acknowledged them. A graceful stop closes pooled
+                // QUIC connections after `in_flight` reaches zero, and iroh's
+                // immediate `Connection::close` may otherwise discard those
+                // queued bytes before the peer receives even the response
+                // head (deterministic under ASan).
+                let response_stopped = send.stopped();
                 let io = TokioIo::new(IrohStream::new(send, recv));
                 let svc = conn_stack.clone();
                 let req_counter = conn_requests.clone();
@@ -316,18 +325,32 @@ pub(super) async fn accept_loop<S>(
                 let drain_notify_req = drain_notify_conn.clone();
 
                 tokio::spawn(async move {
-                    // Owns the per-connection and crate-wide in-flight
-                    // counters; notifies drain waiters when in-flight
-                    // reaches zero. See `lifecycle.rs`.
-                    let _req_tracker =
-                        RequestTracker::new(req_counter, in_flight_req, drain_notify_req);
-                    super::pipeline::serve_bistream(
-                        io,
-                        svc,
-                        effective_header_limit,
-                        header_read_timeout,
-                    )
-                    .await;
+                    // Public request processing and the private transport-
+                    // delivery drain boundary have distinct lifetimes. Keep
+                    // endpoint stats scoped to Hyper processing, while the
+                    // delivery tracker below remains live through QUIC ACK.
+                    let _delivery_tracker = DeliveryTracker::new(in_flight_req, drain_notify_req);
+                    {
+                        let _request_tracker = RequestTracker::new(req_counter);
+                        super::pipeline::serve_bistream(
+                            io,
+                            svc,
+                            effective_header_limit,
+                            header_read_timeout,
+                        )
+                        .await;
+                    }
+
+                    // Keep the request in-flight until QUIC reports that the
+                    // peer either acknowledged the finished response stream or
+                    // explicitly stopped it. This gives graceful drain a real
+                    // transport-delivery boundary before it closes the pooled
+                    // connection. Connection failure/force-close also resolves
+                    // this future, while the serve loop's existing drain
+                    // timeout remains the upper bound during shutdown.
+                    if let Err(error) = response_stopped.await {
+                        tracing::debug!(%error, "iroh-http: response stream ended before delivery acknowledgement");
+                    }
                 });
             }
         });
