@@ -40,6 +40,24 @@ fn service_type(service_name: &str, protocol: Protocol) -> Result<String, Discov
 
 const DAEMON_COMMAND_RETRIES: usize = 100;
 
+// Leave the stable service identity withdrawn long enough for native browsers
+// to publish its removal before it is announced again. A shorter gap can be
+// coalesced into an in-place record change, which Android's NsdManager does not
+// surface to clients. This also comfortably includes mdns-sd's goodbye retry.
+const MDNS_REANNOUNCE_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
+const MDNS_CLOSE_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10);
+
+fn wait_for_reannounce_or_close(closing: &AtomicBool) {
+    let started = std::time::Instant::now();
+    while !closing.load(Ordering::Acquire) {
+        let remaining = MDNS_REANNOUNCE_DELAY.saturating_sub(started.elapsed());
+        if remaining.is_zero() {
+            break;
+        }
+        thread::sleep(remaining.min(MDNS_CLOSE_POLL_INTERVAL));
+    }
+}
+
 fn retry_daemon_command<T>(mut command: impl FnMut() -> mdns_sd::Result<T>) -> mdns_sd::Result<T> {
     let mut retries = DAEMON_COMMAND_RETRIES;
     loop {
@@ -73,6 +91,25 @@ fn stop_after_unregister<U, S>(
         Ok(_) | Err(mdns_sd::Error::DaemonShutdown) => stopped,
         Err(error) => Err(error),
     }
+}
+
+fn replace_advertisement_transaction<U, W, R>(
+    closing: &AtomicBool,
+    unregister: U,
+    wait_for_goodbye: W,
+    register: R,
+) -> Result<(), TransportError>
+where
+    U: FnOnce() -> Result<(), TransportError>,
+    W: FnOnce(),
+    R: FnOnce() -> Result<(), TransportError>,
+{
+    unregister()?;
+    wait_for_goodbye();
+    if closing.load(Ordering::Acquire) {
+        return Err(TransportError::new("advertisement is closed"));
+    }
+    register()
 }
 
 // ── Service-type helpers ─────────────────────────────────────────────────────
@@ -261,14 +298,6 @@ impl AdvertisementHandle for MdnsAdvertisement {
             if self.shared.closing.load(Ordering::Acquire) {
                 return Err(TransportError::new("advertisement is closed"));
             }
-            let _operation = self
-                .shared
-                .operation
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
-            if self.shared.closing.load(Ordering::Acquire) {
-                return Err(TransportError::new("advertisement is closed"));
-            }
             let next = ServiceConfig {
                 port: update.port,
                 addrs: update.addrs,
@@ -282,11 +311,39 @@ impl AdvertisementHandle for MdnsAdvertisement {
                     "cannot change an active DNS-SD advertisement identity",
                 ));
             }
-            self.shared
-                .daemon
-                .register(info)
-                .map_err(|error| TransportError::new(error.to_string()))?;
-            Ok(())
+            let shared = Arc::clone(&self.shared);
+            tokio::task::spawn_blocking(move || {
+                let _operation = shared
+                    .operation
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                if shared.closing.load(Ordering::Acquire) {
+                    return Err(TransportError::new("advertisement is closed"));
+                }
+                // Android's NsdManager does not report mutable TXT/SRV data
+                // for a service it already considers found. Emit a real
+                // goodbye before the replacement announcement, matching the
+                // native adapters' unregister/register update semantics.
+                replace_advertisement_transaction(
+                    &shared.closing,
+                    || {
+                        let unregistered =
+                            retry_daemon_command(|| shared.daemon.unregister(&shared.fullname))
+                                .map_err(|error| TransportError::new(error.to_string()))?;
+                        unregistered
+                            .recv_timeout(std::time::Duration::from_secs(1))
+                            .map(|_| ())
+                            .map_err(|error| TransportError::new(error.to_string()))
+                    },
+                    || wait_for_reannounce_or_close(&shared.closing),
+                    || {
+                        retry_daemon_command(|| shared.daemon.register(info.clone()))
+                            .map_err(|error| TransportError::new(error.to_string()))
+                    },
+                )
+            })
+            .await
+            .map_err(|error| TransportError::new(error.to_string()))?
         })
     }
 
@@ -329,7 +386,8 @@ impl AdvertisementHandle for MdnsAdvertisement {
 ///
 /// Drop to stop advertising; this unregisters the DNS-SD service and shuts the
 /// session's mDNS daemon down. A peer-specialized session can also own a refresh
-/// worker; drop cancels and joins that worker before unregistering.
+/// worker; drop first marks the transport closed, then cancels and joins that
+/// worker before completing the serialized unregister cleanup.
 pub struct AdvertiseSession {
     session: Arc<EngineAdvertisementSession>,
     cleanup: Arc<MdnsAdvertisementShared>,
@@ -410,12 +468,22 @@ impl AdvertiseSession {
     }
 }
 
+fn close_before_joining_refresh(
+    session: &EngineAdvertisementSession,
+    refresh_worker: &mut Option<RefreshWorker>,
+) {
+    // Mark the transport closed before joining an in-flight refresh. If that
+    // refresh is between goodbye and replacement, it must not re-register the
+    // service while shutdown is waiting for it.
+    session.close();
+    if let Some(mut worker) = refresh_worker.take() {
+        worker.cancel();
+    }
+}
+
 impl Drop for AdvertiseSession {
     fn drop(&mut self) {
-        if let Some(mut worker) = self.refresh_worker.take() {
-            worker.cancel();
-        }
-        self.session.close();
+        close_before_joining_refresh(&self.session, &mut self.refresh_worker);
         self.cleanup.wait_closed_blocking();
     }
 }
@@ -775,6 +843,103 @@ mod tests {
             info.get_property_val_str("address"),
             Some("192.168.1.3:4433,[fd00::3]:4433")
         );
+    }
+
+    #[test]
+    fn advertisement_replacement_orders_goodbye_before_register() {
+        let closing = AtomicBool::new(false);
+        let operations = std::cell::RefCell::new(Vec::new());
+
+        replace_advertisement_transaction(
+            &closing,
+            || {
+                operations.borrow_mut().push("unregister");
+                Ok(())
+            },
+            || operations.borrow_mut().push("goodbye-settled"),
+            || {
+                operations.borrow_mut().push("register");
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            operations.into_inner(),
+            ["unregister", "goodbye-settled", "register"]
+        );
+    }
+
+    #[test]
+    fn closing_during_goodbye_suppresses_replacement_registration() {
+        let closing = AtomicBool::new(false);
+        let registered = AtomicBool::new(false);
+
+        let result = replace_advertisement_transaction(
+            &closing,
+            || Ok(()),
+            || closing.store(true, Ordering::Release),
+            || {
+                registered.store(true, Ordering::Release);
+                Ok(())
+            },
+        );
+
+        assert!(result.is_err());
+        assert!(!registered.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn advertise_session_closes_transport_before_joining_refresh() {
+        use std::sync::mpsc;
+
+        struct CloseFlag(Arc<AtomicBool>);
+
+        impl AdvertisementHandle for CloseFlag {
+            fn update(
+                &self,
+                _update: AdvertisementUpdate,
+            ) -> BoxFuture<'_, Result<(), TransportError>> {
+                Box::pin(futures::future::ready(Ok(())))
+            }
+
+            fn request_close(&self) {
+                self.0.store(true, Ordering::Release);
+            }
+
+            fn closed(&self) -> BoxFuture<'_, Result<(), TransportError>> {
+                Box::pin(futures::future::ready(Ok(())))
+            }
+        }
+
+        let transport_closed = Arc::new(AtomicBool::new(false));
+        let session = EngineAdvertisementSession::with_initial(
+            CloseFlag(Arc::clone(&transport_closed)),
+            AdvertisementUpdate {
+                port: 4433,
+                addrs: Vec::new(),
+                txt: Vec::new(),
+            },
+        );
+        let (observed_tx, observed_rx) = mpsc::channel();
+        let observed_closed = Arc::clone(&transport_closed);
+        let worker = spawn_refresh_worker(
+            move |cancel| async move {
+                let _ = cancel.await;
+                observed_tx
+                    .send(observed_closed.load(Ordering::Acquire))
+                    .unwrap();
+                false
+            },
+            || panic!("caller cancellation must not run terminal cleanup"),
+        )
+        .unwrap();
+        let mut worker = Some(worker);
+
+        close_before_joining_refresh(&session, &mut worker);
+
+        assert!(observed_rx.recv().unwrap());
+        assert!(worker.is_none());
     }
 
     #[test]
