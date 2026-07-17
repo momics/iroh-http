@@ -3,16 +3,7 @@
 # Tauri are flagged as unmaintained but are not directly upgradeable by us.
 unmaintained = "none"
 yanked = "deny"
-ignore = [
-    # quick-xml via plist -> netdev -> netwatch -> iroh.
-    # No patched plist release exists yet; remove once plist can use quick-xml >= 0.41.
-    # Tracking: #297
-    "RUSTSEC-2026-0194",
-    # quick-xml via plist -> netdev -> netwatch -> iroh.
-    # No patched plist release exists yet; remove once plist can use quick-xml >= 0.41.
-    # Tracking: #297
-    "RUSTSEC-2026-0195",
-]
+ignore = []
 
 [bans]
 # Warn on duplicate versions to keep the dependency tree auditable.

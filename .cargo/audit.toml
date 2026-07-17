@@ -17,12 +17,4 @@ ignore = [
     # Remove once iroh bumps hickory. Tracking: #197
     # https://rustsec.org/advisories/RUSTSEC-2026-0119
     "RUSTSEC-2026-0119",
-    # quick-xml duplicate-attribute O(n²) — fixed in 0.41.0; blocked on plist.
-    # Remove once plist can use quick-xml >= 0.41.0. Tracking: #297
-    # https://rustsec.org/advisories/RUSTSEC-2026-0194
-    "RUSTSEC-2026-0194",
-    # quick-xml namespace allocation DoS — fixed in 0.41.0; blocked on plist.
-    # Remove once plist can use quick-xml >= 0.41.0. Tracking: #297
-    # https://rustsec.org/advisories/RUSTSEC-2026-0195
-    "RUSTSEC-2026-0195",
 ]
