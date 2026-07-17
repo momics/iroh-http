@@ -127,6 +127,44 @@ A `skip` here means the runtime is not mDNS-capable (never expected on device).
 
 ---
 
+## Issue #366 — advertise an already-bound iOS service port
+
+Testing mode also acts as the release gate for #366. After `node.serve()` is
+running, the app reads the endpoint's bound QUIC port and advertises that exact
+UDP port through generic DNS-SD. This must register metadata for the existing
+service; the iOS adapter must not open a second listener or take ownership of
+the application's socket.
+
+**Steps**
+
+1. Enable testing mode on iOS. The status must say **Serving + advertising
+   already-bound UDP port `<port>`**, where `<port>` is greater than 1.
+2. Enable testing mode on Android or desktop and wait for the iOS peer to
+   appear.
+3. Select the iOS peer and run the complete suite.
+
+**Pass signatures** (grep `IROH_DNSSD_CHECK check=bound-port`)
+
+- iOS attempts registration with a real, already-bound port:
+  `role=advertise port=<port> alreadyBound=true outcome=attempt`.
+- The browser observes the same service as active and dialable:
+  `role=browse ... port=<same-port> addrs=<n> alreadyBound=true isActive=true`,
+  where `<n>` is greater than zero.
+- No `role=advertise ... outcome=fail` line appears.
+- The suite reports `fail = 0`, and `direct-dial-fetch` passes with
+  `transport=direct`.
+
+**Fail signatures**
+
+- The app reports placeholder port 1: the endpoint did not expose a direct
+  candidate, so #366 was not exercised.
+- Advertising emits `outcome=fail`: iOS still failed to register the
+  caller-owned, already-bound service port.
+- Discovery succeeds but the direct-dial case skips or fails: capture the
+  complete suite JSON and both devices' `bound-port` lines.
+
+---
+
 ## Criterion 5 — generic advertise / browse; iOS metadata-only
 
 Uses the **Discovery** tab's **Generic DNS-SD** advertise/browse (the generic
