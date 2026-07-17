@@ -48,9 +48,9 @@ const MDNS_REANNOUNCE_DELAY: std::time::Duration = std::time::Duration::from_sec
 const MDNS_CLOSE_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10);
 
 fn wait_for_reannounce_or_close(closing: &AtomicBool) {
-    let deadline = std::time::Instant::now() + MDNS_REANNOUNCE_DELAY;
+    let started = std::time::Instant::now();
     while !closing.load(Ordering::Acquire) {
-        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        let remaining = MDNS_REANNOUNCE_DELAY.saturating_sub(started.elapsed());
         if remaining.is_zero() {
             break;
         }
