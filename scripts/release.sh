@@ -16,7 +16,10 @@ set -euo pipefail
 #   5. Prepend the release section to CHANGELOG.md via git-cliff
 #   6. Show diff and ask to confirm
 #   7. Commit and tag vX.Y.Z (version bump + changelog in one commit)
-#   8. Ask whether to push (pushing triggers GitHub Actions build + publish)
+#   8. Ask whether to push (pushing triggers Build + Extended tests)
+#
+# Registry publication is a separate, deliberate promotion after both tag
+# workflows pass. See CONTRIBUTING.md for the release checklist.
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
@@ -29,6 +32,21 @@ fail()    { echo -e "  ${RED}✗${NC}  $1"; }
 warn()    { echo -e "  ${YELLOW}!${NC}  $1"; }
 section() { echo -e "\n${BOLD}${BLUE}── $1 ──${NC}"; }
 ask()     { printf "\n  ${YELLOW}?${NC}  $1"; }
+
+# A release commit must start from the exact remote main tip. Checking before
+# any version files are touched prevents a release from being cut on a feature
+# branch or from silently excluding commits that have already landed remotely.
+if [[ "$(git branch --show-current)" != "main" ]]; then
+  fail "Releases must be cut from the main branch"
+  exit 1
+fi
+
+git fetch --quiet origin main --tags
+if [[ "$(git rev-parse HEAD)" != "$(git rev-parse origin/main)" ]]; then
+  fail "Local main is not at the exact origin/main tip"
+  echo "     Update main before cutting the release."
+  exit 1
+fi
 
 VERSION=""
 SKIP_CI=false
@@ -68,6 +86,11 @@ fi
 TAG="v$VERSION"
 echo "  Target:          ${BOLD}$TAG${NC}"
 
+if git rev-parse --verify --quiet "refs/tags/$TAG" >/dev/null; then
+  fail "Tag $TAG already exists"
+  exit 1
+fi
+
 # Fail fast on missing tools before the long CI run, so a release can't get
 # halfway (bumped + CI-passed) only to stall on a missing changelog generator.
 if ! command -v git-cliff >/dev/null 2>&1; then
@@ -80,7 +103,7 @@ fi
 
 section "Unreleased commits"
 
-LAST_TAG=$(git tag --sort=-version:refname | head -1)
+LAST_TAG=$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-version:refname | head -1)
 if [[ -n "$LAST_TAG" ]]; then
   COMMITS=$(git log "$LAST_TAG"..HEAD --oneline)
   COUNT=$(echo "$COMMITS" | wc -l | tr -d ' ')
@@ -138,6 +161,7 @@ fi
 
 section "Version bump → $VERSION"
 bash "$ROOT/scripts/version.sh" "$VERSION"
+bash "$ROOT/scripts/check-release-version.sh" "$TAG"
 
 # ── 5. Changelog ──────────────────────────────────────────────────────────────
 # Prepend the new release section to CHANGELOG.md. --unreleased scopes it to
@@ -184,16 +208,21 @@ ask "Push main + $TAG to origin now? [y/N] "
 read -r PUSH
 
 if [[ "$PUSH" =~ ^[Yy]$ ]]; then
-  git push origin main --tags
+  # Push only the release commit and its one tag. --atomic prevents a remote
+  # state where one ref advances but the other fails, and avoids leaking any
+  # unrelated local tags.
+  git push --atomic origin "HEAD:refs/heads/main" "refs/tags/$TAG"
   ok "Pushed"
   echo ""
-  echo -e "  ${GREEN}${BOLD}✓ Release $TAG is underway${NC}"
-  echo "  GitHub Actions will build all targets and publish."
+  echo -e "  ${GREEN}${BOLD}✓ Release candidate $TAG is underway${NC}"
+  echo "  GitHub Actions will build all targets and run extended tests."
+  echo "  When both pass, manually run Publish for $TAG, verify the"
+  echo "  registries, then publish the draft GitHub release."
   echo "  https://github.com/Momics/iroh-http/actions"
 else
   echo ""
   echo "  When ready:"
-  echo "    git push origin main --tags"
+  echo "    git push --atomic origin HEAD:refs/heads/main refs/tags/$TAG"
 fi
 
 echo ""

@@ -1,7 +1,7 @@
 name: Build
 
 # Triggered on version tags. Responsibilities:
-#   1. Create the GitHub release with generated notes.
+#   1. Create a draft GitHub release with generated notes.
 #   2. Build all native binaries (Node + Deno) across 5 platforms.
 #
 # Publishing is handled separately by publish.yml, which is promoted manually
@@ -28,6 +28,15 @@ jobs:
         with:
           fetch-depth: 0
 
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+
+      - name: Verify tag matches every package version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: bash scripts/check-release-version.sh "$TAG"
+
       - uses: taiki-e/install-action@v2
         with:
           tool: git-cliff
@@ -38,6 +47,10 @@ jobs:
       - uses: softprops/action-gh-release@v3
         with:
           body_path: RELEASE_NOTES.md
+          # A tag starts Build and Extended tests concurrently. Keep the
+          # release private until both workflows pass, the exact artifacts are
+          # promoted to the registries, and a maintainer publishes the draft.
+          draft: true
 
   # ── 2. Build Node native binaries (5 targets) ─────────────────────────────────
 
