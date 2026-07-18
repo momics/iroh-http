@@ -610,6 +610,16 @@ describe("serve restart cycles", () => {
     await handle.finished;
   });
 
+  it("does not lose a stop requested before serve registration completes", async () => {
+    mockIPC(makeServeLifecycleIPC());
+
+    const { createNode } = await import("../index.ts");
+    const node = await createNode({ disableNetworking: true });
+    const handle = node.serve(() => new Response("ok"));
+
+    expect(await resolvesWithin(handle.close(), 100)).toBe(true);
+  });
+
   it("allows serve() → stop → serve() → stop → serve() on the same node", async () => {
     mockIPC(makeServeLifecycleIPC());
 

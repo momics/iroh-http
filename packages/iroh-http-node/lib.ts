@@ -478,8 +478,13 @@ class NodeAdapter extends IrohAdapter {
   override async nextPathChange(
     endpointHandle: number,
     nodeId: string,
+    subscriptionId: number,
   ): Promise<PathInfo | null> {
-    const json = await napiNextPathChange(endpointHandle, nodeId);
+    const json = await napiNextPathChange(
+      endpointHandle,
+      nodeId,
+      subscriptionId,
+    );
     if (json === null || json === undefined) return null;
     return JSON.parse(json) as PathInfo;
   }
@@ -487,8 +492,9 @@ class NodeAdapter extends IrohAdapter {
   override unsubscribePathChanges(
     endpointHandle: number,
     nodeId: string,
+    subscriptionId: number,
   ): Promise<void> {
-    napiUnsubscribePathChanges(endpointHandle, nodeId);
+    napiUnsubscribePathChanges(endpointHandle, nodeId, subscriptionId);
     return Promise.resolve();
   }
 }
