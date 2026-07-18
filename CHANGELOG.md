@@ -1,4 +1,4 @@
-## [0.6.0] - 2026-07-07
+## [0.6.0] - 2026-07-18
 
 ### 🚀 Features
 
@@ -12,6 +12,22 @@
 - *(adapter)* Unify serve/endpoint numeric caps across adapters
 - *(adapter)* Unify compressionLevel validation + fix drainTimeout doc
 - *(tauri)* Mobile AddressLookup bridge for iroh peer auto-dial (#310)
+- *(discovery)* Replace swarm-discovery with standard DNS-SD (mdns-sd)
+- *(discovery)* Add generic dnsSd advertise/browse surface
+- *(discovery)* Add dnsSd examples, re-exports, and interop docs
+- *(tauri)* Implement generic DNS-SD on mobile
+- *(discovery)* Exclude self from browsePeers()
+- *(example)* Add live discovered-peer list with copy button
+- *(test)* Add cross-device interop Test tab (#340)
+- *(core)* Split transport liveness from handle existence for #336
+- *(tauri)* Clear stale mobile discovery on endpoint recovery (#336)
+- *(core)* Add dialable_direct_address to IrohEndpoint
+- *(adapters)* Expose discoveryInfo across shared, node, deno, tauri
+- *(tauri)* Re-export TXT_KEY_ADDRESS and isDialableSocketAddr from guest-js
+- *(examples/tauri)* Direct-dial testing mode, peer registry/picker, suite-runner UI
+- *(discovery)* Advertise all routable direct addresses
+- *(interop)* Add iroh-http result collector + harness submit
+- *(interop)* Prefill collector id from VITE_IROH_COLLECTOR_ID
 
 ### 🐛 Bug Fixes
 
@@ -39,12 +55,87 @@
 - *(tauri)* Add path-change subscription parity (#314)
 - *(tauri)* Mobile mDNS browse falls back to instance name for node-id (#318)
 - *(ci)* Build iroh-http-shared before tauri guest tests in check.sh (#321)
+- *(tauri)* Make the plugin build for iOS/Android (#328)
+- *(deno)* Emit browse event "type" field so discovered peers aren't mislabeled
+- *(examples)* Declare _demo-printer._tcp Bonjour service for tauri dnssd demo
+- *(examples)* Grant iroh-http:dns-sd capability in tauri example
+- *(discovery)* Fix CI-blocking fmt and real DNS-SD peer bugs
+- *(discovery)* Harden instance-label parsing, document iOS ServiceRecord gap
+- *(example)* Make tauri example typecheck cleanly
+- *(release)* Auto-revert CI artifact churn before version bump
+- *(tauri)* Make Android Kotlin plugin compile
+- *(tauri)* Make Android peers reachable and buildable
+- *(shared)* Deliver serve response body when res.body is falsy (#338)
+- *(tauri)* Add iOS get_dns_servers to restore Swift/Kotlin FFI parity
+- *(tauri)* Invalidate stale pooled conns and replace stale endpoints
+- *(tauri-example)* Whitelist _iroh-http-test._udp for iOS Bonjour
+- *(tauri)* Base64 body chunks when the WebView rejects raw binary (#338)
+- *(core)* Propagate bound QUIC port into advertised direct addresses (#346)
+- *(discovery)* Drop bare port-less discovered addrs; robust iOS advertise (#346)
+- *(tauri)* Advertise the real bound QUIC port, not the iOS placeholder (#346)
+- *(core)* Close stale connections when serve loop is replaced
+- *(test)* Honor skip-annotated compliance cases in mobile Test tab (#334, #340)
+- *(tauri)* Chain wait_serve_stop after serve so restarts survive many cycles
+- *(core)* Close active connections on graceful serve stop (drain-then-close)
+- *(core)* Use saturating_add for DNS nameserver counter
+- *(shared)* Preserve relay URLs in asIrohPeer (#350)
+- *(discovery)* Advertise a dialable ip:port from the desktop advertiser (#350)
+- *(tauri)* Harden Android DNS-SD browse for desktop dialing and rebinds (#350)
+- *(tauri)* Serialize iOS browse/advertise id allocation (#350)
+- *(core)* Transparently retry a fetch when a reused pooled connection was closed
+- *(core)* Close teardown concurrency races in serve lifecycle
+- *(core)* Gate retry on idempotency and scope pool eviction to the failed connection
+- *(shared)* Reject non-decimal ports in isDialableSocketAddr
+- *(discovery)* Skip link-local addresses in address selectors
+- *(tauri)* Re-emit peer-browse rebinds under the same node id
+- *(tauri)* Close browse/advertise sessions on terminal failure
+- *(core)* Close residual drain-truncation + drain-wakeup races, harden pool eviction
+- *(examples)* Restore clean Tauri example build and gate it in CI (#350)
+- *(addr)* Treat port 1 as a placeholder and pair addresses within one IP family (#350)
+- *(android)* Guard DNS-server lookup on API 21–22 (#350)
+- *(android)* Use SRV fallback only without address TXT; make DNS-SD signatures injective (#350)
+- *(shared)* Validate literal IPv4/IPv6 in isDialableSocketAddr (#350)
+- *(tauri)* Abort lifecycle operations on stop and emit orphan/error signals once (#350)
+- *(tauri)* Honor reconnect `auto: false` and expose an honest recovery callback
+- *(core)* Scope timeout eviction without mutating the first request
+- *(core)* Make pool compare-and-evict atomic
+- *(core)* Disable HTTP/1 keep-alive to enforce one exchange per bidirectional stream
+- *(core)* Scope serve-stop signals to a restart generation
+- *(harness)* Make interop assertions reflect actual transport outcomes
+- *(harness)* Advertise testing mode only after serve succeeds
+- *(core)* [**breaking**] Make `DiscoveryOptions` non-exhaustive; reject all-invalid DNS nameservers
+- *(harness)* Distinguish empty peer-picker states
+- *(harness)* Target batch runs only at active testing-mode peers
+- *(harness)* Guard testing-mode serving and show an honest exposure warning
+- *(tauri)* Retire orphaned DNS-SD sessions after endpoint replacement
+- *(harness)* Drop testing-mode peer allowlist and stop instance-rename eviction
+- *(core)* Strip IPv6 zone suffix from DNS nameservers
+- *(tauri)* Close lifecycle ownership races (#363)
+- *(core)* Preserve transport request ownership (#362)
+- *(discovery)* Preserve scoped address policy (#364)
+- *(discovery)* Own native session state (#365, #366)
+- *(discovery)* Preserve in-flight native operations
+- *(discovery)* Close abandoned failed updates
+- *(shared)* Preserve inbound request headers
+- *(discovery)* Replace stale address snapshots
+- *(transport)* Preserve discovered relay hints
+- *(android)* Recover stalled dns-sd resolution
+- *(core)* Await response delivery before graceful close
+- *(discovery)* Refresh peer records after interface changes
+- *(ci)* Satisfy strict arithmetic lint
+- *(node)* Close an endpoint safely while serve registration is still in flight (#374)
+- *(tauri)* Replay early serve-stop requests after registration completes (#375)
+- *(core,adapters)* Give path-change subscriptions token-scoped ownership and safe resubscription (#375)
+- *(deno)* Order serve registration, fetch, stop, and endpoint close without leaking operations (#376)
 
 ### 💼 Other
 
 - *(node)* Regenerate napi loader from pinned CLI baseline
 - *(deps)* Bump crossbeam-epoch to 0.9.20 (RUSTSEC-2026-0204)
 - *(release)* Generate CHANGELOG.md during release via git-cliff
+- *(example)* Bump example tauri crate to 2.11.5 to match @tauri-apps/api
+- Bump yanked spin 0.9.8/0.10.0 to 0.9.9/0.10.1
+- *(discovery)* Make engine-only mode dependency-free
 
 ### 🚜 Refactor
 
@@ -54,7 +145,7 @@
 - *(shared)* [**breaking**] Expose secretKey only when a key is supplied
 - *(core)* [**breaking**] Remove Endpoint::secret_key_bytes raw-key accessor
 - *(core)* Extract error/crypto/encoding/addr types out of lib.rs (#198)
-- *(core)* Remove inert maxServeErrors option (#278)
+- *(core)* [**breaking**] Remove the inert `maxServeErrors` option (#278)
 - *(adapter)* Consolidate fetch/serve coercion behind coerce_* seam (#289)
 - *(shared)* Unify JS option normalisers into iroh-http-shared (#312)
 - *(deno)* Consolidate FFI chunk-read grow/retry into one readChunk (#313)
@@ -63,6 +154,24 @@
 - *(node)* Route request delivery through RequestTransport (#315)
 - *(deno)* Route request delivery through RequestTransport (#315)
 - *(tauri)* Inherit iroh via workspace dependency (#310)
+- *(discovery)* [**breaking**] Flatten DNS-SD API onto node.advertise/browse
+- *(discovery)* Replace internal DnsSd class with stateless functions
+- *(tauri)* [**breaking**] Unify mdns + dns-sd permissions into iroh-http:discovery
+- *(discovery)* Rename core seam to advertise_peer/browse_peers
+- *(discovery)* [**breaking**] Name FFI/commands/permissions by peer-vs-generic axis
+- *(discovery)* [**breaking**] Rename mobile native methods to peer-vs-generic axis
+- *(example)* Align Tauri discovery UI names with peer-vs-generic axis
+- *(discovery)* Add platform-neutral engine seam
+- *(discovery)* Make engine types canonical
+- *(discovery)* Add non-cancelling runtime sessions
+- *(discovery)* Route desktop browse through engine
+- *(discovery)* Canonicalize advertisement updates
+- *(discovery)* Route desktop advertise through engine
+- *(discovery)* Share canonical engine with mobile
+- *(discovery)* Route mobile browse through engine
+- *(discovery)* Route mobile advertise through engine
+- *(discovery)* Consolidate mobile DNS-SD engine
+- *(core)* Isolate scoped DNS compatibility shim
 
 ### 📚 Documentation
 
@@ -72,7 +181,16 @@
 - Use real request-body limit option names
 - Fix contradictory maxConcurrency default (64 → 1024)
 - *(adr)* Accept ADR-009 and document RequestTransport seam (#315)
-- *(adr)* Accept ADR-016 — mDNS discovery is iroh-only, not general DNS-SD (#310)
+- *(adr)* Record the initial mDNS scope decision, superseded by the generic DNS-SD architecture
+- *(discovery)* Add mobile mDNS/DNS-SD setup guide
+- *(discovery)* Record DNS-SD harmonization and mobile parity
+- *(discovery)* Align ADRs and mobile comments with peer-vs-generic names
+- Clarify mobile discovery CI coverage vs on-device
+- Rewrite the DNS-SD runbook for the Suite-runner UI and result schema
+- *(shared)* Document discoveryInfo + make adapter exports symmetric
+- Record PR 350 remediation audit
+- *(discovery)* Define consolidation behavior contract
+- *(discovery)* Define non-cancelling adapter contract
 
 ### ⚡ Performance
 
@@ -83,6 +201,15 @@
 ### 🎨 Styling
 
 - Apply deno fmt to tauri README and example main.ts
+- *(discovery)* Apply rustfmt to new DNS-SD sources
+- *(example)* Deno fmt tauri example main.ts
+- Apply deno fmt to interop harness and tauri guest-js
+- Apply cargo fmt to serve_restart and lifecycle_recovery tests
+- Normalize rustfmt on merged client and serve_restart tests
+- *(core)* Apply rustfmt to client/serve_restart/lifecycle_recovery
+- Deno fmt harness + discoveryInfo adapter imports
+- *(tauri)* Apply deno fmt to discovery.test.ts import
+- *(example)* Format interop imports
 
 ### 🧪 Testing
 
@@ -92,6 +219,24 @@
 - *(deno)* Type withTimeout handle as ReturnType<typeof setTimeout>
 - *(core)* Add regression for path-watcher leak/over-count (#298)
 - *(deno)* Add regression for undeliverable response body hang (#315)
+- *(tauri)* Add FFI string-parity contract test for mobile discovery
+- *(tauri)* Add on-device DNS-SD verification runbook and Test-tab checks
+- *(tauri)* Add regression for Android serve empty body (#338)
+- *(core)* Recreate-same-key reachability through stale pool (#336)
+- *(tauri)* Reconnect policy restarts serve cleanly on health failure (#336)
+- *(tauri)* Add regression for Android body encoding over IPC (#338)
+- *(core)* Add regression for port-less iOS direct address (#346)
+- *(shared)* Add regression for bare port-less discovered address (#346)
+- *(tauri)* Add regression for iOS placeholder advertise port (#346)
+- *(shared)* Add regression for asIrohPeer dropping relay URLs (#350)
+- *(interop)* Add structured reusable interop suite + headless node runner
+- *(harness)* Wire the interop suite into CI and add a headless Deno runner
+- *(ios)* Characterize DNS-SD lifecycle
+- *(interop)* Isolate release transport gates
+- *(shared)* Make timer type portable
+- *(interop)* Isolate direct transport probes
+- *(core)* Make scoped DNS proxy portable on Windows
+- *(tauri)* Gate iOS DNS-SD bound-port advertising
 
 ### ⚙️ Miscellaneous Tasks
 
@@ -102,6 +247,19 @@
 - Exclude bench crates from version-bump policy
 - *(node)* Restore napi loader boilerplate from main
 - Add non-blocking cargo-llvm-cov coverage job (#206)
+- Decouple publish from build (manual tag-promoted release) (#331)
+- Harden tag-to-Build-run resolution in publish (#331)
+- *(examples)* Pin deno example to 0.6.0 and refresh lockfiles
+- *(discovery)* Prune stale deny.toml skips, cargo fmt tauri, add generic surface tests
+- *(tauri)* Gitignore android .gradle build dir
+- *(release)* Gate ci-churn regression test in CI
+- *(tauri)* Compile mobile plugin native sources on PRs
+- *(example)* Tracing to logcat and keyboard-aware viewport
+- *(base)* Merge Android reachability/build + logcat tracing enablement (#338, #340)
+- *(tauri)* Rustfmt mobile-gated advertise code (#350)
+- *(example)* Refresh mobile lockfile
+- *(security)* Remove resolved quick-xml advisory ignores
+- *(release)* Harden tag promotion workflow
 ## [0.5.2] - 2026-06-26
 
 ### 🚀 Features
