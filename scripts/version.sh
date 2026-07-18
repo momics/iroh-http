@@ -55,6 +55,7 @@ echo "  ✓ Cargo.toml (workspace.package)"
 # (not just $OLD) to catch deps that drifted in prior releases.
 for cargo_file in \
   crates/iroh-http-adapter/Cargo.toml \
+  crates/iroh-http-discovery/Cargo.toml \
   packages/iroh-http-deno/Cargo.toml \
   packages/iroh-http-node/Cargo.toml; do
   filepath="$ROOT/$cargo_file"
@@ -216,6 +217,7 @@ done
 # Every path dep must carry a version = "$NEW"
 for cargo_file in \
   "$ROOT/crates/iroh-http-adapter/Cargo.toml" \
+  "$ROOT/crates/iroh-http-discovery/Cargo.toml" \
   "$ROOT/packages/iroh-http-deno/Cargo.toml" \
   "$ROOT/packages/iroh-http-node/Cargo.toml" \
   "$ROOT/packages/iroh-http-tauri/Cargo.toml"; do

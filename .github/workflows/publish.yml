@@ -42,6 +42,7 @@ jobs:
     name: Resolve publish ref
     runs-on: ubuntu-latest
     outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
       sha: ${{ steps.resolve.outputs.sha }}
       build_run_id: ${{ steps.resolve.outputs.build_run_id }}
     steps:
@@ -49,9 +50,17 @@ jobs:
         id: resolve
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
         run: |
           set -euo pipefail
-          TAG="${{ inputs.tag }}"
+          if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::'$TAG' is not a valid release tag"
+            exit 1
+          fi
+
+          # The commits endpoint also accepts branches and raw SHAs. Prove the
+          # requested name exists specifically under refs/tags before using it.
+          gh api "repos/${{ github.repository }}/git/ref/tags/$TAG" --silent
           echo "Resolving commit SHA for tag $TAG"
           # Dereference the tag to its underlying COMMIT sha. The commits endpoint
           # resolves a ref (lightweight OR annotated tag) straight to the commit,
@@ -73,13 +82,18 @@ jobs:
           BUILD_RUN_ID=$(gh api \
             "repos/${{ github.repository }}/actions/workflows/build.yml/runs?head_sha=$SHA&event=push&per_page=100" \
             --jq "[.workflow_runs[]
-                   | select(.head_sha == \"$SHA\" and .status == \"completed\" and .conclusion == \"success\")]
+                   | select(.head_sha == \"$SHA\"
+                            and .head_branch == \"$TAG\"
+                            and .event == \"push\"
+                            and .status == \"completed\"
+                            and .conclusion == \"success\")]
                    | first | .id")
           if [ -z "$BUILD_RUN_ID" ] || [ "$BUILD_RUN_ID" = "null" ]; then
             echo "::error::No successful tag-push Build run found for tag $TAG ($SHA) — refusing to publish"
             exit 1
           fi
           echo "Publishing artifacts from Build run $BUILD_RUN_ID (commit $SHA)"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "sha=$SHA" >> "$GITHUB_OUTPUT"
           echo "build_run_id=$BUILD_RUN_ID" >> "$GITHUB_OUTPUT"
 
@@ -96,17 +110,32 @@ jobs:
         with:
           ref: ${{ needs.resolve-ref.outputs.sha }}
 
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+
+      - name: Verify tag matches every package version
+        env:
+          TAG: ${{ needs.resolve-ref.outputs.tag }}
+        run: bash scripts/check-release-version.sh "$TAG"
+
       - name: Verify extended tests passed
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.resolve-ref.outputs.tag }}
+          SHA: ${{ needs.resolve-ref.outputs.sha }}
         run: |
-          SHA="${{ needs.resolve-ref.outputs.sha }}"
-          echo "Checking Extended tests status for $SHA"
+          echo "Checking tag-triggered Extended tests status for $TAG ($SHA)"
           # Poll for up to 30 minutes (extended tests can take a while)
           for i in $(seq 1 60); do
             STATUS=$(gh api \
-              "repos/${{ github.repository }}/actions/workflows/extended-tests.yml/runs?head_sha=$SHA&per_page=1" \
-              --jq '.workflow_runs[0] | "\(.status) \(.conclusion)"' 2>/dev/null || echo "unknown unknown")
+              "repos/${{ github.repository }}/actions/workflows/extended-tests.yml/runs?head_sha=$SHA&event=push&per_page=100" \
+              --jq "[.workflow_runs[]
+                     | select(.head_sha == \"$SHA\"
+                              and .head_branch == \"$TAG\"
+                              and .event == \"push\")]
+                     | first | \"\(.status) \(.conclusion)\"" \
+              2>/dev/null || echo "unknown unknown")
             RUN_STATUS=$(echo "$STATUS" | awk '{print $1}')
             RUN_CONCLUSION=$(echo "$STATUS" | awk '{print $2}')
             if [ "$RUN_STATUS" = "completed" ]; then
@@ -123,10 +152,6 @@ jobs:
           done
           echo "::error::Extended tests did not complete within 30 minutes — blocking publish"
           exit 1
-
-      - uses: actions/setup-node@v6
-        with:
-          node-version: '24'
 
       - run: npm ci --omit=optional
 

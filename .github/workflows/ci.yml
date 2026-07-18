@@ -108,7 +108,14 @@ jobs:
       - name: release-tooling test (ci-churn guard)
         # Pure-bash regression test for release.sh's fail-closed auto-revert
         # guard (#326). No build/publish side effects, so it stays fast.
-        run: npm run test:scripts
+        run: |
+          npm run test:scripts
+          bash scripts/tests/release-version.test.sh
+
+      - name: Release version consistency
+        run: |
+          VERSION=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)
+          bash scripts/check-release-version.sh "v$VERSION"
 
       - name: cargo check (no-default-features)
         run: |
