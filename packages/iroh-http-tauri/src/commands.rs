@@ -834,13 +834,11 @@ pub async fn wait_serve_stop(endpoint_handle: u64) -> Result<(), String> {
 /// was called or because the QUIC stack shut down natively.
 #[command]
 pub async fn wait_endpoint_closed(endpoint_handle: u64) -> Result<(), String> {
-    let ep = state::get_endpoint(endpoint_handle).ok_or_else(|| {
-        format_error_json(
-            "INVALID_HANDLE",
-            format!("invalid endpoint handle: {endpoint_handle}"),
-        )
-    })?;
-    ep.wait_closed().await;
+    // The close operation may remove the handle before this async command is
+    // first polled. An absent endpoint has already reached the requested state.
+    if let Some(ep) = state::get_endpoint(endpoint_handle) {
+        ep.wait_closed().await;
+    }
     Ok(())
 }
 
@@ -3368,6 +3366,16 @@ pub fn unsubscribe_path_changes(
     }
     ep.unsubscribe_path_changes(&node_id, subscription_id);
     Ok(())
+}
+
+#[cfg(test)]
+mod endpoint_lifecycle_tests {
+    use super::wait_endpoint_closed;
+
+    #[tokio::test]
+    async fn wait_endpoint_closed_treats_a_removed_handle_as_closed() {
+        assert!(wait_endpoint_closed(u64::MAX).await.is_ok());
+    }
 }
 
 #[cfg(test)]

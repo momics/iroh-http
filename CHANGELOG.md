@@ -127,6 +127,7 @@
 - *(tauri)* Replay early serve-stop requests after registration completes (#375)
 - *(core,adapters)* Give path-change subscriptions token-scoped ownership and safe resubscription (#375)
 - *(deno)* Order serve registration, fetch, stop, and endpoint close without leaking operations (#376)
+- *(node,tauri)* Treat a removed endpoint as closed when an asynchronous close waiter starts late (#378)
 
 ### 💼 Other
 
