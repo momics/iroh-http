@@ -2,41 +2,41 @@
   {
     "name": "deno/iroh/throughput-1kb",
     "unit": "MB/s",
-    "value": 0.4224120691681489
+    "value": 0.4086458709958738
   },
   {
     "name": "deno/native/throughput-1kb",
     "unit": "MB/s",
-    "value": 0.0226503495861073
+    "value": 0.02187788445309604
   },
   {
     "name": "deno/iroh/throughput-64kb",
     "unit": "MB/s",
-    "value": 18.341747979500532
+    "value": 17.99713112483911
   },
   {
     "name": "deno/native/throughput-64kb",
     "unit": "MB/s",
-    "value": 1.442781549269277
+    "value": 1.4229751026495179
   },
   {
     "name": "deno/iroh/throughput-1mb",
     "unit": "MB/s",
-    "value": 39.88640415913776
+    "value": 39.12415685916131
   },
   {
     "name": "deno/native/throughput-1mb",
     "unit": "MB/s",
-    "value": 22.997820170933398
+    "value": 17.58920648728576
   },
   {
     "name": "deno/iroh/throughput-10mb",
     "unit": "MB/s",
-    "value": 41.389946059509036
+    "value": 41.74034230137745
   },
   {
     "name": "deno/native/throughput-10mb",
     "unit": "MB/s",
-    "value": 77.7735061630083
+    "value": 79.11333495671768
   }
 ]
