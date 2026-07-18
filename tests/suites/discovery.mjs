@@ -44,17 +44,73 @@ export function discoveryTests({ createNode, test, assert, asIrohPeer }) {
   test("pathChanges() subscription resolves when aborted", async () => {
     const node = await createNode({ disableNetworking: true });
     try {
-      const ac = new AbortController();
-      const iterator = node
-        .pathChanges(node.publicKey, { signal: ac.signal })
+      // Aborting before the first poll must not create a native cancellation
+      // marker that affects a later iterator for the same peer.
+      const beforePoll = new AbortController();
+      const idleIterator = node
+        .pathChanges(node.publicKey, { signal: beforePoll.signal })
         [Symbol.asyncIterator]();
-      const pending = iterator.next();
-      ac.abort();
-      const result = await pending;
+      beforePoll.abort();
       assert(
-        result.done === true,
-        "aborted pathChanges() iterator must complete",
+        (await idleIterator.next()).done === true,
+        "pathChanges() aborted before polling must complete",
       );
+
+      // Repeat on the same endpoint/peer to prove a pre-registration
+      // cancellation is consumed rather than poisoning the next subscription.
+      for (let cycle = 0; cycle < 10; cycle++) {
+        const ac = new AbortController();
+        const iterator = node
+          .pathChanges(node.publicKey, { signal: ac.signal })
+          [Symbol.asyncIterator]();
+        const pending = iterator.next();
+        let settled = false;
+        void pending.then(() => settled = true, () => settled = true);
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        assert(
+          !settled,
+          `pathChanges() must remain live before abort (cycle ${cycle})`,
+        );
+        ac.abort();
+        const result = await pending;
+        assert(
+          result.done === true,
+          `aborted pathChanges() iterator must complete (cycle ${cycle})`,
+        );
+      }
+
+      // Cancellation ownership is per iterator. Stopping one overlapping poll
+      // must not remove the other iterator's core subscription.
+      for (let cycle = 0; cycle < 10; cycle++) {
+        const firstAbort = new AbortController();
+        const secondAbort = new AbortController();
+        const first = node
+          .pathChanges(node.publicKey, { signal: firstAbort.signal })
+          [Symbol.asyncIterator]().next();
+        const second = node
+          .pathChanges(node.publicKey, { signal: secondAbort.signal })
+          [Symbol.asyncIterator]().next();
+        firstAbort.abort();
+        assert(
+          (await first).done === true,
+          `first overlapping iterator must complete (cycle ${cycle})`,
+        );
+        let secondSettled = false;
+        void second.then(
+          () => secondSettled = true,
+          () => secondSettled = true,
+        );
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        assert(
+          !secondSettled,
+          `second iterator must remain live after first abort (cycle ${cycle})`,
+        );
+        secondAbort.abort();
+        assert(
+          (await second).done === true,
+          `second overlapping iterator must complete (cycle ${cycle})`,
+        );
+      }
     } finally {
       await node.close();
     }

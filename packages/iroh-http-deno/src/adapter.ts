@@ -1569,20 +1569,24 @@ export class DenoAdapter extends IrohAdapter {
   override async nextPathChange(
     _endpointHandle: number,
     nodeId: string,
+    subscriptionId: number,
   ): Promise<PathInfo | null> {
     return call<PathInfo | null>("nextPathChange", {
       endpointHandle: this.#eh,
       nodeId,
+      subscriptionId,
     });
   }
 
   override async unsubscribePathChanges(
     _endpointHandle: number,
     nodeId: string,
+    subscriptionId: number,
   ): Promise<void> {
     await call<null>("unsubscribePathChanges", {
       endpointHandle: this.#eh,
       nodeId,
+      subscriptionId,
     });
   }
 }

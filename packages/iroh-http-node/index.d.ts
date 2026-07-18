@@ -376,7 +376,7 @@ export declare function jsTryNextChunk(endpointHandle: number, handle: bigint): 
  * Call repeatedly to receive successive changes; the endpoint de-duplicates
  * watcher tasks so concurrent calls for the same peer share one Rust task.
  */
-export declare function nextPathChange(endpointHandle: number, nodeId: string): Promise<string | null>
+export declare function nextPathChange(endpointHandle: number, nodeId: string, subscriptionId: number): Promise<string | null>
 
 /** Full node address: node ID + relay URL(s) + direct socket addresses. */
 export declare function nodeAddr(endpointHandle: number): JsNodeAddrInfo
@@ -494,7 +494,7 @@ export declare function startTransportEvents(endpointHandle: number, handler: ((
 export declare function stopServe(endpointHandle: number): void
 
 /** Unsubscribe from path changes for a specific peer. */
-export declare function unsubscribePathChanges(endpointHandle: number, nodeId: string): void
+export declare function unsubscribePathChanges(endpointHandle: number, nodeId: string, subscriptionId: number): void
 
 /**
  * Wait until this endpoint has been fully closed — either because `closeEndpoint()`

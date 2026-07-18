@@ -5,10 +5,10 @@
 //! SessionRuntime intentionally stays here alongside IrohEndpoint (tight
 //! lifecycle coupling; no further move is planned).
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize};
 use std::sync::Mutex;
 
-use dashmap::DashMap;
 use tokio::sync::{mpsc, watch};
 
 use crate::http::events::TransportEvent;
@@ -16,6 +16,10 @@ use crate::http::server::handle::ServeToken;
 use crate::http::server::ServeHandle;
 
 use super::stats::PathInfo;
+
+pub(in crate::endpoint) struct PathSubscriptions {
+    pub(in crate::endpoint) senders: Mutex<HashMap<u32, mpsc::UnboundedSender<PathInfo>>>,
+}
 
 /// Server-side runtime: the `serve()` task, lifecycle signals, and
 /// observability fan-out (transport events, per-peer path subscriptions).
@@ -43,9 +47,10 @@ pub(in crate::endpoint) struct SessionRuntime {
     /// Receiver for transport-level events. Wrapped in Mutex+Option so
     /// `subscribe_events()` can take it exactly once for the platform drain task.
     pub(in crate::endpoint) event_rx: Mutex<Option<mpsc::Receiver<TransportEvent>>>,
-    /// Per-peer path-change subscriptions. Key: `node_id_str`. Populated
-    /// lazily when `subscribe_path_changes` is called.
-    pub(in crate::endpoint) path_subs: DashMap<String, mpsc::UnboundedSender<PathInfo>>,
+    /// Per-peer path-change subscriptions. The inner key is an adapter-owned
+    /// subscription ID, allowing one watcher to fan out without one iterator's
+    /// cancellation terminating another.
+    pub(in crate::endpoint) path_subs: Mutex<HashMap<String, std::sync::Arc<PathSubscriptions>>>,
     /// Number of live path-change watcher tasks.
     pub(in crate::endpoint) active_path_watchers: AtomicUsize,
 }
