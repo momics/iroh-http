@@ -1,0 +1,4 @@
+interface:
+  display_name: "Analyze Git Diff"
+  short_description: "Measure and visualize Git diff composition"
+  default_prompt: "Use $analyze-git-diff to classify this Git diff and generate a self-contained HTML review report."
