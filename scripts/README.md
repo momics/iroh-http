@@ -35,16 +35,22 @@ The script is interactive and walks you through each step:
 1. Shows unreleased commits since the last tag
 2. Runs `npm run ci` — **exits immediately if any check fails**
 3. Bumps all manifests (`Cargo.toml`, `package.json`, `deno.jsonc`, `adapter.ts`)
-4. Shows the diff and asks you to confirm
-5. Commits `chore: release vX.Y.Z` and creates the git tag
-6. Asks whether to push
+4. Prepends the curated version section to `CHANGELOG.md`
+5. Shows the diff and asks you to confirm
+6. Commits `chore: release vX.Y.Z` and creates the git tag
+7. Asks whether to push
 
 Pushing the tag triggers two GitHub Actions workflows:
 
 | Workflow | What it does |
 |----------|-------------|
-| `build.yml` | Creates the GitHub release, builds native binaries across 5 platforms (macOS arm64/x86, Linux x64/arm64, Windows x64) |
-| `publish.yml` | Publishes to npm, JSR, and crates.io — fires automatically after `build.yml` succeeds |
+| `build.yml` | Creates a draft GitHub release from the curated changelog section and builds native binaries across 5 platforms |
+| `extended-tests.yml` | Runs the tag's extended compatibility and platform tests |
+| `bench.yml` | Records the tag's Rust, Node.js, and Deno benchmark snapshot |
+
+After all three workflows are green, a maintainer manually runs `publish.yml` for
+that exact tag, verifies npm, JSR, and crates.io, and publishes the draft GitHub
+release.
 
 ---
 
@@ -76,5 +82,6 @@ npm run publish:tauri           # → npm
 | Deno | Deno package, tests | `curl -fsSL https://deno.land/install.sh \| sh` |
 | cargo-deny | License / advisory checks | `cargo install cargo-deny --locked` |
 | cargo-audit | Security advisories | `cargo install cargo-audit --locked` |
+| git-cliff | Curated changelog generation | `cargo install git-cliff --locked` |
 
 Cross-compilation (5 platforms) is handled entirely by GitHub Actions — no local cross-compile toolchain is needed for releasing.

@@ -166,9 +166,9 @@ bash "$ROOT/scripts/check-release-version.sh" "$TAG"
 # ── 5. Changelog ──────────────────────────────────────────────────────────────
 # Prepend the new release section to CHANGELOG.md. --unreleased scopes it to
 # commits since the last tag; --prepend leaves prior sections untouched (no
-# history rewrite). Uses git-cliff's default config — the same one CI uses for
-# the GitHub Release body (build.yml: `git cliff --latest`) — so the in-repo
-# changelog and the published release notes stay identical. This runs after
+# history rewrite). The tag workflow extracts this reviewed section from
+# CHANGELOG.md, so the in-repo changelog and published release notes stay
+# identical. This runs after
 # version.sh (which leaves the tree dirty), so `git add -u` below commits the
 # changelog and the version bump together in the single `chore: release` commit.
 
