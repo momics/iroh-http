@@ -223,7 +223,7 @@ Follow-ups filed: #____, #____ (none if all pass).
 
 ### Filing follow-ups for divergences
 
-Follow the [manage-issues](../../.github/skills/manage-issues/SKILL.md)
+Follow the [manage-issues](../../.agents/skills/manage-issues/SKILL.md)
 conventions. For each failure open a **linked** issue:
 
 - **Title:** `fix(tauri): <symptom> on <platform> DNS-SD <path>` (e.g.

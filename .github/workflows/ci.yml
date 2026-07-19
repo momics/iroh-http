@@ -7,7 +7,6 @@ on:
       - 'docs/**'
       - '**.md'
       - '.github/ISSUE_TEMPLATE/**'
-      - '.github/skills/**'
       - '.vscode/**'
       - 'CHANGELOG.md'
       - 'CONTRIBUTING.md'
@@ -19,7 +18,6 @@ on:
       - 'docs/**'
       - '**.md'
       - '.github/ISSUE_TEMPLATE/**'
-      - '.github/skills/**'
       - '.vscode/**'
       - 'CHANGELOG.md'
       - 'CONTRIBUTING.md'
@@ -46,6 +44,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+
+      - name: Agent skill regression tests
+        run: >-
+          python3 -m unittest discover
+          -s .agents/skills/analyze-git-diff/scripts
+          -p 'test_git_diff_report.py'
 
       # ── Formatting (fail fast, before any heavy setup) ───────────────────────
       - uses: denoland/setup-deno@v2
