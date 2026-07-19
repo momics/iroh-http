@@ -3,9 +3,10 @@ name: fix-issues
 description: Systematically resolve a set of open iroh-http issues through evidence-based triage, compatible vertical slices, focused verification, reviewed commits, and a branch pull request. Use when working through the backlog or resolving multiple related issues. Do not use for creating issues or bypassing review with a direct main-branch push.
 ---
 
-# Fix Issues — Momics/iroh-http
+# Fix iroh-http issues
 
-Resolve open GitHub issues systematically: triage → plan → fix → verify → commit → close → push.
+Resolve open GitHub issues systematically: triage → plan → fix → verify →
+review → merge → close.
 
 ## Phase 1 — Discover
 

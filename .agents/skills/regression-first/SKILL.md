@@ -67,9 +67,9 @@ Closes #N
 
 ### Step 6 — Close the issue
 
-After the resolving pull request is merged, post the merged change and a
-one-sentence outcome, then close the issue via `manage-issues` if GitHub did not
-close it automatically.
+After the resolving pull request is merged, post a full link to the merged pull
+request or commit and a one-sentence outcome. Then close the issue via
+`manage-issues` if GitHub did not close it automatically.
 
 ---
 
