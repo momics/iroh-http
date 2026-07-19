@@ -9,7 +9,8 @@ platform adapters (Node.js, Deno, Tauri) and is not intended for direct import.
 ## What's inside
 
 - **`IrohNode`**: the node class exposed by all adapters (`fetch()`, `serve()`,
-  `connect()`, `sessions()`, `browse()`, `advertise()`)
+  `dial()`, `incoming()`, `advertisePeer()`, `browsePeers()`, `advertise()`,
+  `browse()`)
 - **`IrohAdapter` / `Bridge`**: the interface each platform adapter implements
   (`nextChunk`, `sendChunk`, `finishBody`, raw FFI fetch/serve)
 - **`IrohSession`**: a WebTransport-compatible QUIC session with bidirectional

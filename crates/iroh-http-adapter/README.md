@@ -9,13 +9,17 @@ Shared utilities for the iroh-http adapter crates (Deno, Node.js, Tauri).
 
 ## What this crate is
 
-The adapters share a common JSON error envelope at the FFI boundary:
+This crate is the deliberately narrow seam shared by the native adapters. It
+owns fail-closed input validation and coercion, request-delivery helpers, and a
+common JSON error envelope at the FFI boundary:
 
 ```json
 {"code": "REFUSED", "message": "connection refused"}
 ```
 
-This crate owns that convention — `core_error_to_json` and `format_error_json` — so it is defined exactly once rather than duplicated in each adapter.
+Keeping these rules here prevents Node, Deno, and Tauri from interpreting the
+same request differently. HTTP transport and endpoint lifecycle still belong to
+`iroh-http-core`; platform glue remains in each adapter.
 
 ## What this crate is not
 
@@ -53,7 +57,7 @@ let json = format_error_json("INVALID_HANDLE", "endpoint not found");
 | `HeaderTooLarge` | `HEADER_TOO_LARGE` |
 | `PeerRejected` | `PEER_REJECTED` |
 | `Cancelled` | `CANCELLED` |
-| `Internal` | `UNKNOWN` |
+| `Internal` | `INTERNAL` |
 | _(future variants)_ | `UNKNOWN` |
 
 ## License

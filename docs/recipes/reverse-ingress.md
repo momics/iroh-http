@@ -150,10 +150,10 @@ node.serve({}, async (req) => {
 Enable compression to reduce relay bandwidth:
 
 ```ts
-const node = await IrohNode.spawn({ compression: true });
+const node = await createNode({ compression: true });
 ```
 
-See [compression feature](../features/compression.md).
+See [body compression](../features/compression.md).
 
 ## Multi-service Pi
 
