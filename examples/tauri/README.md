@@ -7,8 +7,9 @@ exercises HTTP, peer discovery, generic DNS-SD, sessions, and lifecycle flows.
 ## Prerequisites
 
 - Install the repository dependencies from the repository root with `npm ci`.
-- Install the normal [Tauri v2 prerequisites](https://v2.tauri.app/start/prerequisites/)
-  for each platform you intend to build.
+- Install the normal
+  [Tauri v2 prerequisites](https://v2.tauri.app/start/prerequisites/) for each
+  platform you intend to build.
 - For iOS or Android, initialize the generated mobile project once as described
   below.
 
@@ -35,9 +36,9 @@ npm run tauri ios dev        # choose a connected device or simulator
 ```
 
 Accept the Local Network prompt on the device. If it was denied earlier, enable
-the app under **Settings → Privacy & Security → Local Network**.
-Physical iOS devices also require a valid Apple development team/signing
-identity in the generated Xcode project; simulator builds do not.
+the app under **Settings → Privacy & Security → Local Network**. Physical iOS
+devices also require a valid Apple development team/signing identity in the
+generated Xcode project; simulator builds do not.
 
 ## Android
 
@@ -65,9 +66,9 @@ generic DNS-SD APIs require `iroh-http:discovery`.
 
 Put all devices on the same LAN, start this app on each platform, and run the
 suite. Peer discovery should be bidirectional across desktop, iOS, and Android.
-The generic DNS-SD section also advertises and browses a demo service. Firewalls,
-guest-network client isolation, or an inactive mobile app can prevent multicast
-visibility.
+The generic DNS-SD section also advertises and browses a demo service.
+Firewalls, guest-network client isolation, or an inactive mobile app can prevent
+multicast visibility.
 
 For the complete permission model and custom service-name configuration, see
 [Mobile mDNS / DNS-SD setup](../../docs/guidelines/mobile-mdns-setup.md).

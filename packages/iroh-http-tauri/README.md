@@ -71,10 +71,10 @@ Without this, the Xcode link step fails with missing `_kSCNetwork*` /
 `_kSCProp*` symbols.
 
 If you use mDNS discovery (`node.browsePeers()` / `node.advertisePeer()` or the
-generic `node.browse()` / `node.advertise()` APIs), iOS also gates
-local-network access behind a user permission. Declare it and every Bonjour
-service type you use in `src-tauri/Info.ios.plist`, which Tauri merges into the
-generated iOS `Info.plist`:
+generic `node.browse()` / `node.advertise()` APIs), iOS also gates local-network
+access behind a user permission. Declare it and every Bonjour service type you
+use in `src-tauri/Info.ios.plist`, which Tauri merges into the generated iOS
+`Info.plist`:
 
 ```xml
 <!-- src-tauri/Info.ios.plist -->
@@ -102,13 +102,13 @@ entries), see the
 
 ### Android
 
-The plugin merges `ACCESS_NETWORK_STATE` and
-`CHANGE_WIFI_MULTICAST_STATE` into the application manifest. Before T extension
-7, it shares one multicast lock across active DNS-SD browse and advertisement
-sessions; newer foreground apps use system-managed multicast. Ensure the final app also has `INTERNET`
-(normally supplied by Tauri). Apps that later target Android 17 / API 37 must
-add the platform's `ACCESS_LOCAL_NETWORK` runtime-permission flow; do not add it
-to lower-target applications.
+The plugin merges `ACCESS_NETWORK_STATE` and `CHANGE_WIFI_MULTICAST_STATE` into
+the application manifest. Before T extension 7, it shares one multicast lock
+across active DNS-SD browse and advertisement sessions; newer foreground apps
+use system-managed multicast. Ensure the final app also has `INTERNET` (normally
+supplied by Tauri). Apps that later target Android 17 / API 37 must add the
+platform's `ACCESS_LOCAL_NETWORK` runtime-permission flow; do not add it to
+lower-target applications.
 
 ## Quick start
 
@@ -236,7 +236,7 @@ value.
 | Linux    |         x86_64          |   ✅   |
 | Linux    |         aarch64         |   ✅   |
 | Windows  |         x86_64          |   ✅   |
-| iOS      |        aarch64          |   ✅   |
+| iOS      |         aarch64         |   ✅   |
 | Android  |     arm64 / x86_64      |   ✅   |
 
 ## Other runtimes
