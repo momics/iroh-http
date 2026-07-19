@@ -233,7 +233,8 @@ handshake ≈ 1–2 RTTs).
 When set, the pool evicts entries that have been idle longer than
 `connections.poolIdleTimeoutMs`. It is disabled by default. For high-fanout
 nodes, pair a large `connections.maxPooled`
-with a shorter `poolIdleTimeoutMs` to recycle infrequently used peers quickly:
+with a shorter `connections.poolIdleTimeoutMs` to recycle infrequently used peers
+quickly:
 
 ```ts
 const node = await createNode({

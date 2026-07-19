@@ -274,7 +274,7 @@ private class FakeNsdManager(
 
 private fun newPlugin(
     terminalRemovalTiming: TerminalRemovalTiming = TerminalRemovalTiming.AFTER_CALLBACK,
-    wifiManager: WifiManager = WifiManager()
+    wifiManager: WifiManager? = WifiManager()
 ): Pair<IrohHttpPlugin, FakeNsdManager> {
     val manager = FakeNsdManager(terminalRemovalTiming)
     val activity = object : Activity() {
@@ -287,7 +287,7 @@ private fun newPlugin(
         }
     }
     activity.setSystemService(Context.NSD_SERVICE, manager)
-    activity.setSystemService(Context.WIFI_SERVICE, wifiManager)
+    if (wifiManager != null) activity.setSystemService(Context.WIFI_SERVICE, wifiManager)
     return Pair(IrohHttpPlugin(activity), manager)
 }
 
@@ -1475,6 +1475,24 @@ private fun testBrowseMulticastLockLifecycle() {
     deniedPlugin.browse_start(deniedStart)
     checkEquals(1, deniedStart.rejections.size, "multicast permission failure rejects start")
     checkEquals(0, deniedManager.discoveryCalls.size, "denied lock never dispatches discovery")
+
+    val (missingWifiPlugin, missingWifiManager) = newPlugin(wifiManager = null)
+    val missingWifiBrowse = Invoke(genericBrowseArgs())
+    missingWifiPlugin.browse_start(missingWifiBrowse)
+    checkEquals(1, missingWifiBrowse.rejections.size, "missing WifiManager rejects browse")
+    checkEquals(
+        0,
+        missingWifiManager.discoveryCalls.size,
+        "missing WifiManager never dispatches discovery"
+    )
+    val missingWifiAdvertise = Invoke(peerShapedAdvertiseArgs())
+    missingWifiPlugin.advertise_start(missingWifiAdvertise)
+    checkEquals(1, missingWifiAdvertise.rejections.size, "missing WifiManager rejects advertise")
+    checkEquals(
+        0,
+        missingWifiManager.registrationCalls.size,
+        "missing WifiManager never dispatches registration"
+    )
 
     val cleanupWifi = TrackingWifiManager()
     val (cleanupPlugin, cleanupManager) = newPlugin(wifiManager = cleanupWifi)

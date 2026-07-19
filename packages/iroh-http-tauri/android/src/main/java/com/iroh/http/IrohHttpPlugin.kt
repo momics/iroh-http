@@ -216,7 +216,7 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
     private fun acquireNsdMulticastLease(): NsdMulticastLease? {
         if (!requiresLegacyMulticastLock()) return null
         val wifi = activity.getSystemService(Context.WIFI_SERVICE) as? WifiManager
-            ?: return null
+            ?: throw IllegalStateException("WifiManager unavailable for legacy DNS-SD multicast")
         synchronized(multicastLockGuard) {
             if (multicastLeaseCount == 0) {
                 val lock = wifi.createMulticastLock("iroh-http-dnssd")
