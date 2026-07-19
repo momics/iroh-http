@@ -5,7 +5,10 @@ import android.content.Context
 import android.content.res.Configuration
 import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
+import android.net.wifi.WifiManager
+import android.os.Build
 import android.os.Handler
+import android.os.ext.SdkExtensions
 import app.tauri.plugin.Invoke
 import app.tauri.plugin.JSObject
 import org.json.JSONArray
@@ -25,6 +28,29 @@ import java.util.concurrent.atomic.AtomicReference
  * under both orderings.
  */
 private enum class TerminalRemovalTiming { BEFORE_CALLBACK, AFTER_CALLBACK }
+
+private class TrackingWifiManager(private val failAcquire: Boolean = false) : WifiManager() {
+    val locks = CopyOnWriteArrayList<TrackingMulticastLock>()
+
+    override fun createMulticastLock(tag: String): MulticastLock =
+        TrackingMulticastLock(failAcquire).also { locks.add(it) }
+
+    class TrackingMulticastLock(private val failAcquire: Boolean) : MulticastLock() {
+        var acquireCount = 0
+        var releaseCount = 0
+
+        override fun acquire() {
+            acquireCount += 1
+            if (failAcquire) throw SecurityException("permission denied")
+            super.acquire()
+        }
+
+        override fun release() {
+            releaseCount += 1
+            super.release()
+        }
+    }
+}
 
 private class FakeNsdManager(
     private val terminalRemovalTiming: TerminalRemovalTiming =
@@ -247,7 +273,8 @@ private class FakeNsdManager(
 }
 
 private fun newPlugin(
-    terminalRemovalTiming: TerminalRemovalTiming = TerminalRemovalTiming.AFTER_CALLBACK
+    terminalRemovalTiming: TerminalRemovalTiming = TerminalRemovalTiming.AFTER_CALLBACK,
+    wifiManager: WifiManager = WifiManager()
 ): Pair<IrohHttpPlugin, FakeNsdManager> {
     val manager = FakeNsdManager(terminalRemovalTiming)
     val activity = object : Activity() {
@@ -260,6 +287,7 @@ private fun newPlugin(
         }
     }
     activity.setSystemService(Context.NSD_SERVICE, manager)
+    activity.setSystemService(Context.WIFI_SERVICE, wifiManager)
     return Pair(IrohHttpPlugin(activity), manager)
 }
 
@@ -1406,6 +1434,59 @@ private fun testPeerSpecificCommandSurfaceIsRemoved() {
     }
 }
 
+private fun testBrowseMulticastLockLifecycle() {
+    val wifi = TrackingWifiManager()
+    val (plugin, manager) = newPlugin(wifiManager = wifi)
+    val (advertiseId, advertiseCall) = startGenericAdvertisement(plugin, manager)
+    val lock = wifi.locks.single()
+    checkEquals(1, lock.acquireCount, "advertise-only acquires one multicast lock")
+    checkThat(lock.isHeld, "advertise-only session holds multicast reception")
+
+    val (browseId, _) = startGenericBrowse(plugin, manager)
+    checkEquals(1, wifi.locks.size, "concurrent NSD sessions share one multicast lock")
+    checkEquals(1, lock.acquireCount, "shared multicast lock is acquired once")
+
+    plugin.browse_stop(Invoke(stopArgs(browseId)))
+    manager.discoveryStopped(manager.discoveryCalls.single())
+    checkEquals(0, lock.releaseCount, "active advertisement keeps the shared lock")
+
+    plugin.advertise_stop(Invoke(advertiseStopArgs(advertiseId)))
+    manager.serviceUnregistered(advertiseCall)
+    checkEquals(1, lock.releaseCount, "last NSD session releases multicast lock once")
+    checkThat(!lock.isHeld, "multicast lock is not retained after all NSD stops")
+
+    Build.VERSION.SDK_INT = Build.VERSION_CODES.TIRAMISU
+    SdkExtensions.setExtensionVersion(Build.VERSION_CODES.TIRAMISU, 7)
+    try {
+        val modernWifi = TrackingWifiManager()
+        val (modernPlugin, modernManager) = newPlugin(wifiManager = modernWifi)
+        val (modernBrowseId, _) = startGenericBrowse(modernPlugin, modernManager)
+        checkEquals(0, modernWifi.locks.size, "T extension 7 uses system-managed multicast")
+        modernPlugin.browse_stop(Invoke(stopArgs(modernBrowseId)))
+        modernManager.discoveryStopped(modernManager.discoveryCalls.single())
+    } finally {
+        Build.VERSION.SDK_INT = 21
+        SdkExtensions.setExtensionVersion(Build.VERSION_CODES.TIRAMISU, 0)
+    }
+
+    val deniedWifi = TrackingWifiManager(failAcquire = true)
+    val (deniedPlugin, deniedManager) = newPlugin(wifiManager = deniedWifi)
+    val deniedStart = Invoke(genericBrowseArgs())
+    deniedPlugin.browse_start(deniedStart)
+    checkEquals(1, deniedStart.rejections.size, "multicast permission failure rejects start")
+    checkEquals(0, deniedManager.discoveryCalls.size, "denied lock never dispatches discovery")
+
+    val cleanupWifi = TrackingWifiManager()
+    val (cleanupPlugin, cleanupManager) = newPlugin(wifiManager = cleanupWifi)
+    cleanupManager.discoverDispatchFailuresRemaining = 1
+    val cleanupStart = Invoke(genericBrowseArgs())
+    cleanupPlugin.browse_start(cleanupStart)
+    val cleanupCall = cleanupManager.discoveryCalls.single()
+    cleanupManager.discoveryStopped(cleanupCall)
+    checkEquals(1, cleanupStart.rejections.size, "failed discovery rejects after cleanup")
+    checkEquals(1, cleanupWifi.locks.single().releaseCount, "failed start releases shared lock")
+}
+
 fun main() {
     testBrowseReadinessAndTerminalConsumption()
     testGenericBrowseRecordsPresenceAndRepeatedUpserts()
@@ -1415,5 +1496,6 @@ fun main() {
     testThreadedUpdateStopRace()
     testAospListenerLifecycleAcrossApiEras()
     testPeerSpecificCommandSurfaceIsRemoved()
-    println("Android generic discovery contract: 7/7 test groups passed")
+    testBrowseMulticastLockLifecycle()
+    println("Android generic discovery contract: 8/8 test groups passed")
 }

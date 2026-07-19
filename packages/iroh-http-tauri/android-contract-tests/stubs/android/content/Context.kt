@@ -13,5 +13,6 @@ open class Context {
     companion object {
         const val NSD_SERVICE: String = "nsd"
         const val CONNECTIVITY_SERVICE: String = "connectivity"
+        const val WIFI_SERVICE: String = "wifi"
     }
 }

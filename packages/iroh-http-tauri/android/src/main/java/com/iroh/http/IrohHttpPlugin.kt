@@ -6,9 +6,11 @@ import android.net.ConnectivityManager
 import android.net.Network
 import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
+import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.os.ext.SdkExtensions
 import android.util.Log
 import app.tauri.annotation.Command
 import app.tauri.annotation.InvokeArg
@@ -116,6 +118,14 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
         REGISTERING
     }
 
+    private inner class NsdMulticastLease {
+        private val released = AtomicBoolean(false)
+
+        fun release() {
+            if (released.compareAndSet(false, true)) releaseNsdMulticastLease()
+        }
+    }
+
     private data class AdvertisementUpdate(
         val info: NsdServiceInfo,
         val invoke: InvokeOnce,
@@ -126,6 +136,7 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
         val id: Long,
         val manager: NsdManager,
         val startInvoke: InvokeOnce,
+        val multicastLease: NsdMulticastLease?,
         var state: NativeSessionState = NativeSessionState.STARTING,
         var terminalError: String? = null,
         var pendingStartFailure: String? = null,
@@ -156,6 +167,7 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
         val listener: NsdManager.DiscoveryListener,
         val serviceType: String,
         val startInvoke: InvokeOnce,
+        val multicastLease: NsdMulticastLease?,
         var state: NativeSessionState = NativeSessionState.STARTING,
         var terminalError: String? = null,
         var pendingStartFailure: String? = null,
@@ -184,9 +196,66 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
 
     private val advertiseMap = ConcurrentHashMap<Long, AdvertiseSession>()
     private val dnsSdBrowseMap = ConcurrentHashMap<Long, DnsSdBrowseSession>()
+    private val multicastLockGuard = Any()
+    private var sharedMulticastLock: WifiManager.MulticastLock? = null
+    private var multicastLeaseCount = 0
 
     private fun nsd(): NsdManager? =
         activity.getSystemService(Context.NSD_SERVICE) as? NsdManager
+
+    /**
+     * Older Android NSD implementations require an explicit multicast lock,
+     * even for a foreground app. Share one lock across active browse and
+     * advertisement sessions, and avoid taking it once T extension 7 lets the
+     * system manage foreground multicast automatically.
+     */
+    private fun requiresLegacyMulticastLock(): Boolean =
+        Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
+            SdkExtensions.getExtensionVersion(Build.VERSION_CODES.TIRAMISU) < 7
+
+    private fun acquireNsdMulticastLease(): NsdMulticastLease? {
+        if (!requiresLegacyMulticastLock()) return null
+        val wifi = activity.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+            ?: return null
+        synchronized(multicastLockGuard) {
+            if (multicastLeaseCount == 0) {
+                val lock = wifi.createMulticastLock("iroh-http-dnssd")
+                try {
+                    lock.setReferenceCounted(false)
+                    lock.acquire()
+                } catch (error: Throwable) {
+                    if (lock.isHeld) lock.release()
+                    throw error
+                }
+                sharedMulticastLock = lock
+            }
+            multicastLeaseCount += 1
+        }
+        return NsdMulticastLease()
+    }
+
+    private fun releaseNsdMulticastLease() {
+        synchronized(multicastLockGuard) {
+            if (multicastLeaseCount == 0) return
+            multicastLeaseCount -= 1
+            if (multicastLeaseCount == 0) {
+                sharedMulticastLock?.let { lock ->
+                    if (lock.isHeld) lock.release()
+                }
+                sharedMulticastLock = null
+            }
+        }
+    }
+
+    private fun removeAdvertisementSession(session: AdvertiseSession) {
+        advertiseMap.remove(session.id, session)
+        session.multicastLease?.release()
+    }
+
+    private fun removeBrowseSession(session: DnsSdBrowseSession) {
+        dnsSdBrowseMap.remove(session.id, session)
+        session.multicastLease?.release()
+    }
 
     /**
      * Format a DNS server for Rust without losing an IPv6 routing scope.
@@ -697,7 +766,7 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
 
     /** Complete every waiter only after the native registration is terminal. */
     private fun finishAdvertisementStop(session: AdvertiseSession, error: String? = null) {
-        if (advertiseMap[session.id] === session) advertiseMap.remove(session.id)
+        removeAdvertisementSession(session)
         val waiters = session.pendingStops.toList()
         session.pendingStops.clear()
         for (waiter in waiters) {
@@ -832,11 +901,12 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
                     update.invoke.reject("DNS-SD advertisement update failed: error $errorCode")
                 } else if (session.state == NativeSessionState.STARTING) {
                     session.state = NativeSessionState.FAILED
-                    advertiseMap.remove(session.id)
+                    removeAdvertisementSession(session)
                     session.startInvoke.reject(message)
                 } else if (session.state == NativeSessionState.ACTIVE) {
                     session.state = NativeSessionState.FAILED
                 }
+                session.multicastLease?.release()
                 Log.e("iroh-http-dnssd", "advertise ${session.id} failed: $errorCode")
             }
         }
@@ -892,10 +962,11 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
                     session.terminalError = message
                     if (session.state == NativeSessionState.STARTING) {
                         session.state = NativeSessionState.FAILED
-                        advertiseMap.remove(session.id)
+                        removeAdvertisementSession(session)
                         session.startInvoke.reject(message)
                     } else if (session.state == NativeSessionState.ACTIVE) {
                         session.state = NativeSessionState.FAILED
+                        session.multicastLease?.release()
                     }
                 }
             }
@@ -935,6 +1006,7 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
                 } else {
                     session.state = NativeSessionState.FAILED
                     session.terminalError = "DNS-SD unregistration failed: error $errorCode"
+                    session.multicastLease?.release()
                 }
             }
         }
@@ -944,9 +1016,15 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
         manager: NsdManager,
         advertiseId: Long,
         info: NsdServiceInfo,
+        multicastLease: NsdMulticastLease?,
         invoke: Invoke
     ) {
-        val session = AdvertiseSession(advertiseId, manager, InvokeOnce(invoke))
+        val session = AdvertiseSession(
+            advertiseId,
+            manager,
+            InvokeOnce(invoke),
+            multicastLease
+        )
         synchronized(session) {
             session.info = info
             session.listener = registrationListener(session, session.generation)
@@ -956,7 +1034,7 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
             } catch (e: Throwable) {
                 val message = "Registration failed: ${e.message}"
                 if (e is IllegalArgumentException) {
-                    advertiseMap.remove(advertiseId)
+                    removeAdvertisementSession(session)
                     session.state = NativeSessionState.FAILED
                     session.terminalError = message
                     session.startInvoke.reject(message)
@@ -1100,7 +1178,7 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
     }
 
     private fun finishBrowseStop(session: DnsSdBrowseSession, error: String? = null) {
-        if (dnsSdBrowseMap[session.id] === session) dnsSdBrowseMap.remove(session.id)
+        removeBrowseSession(session)
         val waiters = session.pendingStops.toList()
         session.pendingStops.clear()
         for (waiter in waiters) {
@@ -1182,6 +1260,15 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
         val browseId = nextBrowseId.getAndIncrement()
         val serviceType = "_${args.serviceName}.${protoSuffix(args.protocol)}"
         val startInvoke = InvokeOnce(invoke)
+        val multicastLease = try {
+            acquireNsdMulticastLease()
+        } catch (error: SecurityException) {
+            return invoke.reject(
+                "DNS-SD browse requires CHANGE_WIFI_MULTICAST_STATE: ${error.message}"
+            )
+        } catch (error: Throwable) {
+            return invoke.reject("Failed to prepare DNS-SD multicast: ${error.message}")
+        }
 
         val listener = object : NsdManager.DiscoveryListener {
             override fun onStartDiscoveryFailed(serviceType: String, errorCode: Int) {
@@ -1195,13 +1282,14 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
                     val stopPending = session.pendingStops.isNotEmpty()
                     session.readinessPending = false
                     session.nativeTerminal = true
+                    session.multicastLease?.release()
                     session.stopDispatchAccepted = false
                     session.state = NativeSessionState.FAILED
                     session.terminalError = message
                     retireResolveRequests(session)
                     rejectPendingBrowseStart(session)
                     if (failedBeforeReady) {
-                        dnsSdBrowseMap.remove(browseId)
+                        removeBrowseSession(session)
                         session.startInvoke.reject(message)
                         // Start failure is already terminal. In particular,
                         // API 21 removes the listener after this callback; a
@@ -1211,7 +1299,7 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
                         session.state = NativeSessionState.CLOSED
                         finishBrowseStop(session)
                     } else if (retainedFailedStart) {
-                        dnsSdBrowseMap.remove(browseId)
+                        removeBrowseSession(session)
                     }
                 }
             }
@@ -1224,19 +1312,20 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
                     val stopPending = session.pendingStops.isNotEmpty()
                     session.readinessPending = false
                     session.nativeTerminal = true
+                    session.multicastLease?.release()
                     session.stopDispatchAccepted = false
                     session.state = NativeSessionState.FAILED
                     session.terminalError = "DNS-SD browse stop failed: error $errorCode"
                     retireResolveRequests(session)
                     rejectPendingBrowseStart(session, session.terminalError)
                     if (failedBeforeReady) {
-                        dnsSdBrowseMap.remove(browseId)
+                        removeBrowseSession(session)
                         session.startInvoke.reject(session.terminalError!!)
                     }
                     if (stopPending) {
                         finishBrowseStop(session, session.terminalError)
                     } else if (retainedFailedStart) {
-                        dnsSdBrowseMap.remove(browseId)
+                        removeBrowseSession(session)
                     }
                 }
             }
@@ -1269,6 +1358,7 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
                     val retainedFailedStart = session.pendingStartFailure != null
                     session.readinessPending = false
                     session.nativeTerminal = true
+                    session.multicastLease?.release()
                     session.stopDispatchAccepted = false
                     if (stoppedBeforeReady) {
                         session.state = NativeSessionState.CLOSED
@@ -1281,7 +1371,7 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
                     if (stopPending) {
                         finishBrowseStop(session)
                     } else if (stoppedBeforeReady || retainedFailedStart) {
-                        dnsSdBrowseMap.remove(browseId)
+                        removeBrowseSession(session)
                     }
                 }
             }
@@ -1389,13 +1479,21 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
             }
         }
 
-        val session = DnsSdBrowseSession(browseId, manager, listener, serviceType, startInvoke)
+        val session = DnsSdBrowseSession(
+            browseId,
+            manager,
+            listener,
+            serviceType,
+            startInvoke,
+            multicastLease
+        )
         val dispatchError = synchronized(resolveQueue) {
             resolverTerminalError?.let { terminalError ->
                 session.state = NativeSessionState.FAILED
                 session.terminalError = terminalError
                 session.readinessPending = false
                 session.startInvoke.reject(terminalError)
+                session.multicastLease?.release()
                 return
             }
             dnsSdBrowseMap[browseId] = session
@@ -1411,7 +1509,7 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
             synchronized(session) {
                 val message = "Discovery failed: ${e.message}"
                 if (e is IllegalArgumentException) {
-                    if (dnsSdBrowseMap[browseId] === session) dnsSdBrowseMap.remove(browseId)
+                    removeBrowseSession(session)
                     session.state = NativeSessionState.FAILED
                     session.terminalError = message
                     session.startInvoke.reject(message)
@@ -1453,7 +1551,7 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
                         session.state == NativeSessionState.FAILED)
                 ) {
                     if (dnsSdBrowseMap[args.browseId] === session) {
-                        dnsSdBrowseMap.remove(args.browseId)
+                        removeBrowseSession(session)
                     }
                 }
             }
@@ -1534,7 +1632,16 @@ class IrohHttpPlugin(private val activity: Activity) : Plugin(activity) {
         } catch (e: Throwable) {
             return invoke.reject("Failed to encode DNS-SD record: ${e.message}")
         }
-        startAdvertisement(manager, advertiseId, info, invoke)
+        val multicastLease = try {
+            acquireNsdMulticastLease()
+        } catch (error: SecurityException) {
+            return invoke.reject(
+                "DNS-SD advertising requires CHANGE_WIFI_MULTICAST_STATE: ${error.message}"
+            )
+        } catch (error: Throwable) {
+            return invoke.reject("Failed to prepare DNS-SD multicast: ${error.message}")
+        }
+        startAdvertisement(manager, advertiseId, info, multicastLease, invoke)
     }
 
     @Command

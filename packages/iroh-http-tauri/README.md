@@ -20,7 +20,7 @@ npm install @momics/iroh-http-tauri
 
 ```toml
 [dependencies]
-tauri-plugin-iroh-http = "0.3"
+tauri-plugin-iroh-http = "0.6"
 ```
 
 **Register** in `src-tauri/src/lib.rs`:
@@ -70,7 +70,8 @@ npm run tauri ios init   # regenerate the Xcode project so the framework applies
 Without this, the Xcode link step fails with missing `_kSCNetwork*` /
 `_kSCProp*` symbols.
 
-If you use mDNS discovery (`node.browse()` / `node.advertise()`), iOS also gates
+If you use mDNS discovery (`node.browsePeers()` / `node.advertisePeer()` or the
+generic `node.browse()` / `node.advertise()` APIs), iOS also gates
 local-network access behind a user permission. Declare it and every Bonjour
 service type you use in `src-tauri/Info.ios.plist`, which Tauri merges into the
 generated iOS `Info.plist`:
@@ -98,6 +99,16 @@ silently restarts. Each custom `serviceName` needs its own `_<name>._udp` entry.
 For the full iOS + Android setup (including the Android `AndroidManifest.xml`
 entries), see the
 [Mobile mDNS / DNS-SD setup guide](../../docs/guidelines/mobile-mdns-setup.md).
+
+### Android
+
+The plugin merges `ACCESS_NETWORK_STATE` and
+`CHANGE_WIFI_MULTICAST_STATE` into the application manifest. Before T extension
+7, it shares one multicast lock across active DNS-SD browse and advertisement
+sessions; newer foreground apps use system-managed multicast. Ensure the final app also has `INTERNET`
+(normally supplied by Tauri). Apps that later target Android 17 / API 37 must
+add the platform's `ACCESS_LOCAL_NETWORK` runtime-permission flow; do not add it
+to lower-target applications.
 
 ## Quick start
 
@@ -138,14 +149,15 @@ permissions in `capabilities/default.json`:
 | `iroh-http:discovery` | Local-network discovery: `advertisePeer`/`browsePeers` + generic `advertise`/`browse` |
 | `iroh-http:crypto`    | Key generation, signing, verification                                                 |
 
-A typical app using fetch and serve:
+A typical app using fetch, serve, and local discovery:
 
 ```json
 {
   "permissions": [
     "iroh-http:default",
     "iroh-http:fetch",
-    "iroh-http:serve"
+    "iroh-http:serve",
+    "iroh-http:discovery"
   ]
 }
 ```
@@ -224,6 +236,8 @@ value.
 | Linux    |         x86_64          |   ✅   |
 | Linux    |         aarch64         |   ✅   |
 | Windows  |         x86_64          |   ✅   |
+| iOS      |        aarch64          |   ✅   |
+| Android  |     arm64 / x86_64      |   ✅   |
 
 ## Other runtimes
 

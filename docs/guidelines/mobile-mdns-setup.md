@@ -3,7 +3,7 @@
 Applies to Tauri apps built with `iroh-http-tauri` that use local-network
 discovery — the iroh peer path (`node.advertisePeer()` / `node.browsePeers()`)
 and the generic DNS-SD path (`node.advertise()` / `node.browse()`). Both run over
-the same native bridge (`NsdManager` on Android, `NWBrowser` / `NWListener` on
+the same native bridge (`NsdManager` on Android, `NWBrowser` / `NetService` on
 iOS) and need the same permissions and service-type declarations below.
 
 > **Generic records on iOS.** Android resolves full generic records (host, port,
@@ -61,7 +61,7 @@ symbols).
 
 ### 2. Declare the Local Network permission and Bonjour services
 
-iOS denies `NWBrowser` / `NWListener` (`NWError -65555 NoAuth`) unless your app
+iOS denies `NWBrowser` / `NetService` (`NWError -65555 NoAuth`) unless your app
 both describes *why* it needs local-network access **and** statically lists
 every service type it browses or advertises.
 
@@ -102,47 +102,40 @@ browse before granting), re-enable it under
 
 ## Android
 
-Add the network permissions to `src-tauri/gen/android/app/src/main/AndroidManifest.xml`
-(or your app's manifest):
+The plugin merges the network-state and multicast-state declarations it needs
+into the application manifest. Tauri applications normally already declare
+`INTERNET`; if yours does not, add it to
+`src-tauri/gen/android/app/src/main/AndroidManifest.xml`:
 
 ```xml
 <uses-permission android:name="android.permission.INTERNET" />
-<uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
-<uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
 ```
 
-Android 13+ (API 33+) additionally requires the nearby-devices permission for
-network service discovery:
+On Android 12 and older, and Android 13 devices before T extension 7, the plugin
+shares one `WifiManager.MulticastLock` across active DNS-SD browse and
+advertisement sessions and releases it after the last native session becomes
+terminal. Starting at T extension 7, foreground apps receive multicast through
+the system and the plugin does not acquire a lock.
+See Android's [`NsdManager` multicast-lock guidance](https://developer.android.com/reference/android/net/nsd/NsdManager#wi-fi-multicast-lock).
 
-```xml
-<uses-permission
-  android:name="android.permission.NEARBY_WIFI_DEVICES"
-  android:usesPermissionFlags="neverForLocation" />
-```
-
-If your app genuinely needs device location alongside discovery, use the
-pre-33 location path instead:
-
-```xml
-<uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES" />
-<uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
-```
-
-`CHANGE_WIFI_MULTICAST_STATE` is what lets the app receive the multicast mDNS
-traffic; without it `NsdManager` discovery silently returns nothing on many
-devices.
+`NEARBY_WIFI_DEVICES` is a Wi-Fi management permission and is not required for
+the `NsdManager` API used here. Starting with Android 17, applications that
+*target API 37 or newer* must instead declare and request the runtime
+`ACCESS_LOCAL_NETWORK` permission (or adopt a system-mediated picker). The
+current plugin compiles against API 34, so do not add that future permission
+until the application upgrades its target and implements the runtime prompt.
+See Android's [Local network permission](https://developer.android.com/privacy-and-security/local-network-permission)
+guide for the target-SDK transition.
 
 ---
 
 ## Verifying discovery on a LAN
 
-- **iOS ↔ iOS / Android**, and **desktop ↔ desktop**, discover each other
-  out of the box (same-stack).
-- **mobile → desktop** works today.
-- **desktop → mobile** requires the desktop side to advertise standard DNS-SD
-  records (a `PTR` record in particular). See
-  [issue #329](https://github.com/momics/iroh-http/issues/329) — this is being
-  standardized so a phone can discover a desktop/server node on the same Wi-Fi.
+- **desktop ↔ desktop**, **desktop ↔ mobile**, and **iOS ↔ Android** are all
+  supported when both apps are active on the same LAN and use the same service
+  name.
+- Guest-network client isolation, platform firewalls, and background execution
+  limits can still prevent multicast visibility.
 
 To sanity-check what is actually on the wire from a Mac, use Apple's built-in
 browser:
