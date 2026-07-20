@@ -51,6 +51,13 @@ import type { NodeOptions } from "./options/NodeOptions.js";
 import { nodeAddrWithRelay } from "./utils.js";
 
 const _INTERNAL = Symbol("IrohNode._create");
+let nextPathSubscriptionId = 0;
+
+function allocatePathSubscriptionId(): number {
+  nextPathSubscriptionId = (nextPathSubscriptionId + 1) >>> 0;
+  if (nextPathSubscriptionId === 0) nextPathSubscriptionId = 1;
+  return nextPathSubscriptionId;
+}
 
 /**
  * True when `nodeId` (as reported by a peer browse event) identifies the local
@@ -571,7 +578,9 @@ export class IrohNode extends EventTarget {
 
     return {
       [Symbol.asyncIterator]() {
+        const subscriptionId = allocatePathSubscriptionId();
         let stopped = false;
+        let startedNative = false;
         let abortListener: (() => void) | undefined;
         const cleanup = async (): Promise<void> => {
           if (stopped) return;
@@ -580,11 +589,17 @@ export class IrohNode extends EventTarget {
             signal?.removeEventListener("abort", abortListener);
             abortListener = undefined;
           }
-          try {
-            await adapter.unsubscribePathChanges(endpointHandle, nodeId);
-          } catch {
-            // Endpoint shutdown may race iterator cleanup; the subscription is
-            // already gone in that case.
+          if (startedNative) {
+            try {
+              await adapter.unsubscribePathChanges(
+                endpointHandle,
+                nodeId,
+                subscriptionId,
+              );
+            } catch {
+              // Endpoint shutdown may race iterator cleanup; the subscription
+              // is already gone in that case.
+            }
           }
         };
         abortListener = () => {
@@ -598,7 +613,12 @@ export class IrohNode extends EventTarget {
               await cleanup();
               return { done: true, value: undefined };
             }
-            const path = await adapter.nextPathChange(endpointHandle, nodeId);
+            startedNative = true;
+            const path = await adapter.nextPathChange(
+              endpointHandle,
+              nodeId,
+              subscriptionId,
+            );
             if (path === null || stopped || signal?.aborted) {
               await cleanup();
               return { done: true, value: undefined };

@@ -14,14 +14,16 @@ DNS discovery is enabled by default and configured at node creation:
 
 ```ts
 await createNode({
-  // Default: true — uses n0's hosted DNS infrastructure.
-  dns: true,
+  discovery: {
+    // Default: true — uses n0's hosted DNS infrastructure.
+    dns: true,
 
-  // Custom resolver:
-  // dns: { resolverUrl: 'https://dns.example.com' },
+    // Custom resolver:
+    // dns: { serverUrl: 'https://dns.example.com' },
 
-  // Disable entirely (air-gapped / embedded):
-  // dns: false,
+    // Disable entirely (air-gapped / embedded):
+    // dns: false,
+  },
 });
 ```
 

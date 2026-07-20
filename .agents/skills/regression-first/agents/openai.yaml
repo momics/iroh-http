@@ -1,0 +1,4 @@
+interface:
+  display_name: "Regression First"
+  short_description: "Reproduce released bugs before fixing them"
+  default_prompt: "Use $regression-first to reproduce this released bug and implement a verified fix."

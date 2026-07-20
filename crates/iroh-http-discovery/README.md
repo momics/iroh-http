@@ -17,7 +17,7 @@ discoverable from mobile.
 ## When to use
 
 - **Desktop apps** (macOS, Linux, Windows) that need local peer discovery
-- **Node.js** servers on a LAN
+- **Custom Rust integrations** that need the shared DNS-SD session engine
 
 ## Platform architecture
 
@@ -29,11 +29,12 @@ discoverable from mobile.
 
 ## Usage
 
-This crate is typically not used directly. Enable the `mdns` feature in your platform adapter or pass it to `iroh-http-core` via `NodeOptions`:
+This crate is typically not used directly. Enable local discovery in the
+platform adapter's `NodeOptions`:
 
 ```ts
 const node = await createNode({
-  discovery: { mdns: true, serviceName: "my-app" }
+  discovery: { mdns: { serviceName: "my-app" } }
 });
 ```
 

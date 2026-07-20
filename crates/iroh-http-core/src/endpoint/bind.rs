@@ -261,7 +261,7 @@ impl IrohEndpoint {
                 closed_rx,
                 event_tx,
                 event_rx: std::sync::Mutex::new(Some(event_rx)),
-                path_subs: dashmap::DashMap::new(),
+                path_subs: std::sync::Mutex::new(std::collections::HashMap::new()),
                 active_path_watchers: std::sync::atomic::AtomicUsize::new(0),
             },
             ffi: FfiBridge {
