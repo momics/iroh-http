@@ -29,8 +29,10 @@ use super::{
 ///
 /// Android kernels can advertise this capability and then reject batched sends.
 /// Until noq retries rejected batches as individual datagrams, disabling the
-/// optimization avoids losing the affected packets on Android. Remove this
-/// policy after <https://github.com/n0-computer/noq/pull/746> is released.
+/// optimization avoids losing the affected packets on Android. Removal is
+/// tracked in <https://github.com/momics/iroh-http/issues/388>; wait until
+/// <https://github.com/n0-computer/noq/pull/746> ships through a released iroh
+/// version and the physical-device matrix passes.
 fn segmentation_offload_enabled(target_os: &str) -> bool {
     target_os != "android"
 }
