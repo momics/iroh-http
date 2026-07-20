@@ -89,7 +89,7 @@ All slotmap operations lock the per-registry `Mutex`. This is a short critical s
 Every `IrohEndpoint` spawns a background task at bind time that sweeps expired
 handles every **60 seconds**. The default TTL is **5 minutes**
 (`DEFAULT_SLAB_TTL_MS = 300_000`). Configure with
-`NodeOptions.advanced.handleTtl` (milliseconds).
+`NodeOptions.internals.handleTtl` (milliseconds).
 
 The sweep retains only entries whose `created_at.elapsed() < ttl`:
 
