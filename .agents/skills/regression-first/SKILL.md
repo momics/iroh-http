@@ -67,8 +67,9 @@ Closes #N
 
 ### Step 6 — Close the issue
 
-Post a comment with the commit hash and one-sentence summary, then close
-the issue via the `manage-issues` skill.
+After the resolving pull request is merged, post a full link to the merged pull
+request or commit and a one-sentence outcome. Then close the issue via
+`manage-issues` if GitHub did not close it automatically.
 
 ---
 
@@ -117,4 +118,4 @@ Deno.test({
 - Use `manage-issues` to confirm the issue exists and to close it after fixing.
 - Use `fix-issues` to sequence the regression-first workflow within a larger
   backlog sweep.
-- Use `git-conventions` for all commit messages.
+- Follow `AGENTS.md` for commit and branch conventions.

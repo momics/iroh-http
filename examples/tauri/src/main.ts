@@ -34,6 +34,7 @@ import complianceCases from "../../../tests/http-compliance/cases.json";
 import { buildSuite, runSuite } from "../../../tests/interop/suite.mjs";
 import { getPeers, type RegistryPeer, upsertPeer } from "./peer-registry.js";
 import { createPeerPicker } from "./peer-picker.js";
+import { testModeAdvertisement } from "./test-mode-discovery.js";
 
 // ── Utilities ──────────────────────────────────────────────────────────────────
 
@@ -1307,31 +1308,54 @@ function detectPlatform(): TestPlatform {
     //     Attach our *dialable* direct address (and relay) via TXT so browsing
     //     peers resolve a real `ip:port` and can exercise a direct LAN dial
     //     instead of falling back to relay (the #350 "W1" gap). `discoveryInfo`
-    //     surfaces the true bound QUIC port from core, which `node.addr()`
-    //     cannot (its `ip_addrs()` ports are placeholders). The SRV `port: 1`
-    //     stays a generic-record placeholder; the dialable address rides in the
-    //     `address` TXT, which `asIrohPeer()` reads back on browse.
+    //     surfaces the true bound QUIC port from core. Publish that same port in
+    //     SRV after serve() has bound it: iOS must register the caller-owned
+    //     service via NetService without trying to bind/hijack the socket (#366).
+    //     The address TXT remains authoritative for plural/reflexive candidates.
     const di = await node.discoveryInfo().catch(() => null);
-    const dialable = di
-      ? (di.directAddresses.length > 0
-        ? di.directAddresses.join(",")
-        : di.directAddress ?? undefined)
-      : undefined;
+    const advertisement = testModeAdvertisement(di);
+    dnssdCheck(null, {
+      check: "bound-port",
+      role: "advertise",
+      port: advertisement.port,
+      alreadyBound: advertisement.usesBoundPort,
+      outcome: "attempt",
+    });
+    setStatus(
+      modeStatus,
+      advertisement.usesBoundPort
+        ? `Serving + advertising already-bound UDP port ${advertisement.port}…`
+        : "Serving + advertising with placeholder port (no direct candidate)…",
+      "ok",
+    );
     void node.advertise({
       serviceName: TEST_SERVICE,
       instanceName: selfId,
-      port: 1,
+      port: advertisement.port,
       protocol: "udp",
       txt: {
         pk: selfId,
         [TEST_TXT_KEY]: "1",
         platform: selfPlatform,
         caps: "http-compliance",
-        ...(dialable ? { [TXT_KEY_ADDRESS]: dialable } : {}),
+        boundPort: advertisement.usesBoundPort ? "1" : "0",
+        ...(advertisement.addressTxt
+          ? { [TXT_KEY_ADDRESS]: advertisement.addressTxt }
+          : {}),
         ...(di?.relayUrl ? { [TXT_KEY_RELAY]: di.relayUrl } : {}),
       },
       signal: ac.signal,
-    }).catch(() => {/* aborted or error */});
+    }).catch((error: unknown) => {
+      if (ac.signal.aborted) return;
+      dnssdCheck(null, {
+        check: "bound-port",
+        role: "advertise",
+        port: advertisement.port,
+        alreadyBound: advertisement.usesBoundPort,
+        outcome: "fail",
+      });
+      setStatus(modeStatus, `DNS-SD advertise failed: ${error}`, "error");
+    });
 
     // (c) Browse for other test-mode peers → upsert into the shared registry.
     void (async () => {
@@ -1367,6 +1391,15 @@ function detectPlatform(): TestPlatform {
 
           // Active records must carry the testing-mode marker to count.
           if (rec.txt[TEST_TXT_KEY] !== "1") continue;
+          dnssdCheck(null, {
+            check: "bound-port",
+            role: "browse",
+            instance: rec.instanceName,
+            port: rec.port,
+            addrs: rec.addrs.length,
+            alreadyBound: rec.txt.boundPort === "1",
+            isActive: rec.isActive,
+          });
           const peer = asIrohPeer(rec);
           if (!peer || peer.nodeId === selfId) continue;
 

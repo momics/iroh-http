@@ -1,200 +1,252 @@
-# On-device DNS-SD verification runbook (#334)
+# On-device DNS-SD release-candidate verification
 
-Standard DNS-SD discovery ([ADR-017](../adr/017-standard-dns-sd-discovery.md),
-#330) includes mobile-native Tauri adapters. CI compiles both adapters and runs
-deterministic host lifecycle contracts, but it has no physical iOS or Android
-device runner. This runbook drives the real hardware pass from the example
-app's **Test** tab **Suite runner**, which
-executes the structured interop suite
-([`tests/interop/suite.mjs`](../../tests/interop/suite.mjs)) against a
-discovered peer and reports grouped pass/fail/skip results plus a greppable log
-line per case.
+Use this runbook before tagging a release that changes discovery, the Tauri
+mobile bridge, mobile permissions, or the example test harness. CI compiles the
+Swift and Kotlin adapters and runs deterministic lifecycle contracts, but it
+cannot prove multicast visibility, OS permission behavior, or direct LAN
+connectivity on physical devices.
 
-The suite folds the DNS-SD acceptance criteria into named groups:
+Run the example app's **Test** tab against one desktop, one physical iOS device,
+and one physical Android device. The suite in
+[`tests/interop/suite.mjs`](../../tests/interop/suite.mjs) reports grouped
+pass/fail/skip results and emits one greppable line per case.
 
-| Group | Covers | #334 criterion |
-|-------|--------|----------------|
-| `discovery` | self advertises a dialable address; advertise→browse round-trip; re-advertise re-emits (rebind, W2) | 1 (discover), 2 (isActive/rebind) |
-| `direct-dial` | fetch reaches the peer over a direct `ip:port` (asserts `transport === "direct"`) | 1 (auto-dial) |
-| `relay-fallback` | fetch succeeds with only a relay available (asserts `transport === "relay"`) | — |
-| `http-compliance` | the `cases.json` corpus over the dialed peer | — |
-| `serve-stop` | serve → reachable → stop → refused | — |
+| Group             | Required evidence                                                              |
+| ----------------- | ------------------------------------------------------------------------------ |
+| `discovery`       | self advertisement is visible and dialable; re-advertising re-emits the record |
+| `direct-dial`     | fetch reaches the selected peer with `transport=direct`                        |
+| `relay-fallback`  | a relay-only fetch succeeds when that precondition is available                |
+| `http-compliance` | the shared `cases.json` corpus passes against the selected peer                |
+| `serve-stop`      | serve becomes reachable, stops, then refuses new requests                      |
 
-> **Honest assertions.** Cases that cannot *measure* their precondition (no
-> mDNS on a headless runtime, transport unknown because `peerStats()` is
-> unavailable) report **skip**, not pass. A green run therefore means the
-> behaviour was observed, not merely "did not error". On mobile the app passes
-> `mdnsCapable: true`, so a discovery case that fails to observe the peer is a
-> real **fail** (e.g. a missing `NSBonjourServices` plist entry), never a silent
-> skip.
+Cases that cannot measure their precondition report **skip**, not pass. On Tauri
+mobile and desktop the harness sets `mdnsCapable: true`, so a discovery case
+that observes nothing is a failure. The discovery and direct-dial groups must
+not be all-skip for a release-candidate device run.
 
-The standalone diagnostic cards from earlier drafts (isActive-watch, Android
-resolve-queue burst, iOS TXT-mutate) have been **removed** — their behaviour is
-now exercised by the `discovery` group's rebind case and by normal suite
-traffic. The one remaining manual DNS-SD check is the **Generic DNS-SD**
-advertise/browse on the **Discovery** tab (criterion 5, iOS metadata-only).
+## 1. Record the candidate and devices
 
----
+Test an exact commit, not an unrecorded working tree. Record:
 
-## 0. Setup
+- candidate commit SHA;
+- desktop OS and architecture;
+- iOS device model and iOS version;
+- Android device model, API level, and T extension level;
+- Wi-Fi network used and whether client isolation is disabled.
 
-**Hardware:** one desktop (macOS/Linux/Windows), one iPhone/iPad, one Android
-phone/tablet — all on the **same LAN / Wi-Fi** with client isolation OFF.
-
-**Permissions:** confirm the iOS `Info.plist`
-(`NSLocalNetworkUsageDescription` + `NSBonjourServices`, including the
-`_iroh-http-test._udp` testing-mode service) and Android `AndroidManifest.xml`
-entries per [Mobile mDNS / DNS-SD setup](../guidelines/mobile-mdns-setup.md). On
-first launch iOS shows a local-network permission prompt — **Allow** it.
-
-**Build & install the example app** (`examples/tauri`) on each device:
+Useful Android commands:
 
 ```sh
-# desktop
-cd examples/tauri && npm run tauri dev
-# iOS device (Xcode signing required)
+adb shell getprop ro.build.version.sdk
+adb shell getprop build.version.extensions.t
+```
+
+If the extension property is unavailable, record it as unknown. The plugin's
+legacy multicast-lock path runs on Android 12 and older, and on Android 13
+devices before T extension 7. A modern device does not exercise that branch.
+
+## 2. Build and install from a clean checkout
+
+Install dependencies and build the unpublished TypeScript packages before
+starting any target:
+
+```sh
+# Repository root
+npm ci
+npm run build:shared
+npm run build:tauri
+
+cd examples/tauri
+npm ci
+```
+
+Then start each target from `examples/tauri`:
+
+```sh
+# Desktop
+npm run tauri dev
+
+# Physical iOS device; initialize once and configure Xcode signing first
+npm run tauri ios init
 npm run tauri ios dev
-# Android device (USB debugging on)
+
+# Physical Android device with USB debugging enabled; initialize once
+npm run tauri android init
 npm run tauri android dev
 ```
 
-**Attach to logs.** The suite emits one greppable line per case
-(`IROH_INTEROP_CASE`) and the app prints the full JSON report under the
-`[iroh-http-interop]` tag. The generic-browse check still uses the
-`IROH_DNSSD_CHECK` prefix.
+The checked-in example configuration links `SystemConfiguration`, declares
+`_iroh-http._udp`, `_iroh-http-test._udp`, and `_demo-printer._tcp` on iOS, and
+grants the Tauri discovery capability. On the first iOS browse or advertisement,
+tap **Allow** on the Local Network prompt. If it was denied, re-enable the app
+under **Settings → Privacy & Security → Local Network**.
+
+Keep all three apps in the foreground on the same non-isolated LAN. Disable VPN
+or per-app network filtering for the test. A relay path may still exist, but the
+direct-dial assertion below proves that the LAN path was used.
+
+## 3. Capture private evidence
+
+The suite emits `IROH_INTEROP_CASE` lines, a complete JSON report under
+`[iroh-http-interop]`, and `IROH_DNSSD_CHECK` lines for generic and bound-port
+checks.
 
 ```sh
-# Android — native + webview console both reach logcat
-adb logcat | grep --line-buffered -E 'IROH_INTEROP_CASE|iroh-http-interop|IROH_DNSSD_CHECK'
-# iOS — device console (Console.app, or:)
-xcrun devicectl device console --device <UDID> | grep -E 'IROH_INTEROP_CASE|iroh-http-interop|IROH_DNSSD_CHECK'
-# desktop — lines print to the terminal running `tauri dev`
+# Android
+adb logcat | grep --line-buffered -E \
+  'IROH_INTEROP_CASE|iroh-http-interop|IROH_DNSSD_CHECK'
+
+# iOS (Console.app is also suitable)
+xcrun devicectl device console --device <UDID> | \
+  grep -E 'IROH_INTEROP_CASE|iroh-http-interop|IROH_DNSSD_CHECK'
+
+# Desktop: use the terminal running `tauri dev`.
 ```
 
-**Case-line grammar:**
-`IROH_INTEROP_CASE id=<case> group=<group> outcome=<pass|fail|skip> latencyMs=<n> [transport=<direct|relay>]`
-— single line, space-separated, greppable.
+Optional automatic collection is available from the repository root:
 
----
-
-## Criterion 1 — advertise / discover + auto-dial (iOS↔desktop, Android↔desktop)
-
-Run once for the iOS↔desktop pair, once for Android↔desktop.
-
-**Steps**
-
-1. On both devices in the pair, open **Test** and toggle **Enable testing
-   mode**. Each device advertises the `_iroh-http-test._udp` service with a real
-   `address` TXT and browses for the other.
-2. Within a few seconds the peer appears in the **Suite runner** peer picker
-   with the correct `platform`.
-3. On the client device, pick the peer and press **Run suite** (or **Run all
-   peers** to sweep every discovered test peer).
-
-**Pass signatures**
-
-- The peer appears in the picker with the correct platform.
-- The **summary** shows `fail = 0`; the `discovery` and `direct-dial` groups are
-  green (not all-skip).
-- `direct-dial` reports `transport=direct`:
-  `IROH_INTEROP_CASE id=direct-dial-fetch group=direct-dial outcome=pass latencyMs=… transport=direct`
-- The console emits the report:
-  `[iroh-http-interop] {"schema":"iroh-http-interop/2",…,"summary":{"total":…,"pass":…,"fail":0,"skip":…,"transport":{"direct":…,"relay":…,"unknown":…}}}`
-
-**Fail signatures**
-
-- Peer never appears → advertise/browse or permissions broken (check the iOS
-  local-network prompt and `NSBonjourServices`).
-- `direct-dial` **skips** on mobile → no dialable `address` was advertised or
-  transport could not be measured; the direct path was not exercised. Capture
-  the JSON and file a follow-up.
-- Any group reports `fail > 0` or a `Run error:` status.
-
----
-
-## Criterion 2 — isActive transitions / rebind (both platforms)
-
-Covered by the `discovery` group's **re-advertise re-emits the record (rebind,
-W2)** case: the app re-advertises and asserts the browse stream re-surfaces the
-changed record instead of suppressing it (the iOS `Set→snapshot` and Android
-resolve-queue fixes). It runs as part of **Run suite**.
-
-**Pass:** `IROH_INTEROP_CASE id=discovery-rebind-reemit group=discovery outcome=pass …`
-on the device under test.
-
-**Fail:** the rebind case reports `fail` (record never re-emitted) — not `skip`.
-A `skip` here means the runtime is not mDNS-capable (never expected on device).
-
----
-
-## Criterion 5 — generic advertise / browse; iOS metadata-only
-
-Uses the **Discovery** tab's **Generic DNS-SD** advertise/browse (the generic
-browse loop emits a greppable line for every record). This is the one check the
-Suite runner does not cover, because it verifies the *documented iOS limitation*
-rather than a pass/fail behaviour.
-
-**Steps**
-
-1. On device A press **Start advertising** (service `demo-printer`, TXT
-   `model`/`color`/`pdl`, port 9100, tcp).
-2. On device B press **Start browsing** the same service.
-
-**Pass signatures** (grep `IROH_DNSSD_CHECK check=generic`)
-
-- Android/desktop browser resolves fully:
-  `IROH_DNSSD_CHECK check=generic role=browse instance=Front Desk Printer port=9100 host=<h> addrs=<n> isActive=true`
-- **iOS browser is metadata-only** — confirm exactly:
-  `IROH_DNSSD_CHECK check=generic role=browse instance=Front Desk Printer port=0 host=undefined addrs=0 isActive=true`
-  (TXT still present in the on-screen log). This confirms the documented iOS
-  limitation, not a bug.
-
-**Fail signatures**
-
-- iOS shows a non-zero `port` / resolved `host` (unexpected — investigate), or
-  Android shows `port=0` (resolve failed on a platform that should resolve).
-
----
-
-## Record results; file follow-ups
-
-Fill the matrix below and paste into #334. File a follow-up issue per divergence.
-
-### Results matrix (paste into #334)
-
-```
-### #334 on-device DNS-SD verification results
-
-App commit: <sha>   Runbook: docs/internals/dns-sd-device-verification.md
-
-| Check | iOS ↔ desktop | Android ↔ desktop | Notes |
-|-------|:-------------:|:-----------------:|-------|
-| 1 discovery group (advertise/browse)  | ☐ pass / ☐ fail | ☐ pass / ☐ fail | |
-| 1 direct-dial (transport=direct)      | ☐ pass / ☐ skip | ☐ pass / ☐ skip | |
-| 2 discovery rebind (isActive/re-emit) | ☐ pass / ☐ fail | ☐ pass / ☐ fail | |
-| http-compliance group                 | __/__ pass      | __/__ pass      | |
-| serve-stop group                      | ☐ pass / ☐ fail | ☐ pass / ☐ fail | |
-| 5 generic browse; iOS port=0/host=undef | ☐ pass / ☐ fail | ☐ pass / ☐ fail | |
-
-Devices: iOS <model/version>, Android <model/API>, desktop <os/version>.
-
-Follow-ups filed: #____, #____ (none if all pass).
-
-<attach: [iroh-http-interop] /2 JSON + relevant IROH_INTEROP_CASE / IROH_DNSSD_CHECK excerpts>
+```sh
+npm run build:node
+npm run report:serve
 ```
 
-### Filing follow-ups for divergences
+Paste the printed collector node ID into each app's **Test** tab and enable
+automatic submission. Store raw reports with private release evidence. A public
+release issue should receive only the sanitized result matrix and links to any
+follow-up issues: node IDs, local socket addresses, device labels, and network
+metadata can identify a device or LAN.
 
-Follow the [manage-issues](../../.github/skills/manage-issues/SKILL.md)
-conventions. For each failure open a **linked** issue:
+The per-case line format is:
 
-- **Title:** `fix(tauri): <symptom> on <platform> DNS-SD <path>` (e.g.
-  `fix(tauri): Android discovery rebind not re-emitted under concurrent resolve`).
-- **Body sections:** Summary, Evidence (paste the exact `IROH_INTEROP_CASE …` /
-  `IROH_DNSSD_CHECK …` lines + device/OS), Impact, Remediation, Acceptance
-  criteria.
-- **Link:** reference `#334` and note which check failed.
-- **Labels:** `bug`, `connectivity` (or repo equivalents).
+```text
+IROH_INTEROP_CASE id=<case> group=<group> outcome=<pass|fail|skip> latencyMs=<n> [transport=<direct|relay>]
+```
 
-If everything passes, comment the completed matrix on #334 and close it with a
-link to the verifying commit/PR.
+## 4. Run the cross-platform suite
+
+1. On all three apps, open **Test** and enable **Testing mode**. Each app starts
+   its compliance server, advertises `_iroh-http-test._udp`, and browses for the
+   other candidates.
+2. Wait for both other platforms to appear in every peer picker with the correct
+   platform label.
+3. Run the smallest directed cycle that exercises each runtime once as client
+   and once as server:
+   - Android → iOS;
+   - iOS → desktop;
+   - desktop → Android.
+4. Use **Run all peers** instead when making a major discovery change or when
+   investigating a platform-pair asymmetry.
+
+Every required run must show:
+
+- `fail = 0` and no `Run error`;
+- `discovery-advertise-browse` passes;
+- `discovery-rebind-reemit` passes, not skips;
+- `direct-dial-fetch` passes, not skips, with `transport=direct`;
+- the HTTP-compliance and serve-stop groups pass.
+
+The direct-path signature is:
+
+```text
+IROH_INTEROP_CASE id=direct-dial-fetch group=direct-dial outcome=pass latencyMs=… transport=direct
+```
+
+Testing mode also advertises the endpoint's already-bound QUIC port. On iOS, the
+status must say **Serving + advertising already-bound UDP port `<port>`** with a
+port greater than 1. Its evidence must show an attempted advertisement, a
+matching active browse record, and no advertisement failure:
+
+```text
+IROH_DNSSD_CHECK check=bound-port role=advertise port=<port> alreadyBound=true outcome=attempt
+IROH_DNSSD_CHECK check=bound-port role=browse port=<same-port> addrs=<n> alreadyBound=true isActive=true
+```
+
+The browse record must have at least one address, and the complete suite against
+that iOS target must retain `transport=direct`.
+
+## 5. Exercise generic DNS-SD
+
+The suite specializes DNS-SD for iroh peers. Test the lossless generic surface
+separately from **Discovery → Generic DNS-SD**:
+
+1. On all three apps, press **Start advertising** for the default `demo-printer`
+   TCP service.
+2. On all three apps, press **Start browsing** for the same service.
+3. Confirm that every browser observes both other platforms.
+
+Android and desktop resolve full records:
+
+```text
+IROH_DNSSD_CHECK check=generic role=browse instance=Front Desk Printer … port=9100 host=<host> addrs=<n> isActive=true
+```
+
+iOS intentionally exposes metadata and TXT only, because `NWBrowser` does not
+resolve the endpoint without an `NWConnection`:
+
+```text
+IROH_DNSSD_CHECK check=generic role=browse instance=Front Desk Printer … port=0 host=undefined addrs=0 isActive=true
+```
+
+The iOS on-screen record must still contain the advertised TXT fields. Android
+or desktop returning `port=0`, or a platform failing to see an advertiser, is a
+release-blocking failure.
+
+## 6. Verify lifecycle and legacy Android multicast
+
+On Android, with Testing mode enabled, both a browse and an advertisement are
+active concurrently:
+
+1. Confirm the iOS and desktop peers are visible.
+2. Disable Testing mode. Confirm the Android peer disappears from the other
+   pickers after the DNS-SD loss/expiry transition.
+3. Re-enable Testing mode. Confirm the Android peer reappears as a new active
+   record.
+4. Run Android → desktop once more and require a direct-dial pass.
+
+Perform this cycle on an Android 12-or-older device, or an Android 13 device
+before T extension 7, to exercise the plugin's shared
+`WifiManager.MulticastLock` acquisition and final-session release. If only a
+modern Android device is available, record the legacy branch as **not physically
+verified**. The deterministic Android contract test may support an explicit
+maintainer risk acceptance, but must not be reported as an on-device pass.
+
+## 7. Record the release gate
+
+Attach the completed matrix to the current release-readiness issue or private
+release record. Do not reopen or update historical verification issues solely to
+store a new release's evidence.
+
+```md
+### On-device DNS-SD release-candidate results
+
+Candidate commit: `<sha>`
+
+| Device  | Version / API                   | T extension          | Notes                    |
+| ------- | ------------------------------- | -------------------- | ------------------------ |
+| Desktop | `<OS, version, architecture>`   | n/a                  |                          |
+| iOS     | `<model, iOS version>`          | n/a                  | Local Network allowed    |
+| Android | `<model, Android version, API>` | `<value or unknown>` | Legacy lock path: yes/no |
+
+| Check                                              |        Result        | Evidence / notes      |
+| -------------------------------------------------- | :------------------: | --------------------- |
+| All peers visible on all three pickers             |      pass/fail       |                       |
+| Android → iOS full suite                           |      pass/fail       | direct: pass/skip     |
+| iOS → desktop full suite                           |      pass/fail       | direct: pass/skip     |
+| Desktop → Android full suite                       |      pass/fail       | direct: pass/skip     |
+| iOS already-bound advertisement                    |      pass/fail       | port: `<n>`           |
+| Generic browse on Android                          |      pass/fail       | full records: yes/no  |
+| Generic browse on desktop                          |      pass/fail       | full records: yes/no  |
+| Generic browse on iOS                              |      pass/fail       | metadata-only: yes/no |
+| Android disable → disappear → re-enable → reappear |      pass/fail       |                       |
+| Legacy Android multicast branch                    | pass/fail/not tested | device/API evidence   |
+
+- Collector/report attachments: `<private links or paths>`
+- Follow-up issues: `<links, or none>`
+- Maintainer release approval: `<name/date>`
+```
+
+Any required failure blocks tagging. Open one linked issue per divergence with
+the exact case line, report excerpt, candidate SHA, device/OS details, expected
+behavior, and reproduction steps. A release may proceed without a physical
+legacy-Android result only after the matrix records `not tested` and a
+maintainer explicitly accepts the residual risk.

@@ -46,11 +46,22 @@ struct PathSub {
     notify: tokio::sync::Notify,
 }
 
-type PathRxMap = dashmap::DashMap<(u64, String), std::sync::Arc<PathSub>>;
+type PathRxMap = dashmap::DashMap<(u64, String, u32), std::sync::Arc<PathSub>>;
 
 fn path_change_rxs() -> &'static PathRxMap {
     static PATH_CHANGE_RXS: std::sync::OnceLock<PathRxMap> = std::sync::OnceLock::new();
     PATH_CHANGE_RXS.get_or_init(dashmap::DashMap::new)
+}
+
+fn clear_path_change_rxs(endpoint_handle: u64) {
+    path_change_rxs().retain(|key, sub| {
+        if key.0 == endpoint_handle {
+            sub.notify.notify_waiters();
+            false
+        } else {
+            true
+        }
+    });
 }
 
 // ── Endpoint helpers ─────────────────────────────────────────────────────────
@@ -404,6 +415,7 @@ async fn close_endpoint(p: Value) -> Value {
             } else {
                 ep.close().await;
             }
+            clear_path_change_rxs(handle);
             // Remove from registry only after close completes.
             remove_endpoint(handle);
             ok(json!({}))
@@ -1874,6 +1886,7 @@ async fn next_transport_event_dispatch(p: Value) -> Value {
 struct NextPathChangePayload {
     endpoint_handle: u64,
     node_id: String,
+    subscription_id: u32,
 }
 
 async fn next_path_change_dispatch(p: Value) -> Value {
@@ -1896,11 +1909,15 @@ async fn next_path_change_dispatch(p: Value) -> Value {
         }
     };
 
-    let key = (payload.endpoint_handle, payload.node_id.clone());
+    let key = (
+        payload.endpoint_handle,
+        payload.node_id.clone(),
+        payload.subscription_id,
+    );
     let rx_arc = rxs
         .entry(key.clone())
         .or_insert_with(|| {
-            let rx = ep.subscribe_path_changes(&payload.node_id);
+            let rx = ep.subscribe_path_changes(&payload.node_id, payload.subscription_id);
             std::sync::Arc::new(PathSub {
                 rx: tokio::sync::Mutex::new(rx),
                 notify: tokio::sync::Notify::new(),
@@ -1945,12 +1962,25 @@ fn unsubscribe_path_changes_dispatch(p: Value) -> Value {
         }
     };
 
-    if let Some((_, sub)) =
-        path_change_rxs().remove(&(payload.endpoint_handle, payload.node_id.clone()))
-    {
-        sub.notify.notify_waiters();
+    let key = (
+        payload.endpoint_handle,
+        payload.node_id.clone(),
+        payload.subscription_id,
+    );
+    match path_change_rxs().entry(key) {
+        dashmap::mapref::entry::Entry::Occupied(entry) => {
+            let (_, sub) = entry.remove_entry();
+            sub.notify.notify_waiters();
+        }
+        dashmap::mapref::entry::Entry::Vacant(entry) => {
+            let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            entry.insert(std::sync::Arc::new(PathSub {
+                rx: tokio::sync::Mutex::new(rx),
+                notify: tokio::sync::Notify::new(),
+            }));
+        }
     }
-    ep.unsubscribe_path_changes(&payload.node_id);
+    ep.unsubscribe_path_changes(&payload.node_id, payload.subscription_id);
     ok(serde_json::Value::Null)
 }
 

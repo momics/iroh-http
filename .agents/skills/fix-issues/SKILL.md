@@ -1,19 +1,16 @@
 ---
 name: fix-issues
-description: 'Systematically resolve open GitHub issues on Momics/iroh-http: fetch open issues, triage by priority, group combinable fixes, implement one group at a time, run local CI (npm run ci), commit with issue reference, post commit link and close the issue, then push all commits in one go. USE FOR: "fix open issues", "work through the backlog", "resolve issues", "tackle the issue list". DO NOT USE FOR: creating new issues (use manage-issues), one-off bug fixes without issue context, or PR creation.'
+description: Systematically resolve a set of open iroh-http issues through evidence-based triage, compatible vertical slices, focused verification, reviewed commits, and a branch pull request. Use when working through the backlog or resolving multiple related issues. Do not use for creating issues or bypassing review with a direct main-branch push.
 ---
 
-# Fix Issues — Momics/iroh-http
+# Fix iroh-http issues
 
-Resolve open GitHub issues systematically: triage → plan → fix → verify → commit → close → push.
+Resolve open GitHub issues systematically: triage → plan → fix → verify →
+review → merge → close.
 
 ## Phase 1 — Discover
 
-Fetch all open issues:
-
-```
-mcp_github-mcp_list_issues → owner: Momics, repo: iroh-http, state: OPEN, perPage: 100
-```
+Fetch all open issues with an available GitHub integration or `gh`.
 
 Read the full body of any issue that lacks sufficient detail before planning.
 
@@ -72,7 +69,8 @@ This runs: full release build → `scripts/check.sh` (fmt + clippy strict + carg
 
 ### 4d. Commit
 
-Follow the `git-conventions` skill for commit message format. Every commit that resolves one or more issues must include a `Closes #N` or `Fixes #N` footer for each issue resolved.
+Follow the repository conventions in `AGENTS.md`. Use closing keywords only
+when the pull request will actually resolve the referenced issue.
 
 ```
 fix(scope): short description
@@ -85,34 +83,33 @@ Closes #43
 
 After committing, record the commit hash.
 
-### 4e. Close the issue
+### 4e. Record completion evidence
 
-For each issue resolved in this commit:
+For each issue addressed by the commit, record:
 
-1. Post a comment:
-   ```
-   Fixed in [<short-hash>](https://github.com/Momics/iroh-http/commit/<full-hash>) — `<commit subject>`.
+1. The acceptance criteria satisfied.
+2. The focused and full validation commands run.
+3. The commit hash that will appear in the pull request.
 
-   <One sentence describing what changed and why.>
-   ```
-2. Close with `mcp_github-mcp_issue_write` → `state: "closed"`, `state_reason: "completed"`.
-
+Do not close the issue yet. A local commit or unmerged branch is not completion.
 Then move to the next group.
 
-## Phase 5 — Push
+## Phase 5 — Review and merge
 
-Only after **all** planned groups are committed and their issues are closed:
+Only after all planned groups are committed and verified:
 
-```
-git push origin main
-```
-
-Do not push after each individual commit. The single push keeps the remote history clean and avoids partial states if CI is interrupted.
+1. Push the working branch, never `main` directly.
+2. Open one focused pull request whose body maps commits and tests to issues.
+3. Wait for required CI and review. Address failures on the branch.
+4. After merge, verify each issue's acceptance criteria on the default branch.
+5. Let closing keywords close resolved issues, or use `manage-issues` to post
+   the merged change and close them manually.
 
 ## Guardrails
 
 - Never push with failing CI
-- Never close an issue before the commit that fixes it is made
+- Never push directly to `main`
+- Never close an issue before the resolving change is merged
 - Never combine issues whose fixes conflict — this produces a commit that is hard to revert
 - If a fix turns out to be larger than expected mid-implementation, stop, file a more detailed issue, and skip that group for this session
 - Amend the commit (not a new commit) if CI catches something in the immediately preceding fix before moving on
@@ -121,4 +118,4 @@ Do not push after each individual commit. The single push keeps the remote histo
 ## Related skills
 
 - [manage-issues](./../manage-issues/SKILL.md) — create, label, and structure issues
-- [git-conventions](./../git-conventions/SKILL.md) — commit message format and branch naming
+- [regression-first](./../regression-first/SKILL.md) — reproduce a released bug before fixing it

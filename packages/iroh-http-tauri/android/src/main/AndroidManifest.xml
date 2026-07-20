@@ -5,4 +5,7 @@
          configure iroh's resolver on Android, where the system DNS config is
          otherwise unreadable. Merged into every consumer app's manifest. -->
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- Required to acquire a shared WifiManager.MulticastLock while legacy
+         Android has an active DNS-SD browse or advertisement session. -->
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
 </manifest>

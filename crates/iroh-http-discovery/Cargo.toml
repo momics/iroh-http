@@ -31,6 +31,7 @@ mdns = [
     "runtime",
     "dep:mdns-sd",
     "dep:if-addrs",
+    "tokio/time",
 ]
 
 [dependencies]
@@ -63,3 +64,4 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "signa
 # The interop test derives a node's expected base32 DNS-SD label to match it
 # against discovery events.
 base32 = "0.5"
+n0-watcher = "1"

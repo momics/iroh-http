@@ -8,6 +8,7 @@ use std::sync::atomic::Ordering;
 use iroh::endpoint::TransportAddrUsage;
 
 use super::{
+    session_runtime::PathSubscriptions,
     stats::{EndpointStats, NodeAddrInfo, PathInfo, PeerStats},
     IrohEndpoint,
 };
@@ -22,7 +23,13 @@ impl IrohEndpoint {
         let pool_size = self.inner.http.pool.entry_count_approx() as usize;
         let active_connections = self.inner.http.active_connections.load(Ordering::Relaxed);
         let active_requests = self.inner.http.active_requests.load(Ordering::Relaxed);
-        let active_path_subscriptions = self.inner.session.path_subs.len();
+        let active_path_subscriptions = self
+            .inner
+            .session
+            .path_subs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len();
         let active_path_watchers = self
             .inner
             .session
@@ -232,23 +239,40 @@ impl IrohEndpoint {
     /// The watcher polls `peer_stats()` every 200 ms and emits on the returned
     /// channel whenever the active path changes.
     ///
-    /// Re-subscribing to a peer that already has a live watcher reuses that
-    /// watcher: only the sender is swapped, so no additional task is spawned and
-    /// `active_path_watchers` still counts exactly one live watcher per peer.
+    /// Additional subscriptions to a peer reuse its watcher and receive the
+    /// same changes. `subscription_id` scopes cancellation to its own receiver.
     pub fn subscribe_path_changes(
         &self,
         node_id_str: &str,
+        subscription_id: u32,
     ) -> tokio::sync::mpsc::UnboundedReceiver<PathInfo> {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        // Replace any existing sender; the running watcher (if any) picks up the
-        // new sender on its next poll. `insert` returns the previous sender when
-        // a watcher is already live for this peer.
-        let had_existing_watcher = self
-            .inner
-            .session
-            .path_subs
-            .insert(node_id_str.to_string(), tx)
-            .is_some();
+        let (peer_subscriptions, had_existing_watcher) = {
+            let mut subscriptions = self
+                .inner
+                .session
+                .path_subs
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let (peer_subscriptions, had_existing) = match subscriptions
+                .entry(node_id_str.to_string())
+            {
+                std::collections::hash_map::Entry::Occupied(entry) => (entry.get().clone(), true),
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    let peer_subscriptions = std::sync::Arc::new(PathSubscriptions {
+                        senders: std::sync::Mutex::new(std::collections::HashMap::new()),
+                    });
+                    entry.insert(peer_subscriptions.clone());
+                    (peer_subscriptions, false)
+                }
+            };
+            peer_subscriptions
+                .senders
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(subscription_id, tx);
+            (peer_subscriptions, had_existing)
+        };
 
         // A watcher already exists for this peer — reuse it. Spawning another
         // would leak a task and over-count `active_path_watchers`.
@@ -270,18 +294,47 @@ impl IrohEndpoint {
             loop {
                 // Exit immediately if the endpoint has been closed.
                 if *closed_rx.borrow() {
-                    ep.inner.session.path_subs.remove(&nid);
+                    let mut subscriptions = ep
+                        .inner
+                        .session
+                        .path_subs
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    if subscriptions
+                        .get(&nid)
+                        .is_some_and(|current| std::sync::Arc::ptr_eq(current, &peer_subscriptions))
+                    {
+                        subscriptions.remove(&nid);
+                    }
                     break;
                 }
-                let is_closed = ep
-                    .inner
-                    .session
-                    .path_subs
-                    .get(&nid)
-                    .map(|s| s.is_closed())
-                    .unwrap_or(true);
+                let is_closed = {
+                    let mut subscriptions = ep
+                        .inner
+                        .session
+                        .path_subs
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let Some(current) = subscriptions.get(&nid) else {
+                        break;
+                    };
+                    if !std::sync::Arc::ptr_eq(current, &peer_subscriptions) {
+                        break;
+                    }
+                    let is_empty = {
+                        let mut senders = peer_subscriptions
+                            .senders
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        senders.retain(|_, sender| !sender.is_closed());
+                        senders.is_empty()
+                    };
+                    if is_empty {
+                        subscriptions.remove(&nid);
+                    }
+                    is_empty
+                };
                 if is_closed {
-                    ep.inner.session.path_subs.remove(&nid);
                     break;
                 }
 
@@ -290,8 +343,22 @@ impl IrohEndpoint {
                         let key = format!("{}:{}", active.relay, active.addr);
                         if Some(&key) != last_key.as_ref() {
                             last_key = Some(key);
-                            if let Some(sender) = ep.inner.session.path_subs.get(&nid) {
-                                let _ = sender.send(active.clone());
+                            let subscriptions = ep
+                                .inner
+                                .session
+                                .path_subs
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            if subscriptions.get(&nid).is_some_and(|current| {
+                                std::sync::Arc::ptr_eq(current, &peer_subscriptions)
+                            }) {
+                                let senders = peer_subscriptions
+                                    .senders
+                                    .lock()
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                                for sender in senders.values() {
+                                    let _ = sender.send(active.clone());
+                                }
                             }
                             let _ = event_tx.try_send(
                                 crate::http::events::TransportEvent::path_change(
@@ -309,7 +376,16 @@ impl IrohEndpoint {
                     _ = tokio::time::sleep(std::time::Duration::from_millis(200)) => {}
                     result = closed_rx.wait_for(|v| *v) => {
                         let _ = result;
-                        ep.inner.session.path_subs.remove(&nid);
+                        let mut subscriptions = ep.inner
+                            .session
+                            .path_subs
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        if subscriptions.get(&nid).is_some_and(|current| {
+                            std::sync::Arc::ptr_eq(current, &peer_subscriptions)
+                        }) {
+                            subscriptions.remove(&nid);
+                        }
                         break;
                     }
                 }
@@ -324,8 +400,20 @@ impl IrohEndpoint {
     }
 
     /// Stop watching path changes for a specific peer.
-    pub fn unsubscribe_path_changes(&self, node_id_str: &str) {
-        self.inner.session.path_subs.remove(node_id_str);
+    pub fn unsubscribe_path_changes(&self, node_id_str: &str, subscription_id: u32) {
+        let subscriptions = self
+            .inner
+            .session
+            .path_subs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(peer_subscriptions) = subscriptions.get(node_id_str) {
+            peer_subscriptions
+                .senders
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&subscription_id);
+        }
     }
 }
 

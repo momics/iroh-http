@@ -133,12 +133,14 @@ interface NodeOptions {
   key?: SecretKey | Uint8Array;
 
   // ── Connectivity ──────────────────────────────────────────────────
-  /** Relay mode: "default" | "staging" | "disabled" | relay URL(s). */
-  relayMode?: RelayMode;
+  relay?: { mode?: RelayMode; urls?: string[] };
   /** Local bind address(es). */
   bindAddr?: string | string[];
-  /** QUIC idle timeout in milliseconds. */
-  idleTimeout?: number;
+  connections?: {
+    maxPooled?: number;
+    idleTimeoutMs?: number;
+    poolIdleTimeoutMs?: number;
+  };
 
   // ── Discovery ─────────────────────────────────────────────────────
   discovery?: {
@@ -147,28 +149,23 @@ interface NodeOptions {
   };
 
   // ── Proxy ─────────────────────────────────────────────────────────
-  proxyUrl?: string;
-  proxyFromEnv?: boolean;
+  proxy?: { url?: string; fromEnv?: boolean };
 
   // ── Debug ─────────────────────────────────────────────────────────
-  keylog?: boolean;
-
-  // ── Connection pool ───────────────────────────────────────────────
-  maxPooledConnections?: number;
-  poolIdleTimeoutMs?: number;
+  debug?: { keylog?: boolean };
 
   // ── Compression ───────────────────────────────────────────────────
   compression?: boolean | { level?: number; minBodyBytes?: number };
 
   // ── Limits ────────────────────────────────────────────────────────
   /** Max header block size in bytes. Default: 65 536. */
-  maxHeaderBytes?: number;
+  limits?: { maxHeaderBytes?: number };
 
   // ── Reconnect ─────────────────────────────────────────────────────
   reconnect?: { auto?: boolean; maxRetries?: number };
 
   // ── Advanced ──────────────────────────────────────────────────────
-  advanced?: {
+  internals?: {
     channelCapacity?: number;
     maxChunkSizeBytes?: number;
     handleTtl?: number;
@@ -402,7 +399,7 @@ reason about errors.
 4. **TTL sweep.** Any handle that is neither consumed nor explicitly freed
    within the TTL window (default **5 minutes**) is removed by a background
    sweep that runs every 60 seconds. This prevents handle leaks when JS code
-   abandons a request mid-stream. Configure with `NodeOptions.advanced.handleTtl`
+   abandons a request mid-stream. Configure with `NodeOptions.internals.handleTtl`
    (milliseconds).
 
 5. **Per-endpoint scoping.** Each node has its own isolated HandleStore. A
@@ -721,7 +718,7 @@ StoreConfig {
 }
 ```
 
-Configurable via `NodeOptions.advanced` on the JS side:
+Configurable via `NodeOptions.internals` on the JS side:
 `channelCapacity`, `maxChunkSizeBytes`, `handleTtl`.
 
 ### `ServeHandle`
@@ -733,7 +730,7 @@ Returned by `serve()` / `serve_with_events()` at the Rust layer.
 | `shutdown()` | Notify the serve loop to stop accepting new connections |
 | `drain(self)` | Shutdown + await completion (respects `drainTimeout`) |
 | `abort()` | Forcefully cancel the serve task |
-| `done()` | Resolves when the serve task has fully exited |
+| `subscribe_done()` | Watch signal that becomes true when the task exits |
 
 The default drain timeout is **30 seconds** (`DEFAULT_DRAIN_TIMEOUT_MS`).
 `close()` on the JS side maps to `drain()`. `close_force()` maps to `abort()`.

@@ -21,7 +21,7 @@ on:
       - 'docs/**'
       - '**.md'
       - '.github/ISSUE_TEMPLATE/**'
-      - '.github/skills/**'
+      - '.agents/skills/**'
       - '.vscode/**'
       - 'CHANGELOG.md'
       - 'LICENSE*'

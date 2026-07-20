@@ -76,11 +76,22 @@ struct PathSub {
     notify: tokio::sync::Notify,
 }
 
-type PathRxMap = dashmap::DashMap<(u32, String), Arc<PathSub>>;
+type PathRxMap = dashmap::DashMap<(u32, String, u32), Arc<PathSub>>;
 
 fn path_change_rxs() -> &'static PathRxMap {
     static PATH_CHANGE_RXS: std::sync::OnceLock<PathRxMap> = std::sync::OnceLock::new();
     PATH_CHANGE_RXS.get_or_init(dashmap::DashMap::new)
+}
+
+fn clear_path_change_rxs(endpoint_handle: u32) {
+    path_change_rxs().retain(|key, sub| {
+        if key.0 == endpoint_handle {
+            sub.notify.notify_waiters();
+            false
+        } else {
+            true
+        }
+    });
 }
 
 // ── Endpoint helpers ──────────────────────────────────────────────────────────
@@ -508,6 +519,7 @@ pub async fn close_endpoint(endpoint_handle: u32, force: Option<bool>) -> napi::
     } else {
         ep.close().await;
     }
+    clear_path_change_rxs(endpoint_handle);
     // Remove from both the local handle map and the global registry.
     if let Some(registry_handle) = remove_local_handle(endpoint_handle) {
         registry::remove_endpoint(registry_handle);
@@ -1226,18 +1238,19 @@ pub async fn start_transport_events(
 pub async fn next_path_change(
     endpoint_handle: u32,
     node_id: String,
+    subscription_id: u32,
 ) -> napi::Result<Option<String>> {
     let rxs = path_change_rxs();
 
     validate_node_id(&node_id).map_err(ffi_adapter_invalid_arg)?;
     let ep = get_endpoint(endpoint_handle)?;
 
-    let key = (endpoint_handle, node_id.clone());
+    let key = (endpoint_handle, node_id.clone(), subscription_id);
 
     let rx_arc = rxs
         .entry(key.clone())
         .or_insert_with(|| {
-            let rx = ep.subscribe_path_changes(&node_id);
+            let rx = ep.subscribe_path_changes(&node_id, subscription_id);
             Arc::new(PathSub {
                 rx: tokio::sync::Mutex::new(rx),
                 notify: tokio::sync::Notify::new(),
@@ -1265,13 +1278,30 @@ pub async fn next_path_change(
 
 /// Unsubscribe from path changes for a specific peer.
 #[napi]
-pub fn unsubscribe_path_changes(endpoint_handle: u32, node_id: String) -> napi::Result<()> {
+pub fn unsubscribe_path_changes(
+    endpoint_handle: u32,
+    node_id: String,
+    subscription_id: u32,
+) -> napi::Result<()> {
     validate_node_id(&node_id).map_err(ffi_adapter_invalid_arg)?;
     let ep = get_endpoint(endpoint_handle)?;
-    if let Some((_, sub)) = path_change_rxs().remove(&(endpoint_handle, node_id.clone())) {
-        sub.notify.notify_waiters();
+    let key = (endpoint_handle, node_id.clone(), subscription_id);
+    match path_change_rxs().entry(key) {
+        dashmap::mapref::entry::Entry::Occupied(entry) => {
+            let (_, sub) = entry.remove_entry();
+            sub.notify.notify_waiters();
+        }
+        dashmap::mapref::entry::Entry::Vacant(entry) => {
+            // A synchronous unsubscribe can overtake the async N-API future.
+            // Leave a closed one-shot receiver for that future to consume.
+            let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            entry.insert(Arc::new(PathSub {
+                rx: tokio::sync::Mutex::new(rx),
+                notify: tokio::sync::Notify::new(),
+            }));
+        }
     }
-    ep.unsubscribe_path_changes(&node_id);
+    ep.unsubscribe_path_changes(&node_id, subscription_id);
     Ok(())
 }
 
@@ -1636,8 +1666,11 @@ pub async fn wait_serve_stop(endpoint_handle: u32) -> napi::Result<()> {
 /// This is used to surface `node.closed` reliably even without an explicit `close()`.
 #[napi]
 pub async fn wait_endpoint_closed(endpoint_handle: u32) -> napi::Result<()> {
-    let ep = get_endpoint(endpoint_handle)?;
-    ep.wait_closed().await;
+    // The close operation may remove the handle before this async waiter is
+    // first polled. An absent endpoint has already reached the requested state.
+    if let Ok(ep) = get_endpoint(endpoint_handle) {
+        ep.wait_closed().await;
+    }
     Ok(())
 }
 
@@ -1891,6 +1924,11 @@ pub fn generate_secret_key() -> napi::Result<Buffer> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn wait_endpoint_closed_treats_a_removed_handle_as_closed() {
+        assert!(wait_endpoint_closed(u32::MAX).await.is_ok());
+    }
 
     #[cfg(feature = "discovery")]
     #[test]
