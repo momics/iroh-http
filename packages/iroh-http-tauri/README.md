@@ -86,15 +86,18 @@ use in `src-tauri/Info.ios.plist`, which Tauri merges into the generated iOS
   <string>Discover and connect to nearby peers on your local network.</string>
   <key>NSBonjourServices</key>
   <array>
-    <!-- "_<serviceName>._udp"; the default serviceName is "iroh-http" -->
+    <!-- One entry per serviceName + protocol pair used by the app. -->
     <string>_iroh-http._udp</string>
+    <string>_printers._tcp</string>
   </array>
 </dict>
 </plist>
 ```
 
 Without these, `NWBrowser` is denied with `NWError -65555 (NoAuth)` and browsing
-silently restarts. Each custom `serviceName` needs its own `_<name>._udp` entry.
+silently restarts. Declare each service-name/protocol pair exactly as it appears
+on the wire: for example, `serviceName: "printers", protocol: "tcp"` requires
+`_printers._tcp`, while peer discovery always uses UDP.
 
 For the full iOS + Android setup (including the Android `AndroidManifest.xml`
 entries), see the
@@ -229,15 +232,19 @@ value.
 
 ## Supported platforms
 
-| Platform |      Architecture       | Status |
-| -------- | :---------------------: | :----: |
-| macOS    |         x86_64          |   ✅   |
-| macOS    | aarch64 (Apple Silicon) |   ✅   |
-| Linux    |         x86_64          |   ✅   |
-| Linux    |         aarch64         |   ✅   |
-| Windows  |         x86_64          |   ✅   |
-| iOS      |         aarch64         |   ✅   |
-| Android  |     arm64 / x86_64      |   ✅   |
+| Platform |      Architecture       | Minimum | Status |
+| -------- | :---------------------: | :-----: | :----: |
+| macOS    |         x86_64          |    —    |   ✅   |
+| macOS    | aarch64 (Apple Silicon) |    —    |   ✅   |
+| Linux    |         x86_64          |    —    |   ✅   |
+| Linux    |         aarch64         |    —    |   ✅   |
+| Windows  |         x86_64          |    —    |   ✅   |
+| iOS      |         aarch64         | iOS 14  |   ✅   |
+| Android  |     arm64 / x86_64      | API 21  |   ✅   |
+
+Applications targeting Android 17 / API 37 or newer must additionally adopt
+Android's app-owned `ACCESS_LOCAL_NETWORK` runtime-permission flow described
+above.
 
 ## Other runtimes
 

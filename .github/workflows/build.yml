@@ -6,7 +6,8 @@ name: Build
 #
 # Publishing is handled separately by publish.yml, which is promoted manually
 # (Actions → Run workflow → Publish) against a release tag once its Build and
-# Extended tests are green. It never triggers automatically.
+# Extended tests are green and its Benchmarks snapshot has completed. It never
+# triggers automatically.
 
 on:
   push:
@@ -43,9 +44,10 @@ jobs:
       - uses: softprops/action-gh-release@v3
         with:
           body_path: RELEASE_NOTES.md
-          # A tag starts Build and Extended tests concurrently. Keep the
-          # release private until both workflows pass, the exact artifacts are
-          # promoted to the registries, and a maintainer publishes the draft.
+          # A tag starts Build, Extended tests, and Benchmarks concurrently.
+          # Keep the release private until all three workflows pass, the exact
+          # artifacts are promoted to the registries, and a maintainer publishes
+          # the draft.
           draft: true
 
   # ── 2. Build Node native binaries (5 targets) ─────────────────────────────────

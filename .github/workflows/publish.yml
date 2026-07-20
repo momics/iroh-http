@@ -2,7 +2,8 @@ name: Publish
 
 # Manually promotes a tagged release to the immutable registries (npm, crates.io,
 # JSR). Publishing NEVER auto-fires — a maintainer deliberately dispatches this
-# workflow once the tag's Build and Extended tests are green.
+# workflow once the tag's Build and Extended tests are green and its Benchmarks
+# snapshot has completed.
 #
 # Manual usage (Actions → Run workflow):
 #   tag: the release tag to promote (e.g. v0.6.0). Its commit SHA is resolved to

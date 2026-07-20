@@ -40,7 +40,19 @@ The script is interactive and walks you through each step:
 6. Commits `chore: release vX.Y.Z` and creates the git tag
 7. Asks whether to push
 
-Pushing the tag triggers two GitHub Actions workflows:
+### Pre-tag mobile discovery gate
+
+Before running this script, check the changes since the previous tag. If mobile
+discovery implementation, native lifecycle, permissions, service declarations,
+or setup instructions changed materially, complete the affected physical-device
+matrix in the
+[on-device DNS-SD verification runbook](../docs/internals/dns-sd-device-verification.md).
+Record the candidate commit, devices and OS/API versions, tested directions,
+suite totals, generic DNS-SD result, and required JSON/log excerpts in the
+release-tracking issue. CI compile and contract tests are not a substitute for
+this pre-tag device evidence.
+
+Pushing the tag triggers three GitHub Actions workflows:
 
 | Workflow | What it does |
 |----------|-------------|
@@ -48,9 +60,9 @@ Pushing the tag triggers two GitHub Actions workflows:
 | `extended-tests.yml` | Runs the tag's extended compatibility and platform tests |
 | `bench.yml` | Records the tag's Rust, Node.js, and Deno benchmark snapshot |
 
-After all three workflows are green, a maintainer manually runs `publish.yml` for
-that exact tag, verifies npm, JSR, and crates.io, and publishes the draft GitHub
-release.
+After all three workflows are green, a maintainer manually runs `publish.yml`
+for that exact tag, verifies npm, JSR, and crates.io, and publishes the draft
+GitHub release.
 
 ---
 

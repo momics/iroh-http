@@ -84,6 +84,22 @@ notes. This is why commit messages must follow the Conventional Commit rules in
 (`brew install git-cliff` or `cargo install git-cliff`); the release script
 checks for it up front.
 
+### Pre-tag mobile discovery gate
+
+Before running the release script, review the changes since the previous tag.
+If they materially change mobile discovery implementation, native lifecycle,
+permissions, service declarations, or setup instructions, complete the affected
+physical-device matrix in the
+[on-device DNS-SD verification runbook](docs/internals/dns-sd-device-verification.md).
+Deterministic contracts and native compile jobs do not replace this LAN/device
+test.
+
+Record the exact candidate commit, device models and OS/API versions, tested
+platform pairs and directions, suite totals, generic DNS-SD result, and the
+required JSON/log excerpts using the runbook's results template. Link that
+evidence from the release-tracking issue and resolve or explicitly defer every
+follow-up before creating the tag.
+
 **To cut a release:** `bash scripts/release.sh X.Y.Z`
 
 Pushing the release tag creates a **draft** GitHub release and starts three
@@ -91,7 +107,8 @@ independent workflows. It does not publish packages. Complete the release in
 this order:
 
 1. Wait for the tag's **Build**, **Extended tests**, and **Benchmarks** workflows
-   to pass (benchmarks record a snapshot; they do not enforce a performance gate).
+   to pass (benchmarks record a snapshot; they do not enforce a performance
+   gate).
 2. Verify that the draft release assets and the successful Build run use the
    tag's exact commit SHA.
 3. Smoke-test the native artifacts produced by that Build run.
