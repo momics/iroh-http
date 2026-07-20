@@ -10,7 +10,8 @@ set -euo pipefail
 #   - 1 deno.jsonc
 #   - 1 deno.json (shared JSR)
 #
-# Does NOT touch lockfiles or examples — those follow naturally.
+# Synchronizes lockfile entries for workspace packages without upgrading
+# third-party dependencies. Examples are intentionally untouched.
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
@@ -163,29 +164,27 @@ if [[ -f "$TAURI_PKG" ]]; then
   echo "  ✓ packages/iroh-http-tauri/package.json (@momics/iroh-http-shared dep range → ^$MAJOR_MINOR)"
 fi
 
-# ── Regenerate lock files ─────────────────────────────────────────────────────
+# ── Synchronize lock files ────────────────────────────────────────────────────
 echo ""
-echo "Regenerating Cargo.lock …"
-cargo generate-lockfile --manifest-path "$ROOT/Cargo.toml"
+echo "Synchronizing Cargo.lock …"
+# `cargo update --workspace` updates the renamed local workspace packages while
+# retaining every registry dependency already selected in Cargo.lock. Using
+# `cargo generate-lockfile` here would silently upgrade compatible third-party
+# dependencies after the release candidate had already passed CI.
+cargo update --workspace --manifest-path "$ROOT/Cargo.toml"
 echo "  ✓ Cargo.lock"
 
 # Tauri has its own workspace with a separate Cargo.lock
 if [[ -f "$ROOT/packages/iroh-http-tauri/Cargo.lock" ]]; then
-  cargo generate-lockfile --manifest-path "$ROOT/packages/iroh-http-tauri/Cargo.toml"
+  cargo update --workspace --manifest-path "$ROOT/packages/iroh-http-tauri/Cargo.toml"
   echo "  ✓ packages/iroh-http-tauri/Cargo.lock"
 fi
 
-echo "Regenerating package-lock.json …"
-# Regenerate with ALL platform optional deps resolved. Using --omit=optional
-# here was the bug behind issue #154: it produces bare {"optional": true}
-# stubs for native binary deps that the host platform did not need to install,
-# which then crashes `npm ci` on every other platform with
-# `TypeError: Invalid Version:` from semver.
-#
-# `npm install --package-lock-only` (default flags) downloads metadata for all
-# optional deps without actually unpacking the binaries, so every entry ends up
-# with a real semver version.
-(cd "$ROOT" && rm -f package-lock.json && npm install --package-lock-only --ignore-scripts)
+echo "Synchronizing package-lock.json …"
+# Only workspace metadata changed. Keep the reviewed third-party graph intact;
+# a full npm install here would resolve newer compatible dependencies and make
+# the release commit differ from the candidate checked immediately beforehand.
+node "$ROOT/scripts/sync-package-lock-workspaces.mjs" "$ROOT"
 node "$ROOT/scripts/check-lockfile.mjs"
 echo "  ✓ package-lock.json"
 

@@ -38,7 +38,7 @@
     "bench:smoke": "cargo bench -p iroh-http-core -- --test --quiet",
     "check:features": "cargo check -p iroh-http-node --no-default-features --quiet && cargo check -p iroh-http-deno --no-default-features --quiet",
     "check:lockfile": "node scripts/check-lockfile.mjs",
-    "test:scripts": "bash scripts/tests/ci-churn.test.sh && bash scripts/tests/extract-release-notes.test.sh",
+    "test:scripts": "bash scripts/tests/ci-churn.test.sh && bash scripts/tests/extract-release-notes.test.sh && node scripts/tests/sync-package-lock-workspaces.test.mjs",
     "bench:node": "node bench/node/bench.mjs",
     "bench:node:report": "node bench/node/report.mjs",
     "bench:deno": "deno bench --allow-net --allow-ffi --allow-env --allow-read --allow-write --allow-sys bench/deno/bench.ts",
