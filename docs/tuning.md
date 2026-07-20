@@ -202,12 +202,12 @@ cross-vendor compression negotiation.
 
 ## Connection pool sizing
 
-`maxPooledConnections` caps the number of idle QUIC connections kept in the
-pool. The default is **512**.
+`connections.maxPooled` caps the number of QUIC connections kept in the pool.
+The default is **512**.
 
 ```ts
 const node = await createNode({
-  maxPooledConnections: 512,  // default — fits most workloads
+  connections: { maxPooled: 512 }, // default
 });
 ```
 
@@ -224,25 +224,29 @@ socket slots.
 | CDN edge / job dispatcher (1 000+ peers) | 1 024–4 096 | Avoids per-request QUIC handshakes (~100–200 ms on WAN) |
 | IoT hub (many low-traffic devices) | 512–2 048 | Devices connect infrequently; pool keeps paths warm |
 
-**Rule of thumb:** set `maxPooledConnections` ≥ your 95th-percentile active
+**Rule of thumb:** set `connections.maxPooled` ≥ your 95th-percentile active
 peer count. Peers beyond the cap will reconnect on next fetch (one QUIC
 handshake ≈ 1–2 RTTs).
 
-### Relationship with `poolIdleTimeoutMs`
+### Relationship with `connections.poolIdleTimeoutMs`
 
-The pool evicts entries that have been idle longer than `poolIdleTimeoutMs`
-(default: 60 s). For high-fanout nodes, pair a large `maxPooledConnections`
-with a shorter `poolIdleTimeoutMs` to recycle infrequently used peers quickly:
+When set, the pool evicts entries that have been idle longer than
+`connections.poolIdleTimeoutMs`. It is disabled by default. For high-fanout
+nodes, pair a large `connections.maxPooled`
+with a shorter `connections.poolIdleTimeoutMs` to recycle infrequently used peers
+quickly:
 
 ```ts
 const node = await createNode({
-  maxPooledConnections: 2_048,  // large fleet
-  poolIdleTimeoutMs: 20_000,    // evict after 20 s of no activity
+  connections: {
+    maxPooled: 2_048,          // large fleet
+    poolIdleTimeoutMs: 20_000, // evict after 20 s of no activity
+  },
 });
 ```
 
 ### Finding the full option path
 
-`createNode({ maxPooledConnections })` → `NodeOptions.pool.max_connections`
+`createNode({ connections: { maxPooled } })` → `NodeOptions.pool.max_connections`
 → `ConnectionPool::new(max_idle, …)` in `iroh-http-core`. The JS option is a
 direct alias for the Rust `PoolOptions.max_connections` field.

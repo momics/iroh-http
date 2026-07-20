@@ -28,7 +28,8 @@ const res = await node.fetch("httpi://<peer-public-key>/");
 
 ### What this is not
 
-- **Not a browser library.** Requires raw UDP (Node.js, Deno, or Tauri desktop).
+- **Not a browser library.** Requires a native runtime with UDP access: Node.js,
+  Deno, or Tauri on desktop, iOS, and Android.
 - **Not a proxy for public HTTP.** Peers are addressed by key, not hostname.
 - **Not libp2p or WebRTC.** Single transport (QUIC), single framing (HTTP/1.1), no negotiation.
 
@@ -124,7 +125,7 @@ Full API details for sessions, crypto, and mDNS: [docs/api-overview.md](docs/api
 |---------|--------------|
 | [`iroh-http-core`](crates/iroh-http-core/) | Rust. QUIC transport, HTTP/1.1 framing, connection pool, server stack. |
 | [`iroh-http-discovery`](crates/iroh-http-discovery/) | Rust. Standard DNS-SD (mDNS) peer discovery for the local network. |
-| [`iroh-http-adapter`](crates/iroh-http-adapter/) | Rust. Shared FFI error envelope for all adapters. |
+| [`iroh-http-adapter`](crates/iroh-http-adapter/) | Rust. Shared validation, coercion, request-delivery, and error conventions for native adapters. |
 | [`iroh-http-shared`](packages/iroh-http-shared/) | TypeScript. `IrohNode` class, stream helpers, error hierarchy. No native deps. |
 | [`iroh-http-node`](packages/iroh-http-node/) | Node.js native addon (napi-rs). |
 | [`iroh-http-deno`](packages/iroh-http-deno/) | Deno FFI via `dlopen`. |
