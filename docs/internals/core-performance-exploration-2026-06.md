@@ -47,7 +47,7 @@ Change:
 Benchmark command:
 
 ```sh
-/Users/phnl320048348/.cargo/bin/cargo bench -p iroh-http-core --bench channel channel -- --warm-up-time 1 --measurement-time 3
+cargo bench -p iroh-http-core --bench channel channel -- --warm-up-time 1 --measurement-time 3
 ```
 
 Original baseline vs first changed-run medians:
@@ -91,8 +91,8 @@ Prototype:
 Benchmark commands:
 
 ```sh
-/Users/phnl320048348/.cargo/bin/cargo bench -p iroh-http-core --bench throughput fetch_get_latency -- --warm-up-time 1 --measurement-time 3
-/Users/phnl320048348/.cargo/bin/cargo bench -p iroh-http-core --bench throughput multiplex -- --warm-up-time 1 --measurement-time 3
+cargo bench -p iroh-http-core --bench throughput fetch_get_latency -- --warm-up-time 1 --measurement-time 3
+cargo bench -p iroh-http-core --bench throughput multiplex -- --warm-up-time 1 --measurement-time 3
 ```
 
 Observed:
@@ -127,7 +127,7 @@ Change:
 Benchmark command:
 
 ```sh
-/Users/phnl320048348/.cargo/bin/cargo bench -p iroh-http-core --bench channel body_reader_http_body -- --warm-up-time 1 --measurement-time 3
+cargo bench -p iroh-http-core --bench channel body_reader_http_body -- --warm-up-time 1 --measurement-time 3
 ```
 
 Baseline vs changed medians:

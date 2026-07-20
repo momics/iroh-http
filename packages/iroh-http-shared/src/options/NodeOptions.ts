@@ -72,7 +72,7 @@ export interface NodeOptions {
     /**
      * Maximum QUIC connections kept alive in the pool. Older idle connections
      * are evicted when the limit is hit.
-     * @default 64
+     * @default 512
      */
     maxPooled?: number;
     /**
@@ -82,8 +82,9 @@ export interface NodeOptions {
      */
     idleTimeoutMs?: number;
     /**
-     * Milliseconds before an idle pooled connection is dropped.
-     * @default 90_000
+     * Milliseconds before an idle pooled connection is dropped. Omit to keep
+     * pooled connections until capacity eviction or transport failure.
+     * @default undefined
      */
     poolIdleTimeoutMs?: number;
   };

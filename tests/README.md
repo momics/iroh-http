@@ -6,7 +6,8 @@ A comprehensive test suite for [`@momics/iroh-http`](https://github.com/Momics/i
 
 ### 1. HTTP compliance (`http-compliance/`)
 
-Data-driven tests validating HTTP semantics (RFC 9110). Extends the upstream `tests/http-compliance/cases.json` (35 cases) to **102 test cases**:
+Data-driven tests validating HTTP semantics (RFC 9110). Extends the upstream
+corpus to **103 identified test cases**:
 
 | Category | Cases | What it tests |
 |---|---|---|
@@ -14,7 +15,7 @@ Data-driven tests validating HTTP semantics (RFC 9110). Extends the upstream `te
 | **HTTP Methods** | 9 | GET, POST, PUT, PATCH, DELETE, OPTIONS, HEAD, custom verbs |
 | **Body Handling** | 19 | Echo, UTF-8, emoji, JSON, newlines, special chars, sizes 1B→5MB |
 | **Request Headers** | 9 | Custom, case-insensitive, empty, long (8KiB), content-type |
-| **Response Headers** | 5 | Single/multiple headers, Content-Type forwarding |
+| **Response Headers** | 6 | Single/multiple headers, Content-Type forwarding |
 | **Peer-Id Security** | 4 | Injection, anti-spoofing, consistency, format validation |
 | **Path Handling** | 12 | Trailing slashes, query strings, URL encoding, dot segments |
 | **Concurrent** | 4 | 3/5/10 parallel requests, concurrent POST with body |
@@ -78,7 +79,9 @@ tests/
 │   ├── events.mjs               # EventTarget, diagnostics
 │   ├── sessions.mjs             # WebTransport sessions
 │   ├── keys.mjs                 # PublicKey/SecretKey, sign/verify
-│   └── discovery.mjs            # mDNS/DNS peer discovery
+│   ├── discovery.mjs            # mDNS/DNS peer discovery
+│   ├── adapter-validation.mjs   # shared adapter validation contract
+│   └── self-fetch.mjs           # same-node request behavior
 │
 ├── runners/                     # Thin per-runtime wrappers
 │   ├── node.mjs                 # Binds suites to node:test + node:assert
@@ -93,7 +96,7 @@ tests/
 │   └── src-tauri/               # Minimal Tauri shell (+ exit_with_code command)
 │
 └── http-compliance/             # Data-driven HTTP tests
-    ├── cases.json               # 102 test cases (RFC 9110)
+    ├── cases.json               # 103 identified test cases (RFC 9110)
     ├── handler.mjs              # Shared compliance server routes
     ├── assertions.mjs           # Shared assertion engine
     ├── run-node.mjs             # Node same-process runner
