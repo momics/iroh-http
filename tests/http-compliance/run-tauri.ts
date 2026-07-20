@@ -15,6 +15,9 @@
  *   on completion, causing the process to exit with 0 (all passed) or 1 (failures).
  *
  * Also logs all output to the browser console (open devtools with Cmd+Option+I).
+ *
+ * Case execution is delegated to the shared, transport-agnostic `runCases`
+ * harness so this in-process runner and the on-device Test tab stay in lockstep.
  */
 
 import { createNode } from "@momics/iroh-http-tauri";
@@ -22,7 +25,7 @@ import { invoke } from "@tauri-apps/api/core";
 // @ts-ignore — .mjs from shared test suite (pure WHATWG, no Node/Deno deps)
 import { handleRequest } from "./handler.mjs";
 // @ts-ignore — .mjs from shared test suite
-import { assertResponse } from "./assertions.mjs";
+import { runCases } from "./harness.mjs";
 import cases from "./cases.json";
 
 // ── Config from URL params ──────────────────────────────────────────────────
@@ -62,79 +65,19 @@ function setStatus(text: string) {
   statusEl.textContent = text;
 }
 
-// ── Helpers ─────────────────────────────────────────────────────────────────
-interface TestCase {
+interface CaseResult {
   id: string;
   description?: string;
-  request?: {
-    method: string;
-    path: string;
-    headers?: Record<string, string | { fill: number }>;
-    body?: string | { fill: number } | null;
-  };
-  response?: {
-    status?: number;
-    bodyExact?: string;
-    bodyNotEmpty?: boolean;
-    bodyNot?: string;
-    bodyContains?: string;
-    bodyMatchesRegex?: string;
-    bodyLengthExact?: number;
-    bodyMinLength?: number;
-    headers?: Record<string, string>;
-  };
-  concurrent?: number;
-  sequential?: number;
-  repeat?: number;
-  assertAllBodiesEqual?: boolean;
-  requests?: Array<{
-    method: string;
-    path: string;
-    headers?: Record<string, string | { fill: number }>;
-    body?: string | { fill: number } | null;
-    expect: {
-      status?: number;
-      bodyExact?: string;
-      bodyNotEmpty?: boolean;
-      bodyNot?: string;
-      bodyContains?: string;
-      bodyMatchesRegex?: string;
-      bodyLengthExact?: number;
-      bodyMinLength?: number;
-      headers?: Record<string, string>;
-    };
-  }>;
-}
-
-function buildBody(
-  bodySpec: string | { fill: number } | null | undefined,
-): string | Uint8Array | undefined {
-  if (bodySpec === null || bodySpec === undefined) return undefined;
-  if (typeof bodySpec === "string") return bodySpec;
-  if (typeof bodySpec === "object" && "fill" in bodySpec) {
-    return new Uint8Array(bodySpec.fill);
-  }
-  return undefined;
-}
-
-function buildHeaders(
-  headersSpec?: Record<string, string | { fill: number }>,
-): Record<string, string> {
-  const h: Record<string, string> = {};
-  if (!headersSpec) return h;
-  for (const [k, v] of Object.entries(headersSpec)) {
-    if (typeof v === "object" && v !== null && "fill" in v) {
-      h[k] = "x".repeat(v.fill);
-    } else {
-      h[k] = v as string;
-    }
-  }
-  return h;
+  ok: boolean;
+  status: number | null;
+  latencyMs: number;
+  error: string | null;
 }
 
 // ── Main ────────────────────────────────────────────────────────────────────
 async function run() {
-  const allCases: TestCase[] = (cases as TestCase[]).filter((c) => c.id);
+  // deno-lint-ignore no-explicit-any
+  const allCases = (cases as any[]).filter((c) => c.id);
 
   let filtered = allCases;
   if (filterPattern) {
@@ -160,188 +103,35 @@ async function run() {
   server.serve({}, handleRequest);
   log("Server is listening.\n");
 
-  // Helper for single request
-  async function runSingleRequest(req: TestCase["request"]) {
-    const body = buildBody(req!.body);
-    const headers = buildHeaders(req!.headers);
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeout);
-
-    try {
-      const res = await client.fetch(`httpi://${serverAddr}${req!.path}`, {
-        method: req!.method,
-        headers,
-        body,
-        signal: controller.signal,
-      });
-      const buf = await res.arrayBuffer();
-      const bodyText = new TextDecoder().decode(buf);
-      const bodyLength = buf.byteLength;
-      return { res, bodyText, bodyLength };
-    } finally {
-      clearTimeout(timer);
-    }
-  }
-
-  // Run tests
-  let passed = 0;
-  let failed = 0;
-  const failedCases: string[] = [];
   const startTime = performance.now();
+  const failedCases: string[] = [];
 
-  for (let i = 0; i < filtered.length; i++) {
-    const tc = filtered[i];
-    setStatus(`Running ${i + 1}/${filtered.length}: ${tc.id}`);
-    const label = `[${tc.id}] ${tc.description ?? ""}`;
-
-    try {
-      // ── Multi-step requests ───────────────────────────────────────────
-      if (tc.requests) {
-        let allPassed = true;
-        for (let j = 0; j < tc.requests.length; j++) {
-          const sub = tc.requests[j];
-          try {
-            const { res, bodyText, bodyLength } = await runSingleRequest(
-              sub as TestCase["request"],
-            );
-            const result = assertResponse(
-              { response: sub.expect },
-              res,
-              bodyText,
-              bodyLength,
-            );
-            if (!result.pass) {
-              allPassed = false;
-              log(`  ✗ ${label} [step ${j}]`, "fail");
-              result.failures.forEach((f: string) =>
-                log(`      ${f}`, "fail-detail")
-              );
-            }
-          } catch (err: unknown) {
-            allPassed = false;
-            log(`  ✗ ${label} [step ${j}] — ${(err as Error).message}`, "fail");
-          }
-        }
-        if (allPassed) {
-          passed++;
-          if (verbose) log(`  ✓ ${label}`, "pass");
-        } else {
-          failed++;
-          failedCases.push(tc.id);
-          if (bail) break;
-        }
-        continue;
-      }
-
-      const concurrency = tc.concurrent ?? 1;
-      const repeatCount = tc.repeat ?? 1;
-      const totalRuns = Math.max(concurrency, repeatCount);
-      const sequential = tc.sequential ?? 0;
-
-      // ── Sequential requests ───────────────────────────────────────────
-      if (sequential > 0) {
-        let allPassed = true;
-        for (let j = 0; j < sequential; j++) {
-          const { res, bodyText, bodyLength } = await runSingleRequest(
-            tc.request,
-          );
-          const result = assertResponse(tc, res, bodyText, bodyLength);
-          if (!result.pass) {
-            allPassed = false;
-            log(`  ✗ ${label} [iteration ${j}]`, "fail");
-            result.failures.forEach((f: string) =>
-              log(`      ${f}`, "fail-detail")
-            );
-            break;
-          }
-        }
-        if (allPassed) {
-          passed++;
-          if (verbose) log(`  ✓ ${label} (${sequential}x sequential)`, "pass");
-        } else {
-          failed++;
-          failedCases.push(tc.id);
-          if (bail) break;
-        }
-        continue;
-      }
-
-      // ── Concurrent / repeated requests ────────────────────────────────
-      if (concurrency > 1 || repeatCount > 1) {
-        const promises = Array.from(
-          { length: totalRuns },
-          () => runSingleRequest(tc.request),
-        );
-        const results = await Promise.all(promises);
-        let allPassed = true;
-        const bodies: string[] = [];
-
-        for (let j = 0; j < results.length; j++) {
-          const { res, bodyText, bodyLength } = results[j];
-          bodies.push(bodyText);
-          const result = assertResponse(tc, res, bodyText, bodyLength);
-          if (!result.pass) {
-            allPassed = false;
-            log(`  ✗ ${label} [instance ${j}]`, "fail");
-            result.failures.forEach((f: string) =>
-              log(`      ${f}`, "fail-detail")
-            );
-          }
-        }
-
-        if (tc.assertAllBodiesEqual && allPassed) {
-          const unique = new Set(bodies);
-          if (unique.size > 1) {
-            allPassed = false;
-            log(`  ✗ ${label} — bodies differ across runs`, "fail");
-          }
-        }
-
-        if (allPassed) {
-          passed++;
-          if (verbose) log(`  ✓ ${label} (${totalRuns}x)`, "pass");
-        } else {
-          failed++;
-          failedCases.push(tc.id);
-          if (bail) break;
-        }
-        continue;
-      }
-
-      // ── Single request ────────────────────────────────────────────────
-      const { res, bodyText, bodyLength } = await runSingleRequest(tc.request);
-      const result = assertResponse(tc, res, bodyText, bodyLength);
-
-      if (result.pass) {
-        passed++;
-        if (verbose) log(`  ✓ ${label}`, "pass");
+  const { summary } = await runCases({
+    // deno-lint-ignore no-explicit-any
+    fetch: (url: string, init: any) => client.fetch(url, init),
+    serverId: serverAddr,
+    cases: filtered,
+    timeout,
+    bail,
+    onCaseResult: (r: CaseResult) => {
+      const label = `[${r.id}] ${r.description ?? ""}`;
+      if (r.ok) {
+        if (verbose) log(`  ✓ ${label} (${r.latencyMs}ms)`, "pass");
       } else {
-        failed++;
-        failedCases.push(tc.id);
+        failedCases.push(r.id);
         log(`  ✗ ${label}`, "fail");
-        result.failures.forEach((f: string) =>
-          log(`      ${f}`, "fail-detail")
-        );
-        if (bail) break;
+        if (r.error) log(`      ${r.error}`, "fail-detail");
       }
-    } catch (err: unknown) {
-      failed++;
-      failedCases.push(tc.id);
-      log(`  ✗ ${label} — ${(err as Error).message}`, "fail");
-      if (bail) break;
-    }
-
-    // Yield to keep UI responsive
-    if (i % 10 === 0) await new Promise((r) => setTimeout(r, 0));
-  }
+    },
+  });
 
   // ── Summary ─────────────────────────────────────────────────────────────
   const elapsed = ((performance.now() - startTime) / 1000).toFixed(2);
   log("");
   log("─".repeat(60));
   log(
-    `Results: ${passed} passed, ${failed} failed (${elapsed}s)`,
-    failed > 0 ? "fail" : "pass",
+    `Results: ${summary.passed} passed, ${summary.failed} failed (${elapsed}s)`,
+    summary.failed > 0 ? "fail" : "pass",
   );
 
   if (failedCases.length > 0) {
@@ -350,15 +140,17 @@ async function run() {
   }
 
   setStatus(
-    failed > 0
-      ? `✗ ${failed} failed, ${passed} passed (${elapsed}s)`
-      : `✓ All ${passed} passed (${elapsed}s)`,
+    summary.failed > 0
+      ? `✗ ${summary.failed} failed, ${summary.passed} passed (${elapsed}s)`
+      : `✓ All ${summary.passed} passed (${elapsed}s)`,
   );
-  statusEl.className = failed > 0 ? "status-fail" : "status-pass";
+  statusEl.className = summary.failed > 0 ? "status-fail" : "status-pass";
 
   // Cleanup
   try {
+    // deno-lint-ignore no-explicit-any
     (server as any).shutdown?.();
+    // deno-lint-ignore no-explicit-any
     (client as any).shutdown?.();
   } catch {
     // ignore
@@ -367,7 +159,7 @@ async function run() {
   // CI mode: exit the process with the appropriate code
   if (ciMode) {
     try {
-      await invoke("exit_with_code", { code: failed > 0 ? 1 : 0 });
+      await invoke("exit_with_code", { code: summary.failed > 0 ? 1 : 0 });
     } catch (err) {
       console.error("exit_with_code invoke failed:", err);
     }

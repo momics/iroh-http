@@ -14,14 +14,16 @@ DNS discovery is enabled by default and configured at node creation:
 
 ```ts
 await createNode({
-  // Default: true — uses n0's hosted DNS infrastructure.
-  dns: true,
+  discovery: {
+    // Default: true — uses n0's hosted DNS infrastructure.
+    dns: true,
 
-  // Custom resolver:
-  // dns: { resolverUrl: 'https://dns.example.com' },
+    // Custom resolver:
+    // dns: { serverUrl: 'https://dns.example.com' },
 
-  // Disable entirely (air-gapped / embedded):
-  // dns: false,
+    // Disable entirely (air-gapped / embedded):
+    // dns: false,
+  },
 });
 ```
 
@@ -152,8 +154,9 @@ handshake is identical. Only the *mDNS enumeration* differs.
 ## Without discovery
 
 When DNS is disabled and neither `browse` nor `advertise` is called, the node
-operates in direct-address-only mode. Connections must use explicit addresses
-(`directAddrs` in `IrohFetchInit`) or ticket strings (see [tickets](tickets.md)).
+operates in explicit-address mode. Connections must use direct hints
+(`directAddrs`), a home-relay hint (`relayUrl`), or ticket strings (see
+[tickets](tickets.md)).
 
 Appropriate for embedded targets, air-gapped networks, and integration tests.
 
@@ -181,10 +184,10 @@ before mDNS works on a device. See
 [Mobile mDNS / DNS-SD setup](../guidelines/mobile-mdns-setup.md) for the exact
 iOS `Info.plist` and Android `AndroidManifest.xml` entries.
 
-Both the peer path (`advertisePeer` / `browsePeers`) and the generic path
-(`advertise` / `browse`) run on mobile through the native bridge. Android
-resolves full generic records (host, port, TXT, addresses); iOS surfaces the
-instance name, service type and TXT but leaves host/port/addresses unresolved
-(`NWBrowser` does not resolve endpoints without an `NWConnection`). A single
-`iroh-http:discovery` capability permission grants both paths.
-
+Mobile has one native generic browse engine and one native generic advertisement
+engine. The peer APIs use those same adapters, then apply the iroh-specific TXT,
+identity, and endpoint-lookup projection in Rust. Android resolves full generic
+records (host, port, TXT, addresses); iOS surfaces the instance name, service
+type and TXT but leaves host/port/addresses unresolved (`NWBrowser` does not
+resolve endpoints without an `NWConnection`). A single `iroh-http:discovery`
+capability permission grants both paths.

@@ -84,6 +84,9 @@ impl Session {
         let parsed = parse_node_addr(remote_node_id)?;
         let node_id = parsed.node_id;
         let mut addr = iroh::EndpointAddr::new(node_id);
+        for relay in parsed.relay_urls {
+            addr = addr.with_relay_url(relay);
+        }
         for a in &parsed.direct_addrs {
             addr = addr.with_ip_addr(*a);
         }

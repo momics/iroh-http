@@ -42,7 +42,7 @@ async fn advertised_node_is_discovered_over_dns_sd() {
     let _advertise = advertise_peer(&adv_ep, service).expect("start advertise");
 
     let browse_ep = minimal_endpoint().await;
-    let mut session = browse_peers(&browse_ep, service)
+    let session = browse_peers(&browse_ep, service)
         .await
         .expect("start browse");
 

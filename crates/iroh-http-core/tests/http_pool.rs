@@ -3,10 +3,10 @@
 
 mod common;
 
-use iroh_http_core::respond;
 use iroh_http_core::{
     fetch, ffi_serve, IrohEndpoint, NetworkingOptions, NodeOptions, RequestPayload, ServeOptions,
 };
+use iroh_http_core::{respond, ErrorCode};
 
 // -- Connection pooling -------------------------------------------------------
 
@@ -349,4 +349,51 @@ async fn pool_eviction_single_slot() {
         .unwrap();
         assert_eq!(res.status, 200, "request {i} failed");
     }
+}
+
+#[tokio::test]
+async fn pool_evicts_connection_after_fetch_timeout() {
+    let (server_ep, client_ep) = common::make_pair().await;
+    let server_id = common::node_id(&server_ep);
+    let addrs = common::server_addrs(&server_ep);
+
+    ffi_serve(
+        server_ep,
+        ServeOptions::default(),
+        |_payload: RequestPayload| {
+            // Intentionally never respond. The client should time out waiting
+            // for the response head and evict the pooled QUIC connection.
+        },
+    );
+
+    let err = fetch(
+        &client_ep,
+        &server_id,
+        "/hang",
+        "GET",
+        &[],
+        None,
+        None,
+        Some(&addrs),
+        Some(std::time::Duration::from_millis(50)),
+        true,
+        None,
+    )
+    .await
+    .expect_err("fetch should time out");
+
+    assert_eq!(err.code, ErrorCode::Timeout);
+
+    for _ in 0..10 {
+        if client_ep.endpoint_stats().pool_size == 0 {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
+    assert_eq!(
+        client_ep.endpoint_stats().pool_size,
+        0,
+        "timed-out fetch should evict the pooled connection"
+    );
 }

@@ -69,6 +69,9 @@ pub async fn fetch(
     // any caller-supplied direct addresses.
     let parsed = parse_node_addr(remote_node_id)?;
     let mut addr = iroh::EndpointAddr::new(parsed.node_id);
+    for relay in parsed.relay_urls {
+        addr = addr.with_relay_url(relay);
+    }
     for a in &parsed.direct_addrs {
         addr = addr.with_ip_addr(*a);
     }
@@ -249,6 +252,9 @@ where
 fn fetch_error_to_core(e: FetchError) -> CoreError {
     match e {
         FetchError::ConnectionFailed { detail, .. } => CoreError::connection_failed(detail),
+        FetchError::RequestBodyFailed { detail, .. } => {
+            CoreError::internal(format!("request body failed: {detail}"))
+        }
         FetchError::HeaderTooLarge { detail } => CoreError::header_too_large(detail),
         FetchError::BodyTooLarge => CoreError::body_too_large("response body too large"),
         FetchError::Timeout => CoreError::timeout("request timed out"),

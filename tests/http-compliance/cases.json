@@ -246,6 +246,12 @@
     "response": { "status": 200, "bodyLengthExact": 0 }
   },
   {
+    "id": "response-body-static-hello",
+    "description": "Static (non-echo) response body round-trips (#338 Android empty-body regression)",
+    "request": { "method": "GET", "path": "/hello", "headers": {}, "body": null },
+    "response": { "status": 200, "bodyExact": "hello" }
+  },
+  {
     "id": "body-utf8",
     "description": "UTF-8 multibyte body round-trips correctly",
     "request": {

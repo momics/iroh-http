@@ -9,6 +9,7 @@ fn main() {
         "node_addr",
         "node_ticket",
         "home_relay",
+        "discovery_info",
         "peer_info",
         "peer_stats",
         "endpoint_stats",

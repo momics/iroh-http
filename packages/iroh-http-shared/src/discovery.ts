@@ -56,7 +56,9 @@ export interface ServiceConfig {
   txt?: Record<string, string>;
   /**
    * Extra IP addresses to advertise. Local interface addresses are added
-   * automatically, so this is usually left empty.
+   * automatically, so this is usually left empty. Desktop accepts explicit
+   * addresses; iOS and Android reject a non-empty list because their native
+   * DNS-SD APIs own A/AAAA publication and cannot honour this field.
    */
   addrs?: string[];
   /** Transport protocol. Defaults to `"udp"`. */
@@ -90,10 +92,10 @@ export interface DnsSdBrowseOptions {
  * even on `"discovered"` (active) records. Resolving the target host/port/IP
  * would require opening an `NWConnection` per result, which this surface does
  * not do. Desktop and Android fully resolve these fields. See ADR-018 §8 for
- * the rationale; consumers that need addresses on iOS should rely on a
- * `relay`/`address` TXT entry surfaced through `addrs` as a best effort, or
- * use `asIrohPeer()` / `node.browsePeers()` for the iroh-peer specialization,
- * which resolves addresses via `AddressLookup` instead of DNS-SD.
+ * the rationale; consumers that use the iroh TXT convention can call
+ * `asIrohPeer()` to validate `relay`/`address` TXT values, or use
+ * `node.browsePeers()` for the iroh-peer specialization, which feeds those
+ * values into the endpoint `AddressLookup`.
  */
 export interface ServiceRecord {
   /** `true` when the service appeared or was updated; `false` on expiry. */
@@ -122,13 +124,152 @@ export const TXT_KEY_PUBLIC_KEY = "pk";
 export const TXT_KEY_RELAY = "relay";
 
 /**
+ * TXT key carrying a dialable direct `ip:port` address.
+ *
+ * Advertisers whose SRV port is not the real QUIC port — notably the iOS
+ * native `NWListener`, whose UDP port is unrelated to the QUIC socket, and
+ * whose resolved A-record host carries no port at all — publish the dialable
+ * `ip:<bound QUIC port>` here instead. See #346.
+ */
+export const TXT_KEY_ADDRESS = "address";
+
+/**
+ * Whether `s` is a literal IPv4 address (four decimal octets, each 0–255).
+ *
+ * Hostnames (`example.com`) and out-of-range octets (`999.999.999.999`) are
+ * rejected — the Rust dialer's `SocketAddr` parse accepts only IP literals, so
+ * anything else must not reach it (#350).
+ */
+function isIpv4Literal(h: string): boolean {
+  const octets = h.split(".");
+  if (octets.length !== 4) return false;
+  return octets.every((o) => {
+    if (!/^[0-9]{1,3}$/.test(o)) return false;
+    const n = Number(o);
+    // Reject non-canonical leading zeros ("01") to match Rust's strict parse.
+    if (o.length > 1 && o[0] === "0") return false;
+    return n <= 255;
+  });
+}
+
+/**
+ * Whether `h` is a literal IPv6 address (no zone id, matching what the Rust
+ * dialer accepts inside brackets).
+ *
+ * Handles `::` zero-compression (at most one) and a trailing embedded IPv4
+ * (`::ffff:192.168.1.1`). Rejects hostnames and malformed groups.
+ */
+function isIpv6Literal(h: string): boolean {
+  if (h.length === 0 || /[^0-9A-Fa-f:.]/.test(h)) return false;
+  const halves = h.split("::");
+  if (halves.length > 2) return false;
+  const compressed = halves.length === 2;
+  const head = halves[0] === "" ? [] : halves[0].split(":");
+  const tail = compressed && halves[1] !== "" ? halves[1].split(":") : [];
+  const groups = [...head, ...tail];
+  let count = 0;
+  for (let i = 0; i < groups.length; i++) {
+    const g = groups[i];
+    const isLast = i === groups.length - 1;
+    if (isLast && g.includes(".")) {
+      // A trailing embedded IPv4 occupies two 16-bit groups.
+      if (!isIpv4Literal(g)) return false;
+      count += 2;
+    } else {
+      if (!/^[0-9A-Fa-f]{1,4}$/.test(g)) return false;
+      count += 1;
+    }
+  }
+  // With compression the groups must be fewer than a full address (the `::`
+  // stands for at least one zero group); without it, exactly eight.
+  return compressed ? count <= 7 : count === 8;
+}
+
+/**
+ * Whether `s` is a well-formed, dialable `ip:port` socket address.
+ *
+ * Requires a literal IPv4 or bracketed IPv6 host and a valid port (1–65535).
+ * Bare IPs (no port), `:0`, hostnames (`example.com:443`), and invalid IP
+ * literals (`999.999.999.999:443`, `[not-ip]:443`) are rejected — the Rust
+ * dialer's `parse_direct_addrs` accepts only IP literals and drops the ENTIRE
+ * direct-address list (all-or-nothing) on the first bad entry, leaving the peer
+ * relay-only (#346, #350 F13).
+ */
+export function isDialableSocketAddr(s: string): boolean {
+  const idx = s.lastIndexOf(":");
+  if (idx <= 0 || idx === s.length - 1) return false;
+  const host = s.slice(0, idx);
+  const portStr = s.slice(idx + 1);
+  // Strict decimal 1–5 digits. `Number()` would otherwise accept "0x1a",
+  // "4e2", "+443", " 443", "443 " — the raw, unparseable string would then
+  // reach the dialer, where `parse_direct_addrs` errors and (all-or-nothing)
+  // drops the ENTIRE direct-address list, leaving the peer relay-only (#350).
+  if (!/^[0-9]{1,5}$/.test(portStr)) return false;
+  const port = Number(portStr);
+  if (port < 1 || port > 65535) return false;
+  // Bracketed IPv6 (`[::1]:443`) must contain a valid IPv6 literal; otherwise
+  // require a literal IPv4 — hostnames and malformed IPs are undialable.
+  if (host.startsWith("[")) {
+    if (!host.endsWith("]") || host.length <= 2) return false;
+    return isIpv6Literal(host.slice(1, -1));
+  }
+  return isIpv4Literal(host);
+}
+
+/**
+ * Whether `s` looks like a relay URL rather than a direct socket address.
+ *
+ * Relay URLs (`https://relay.example`) are valid dialing input — a peer behind
+ * NAT or off the LAN is only reachable via its home relay — but they are not
+ * `ip:port` and must bypass {@link isDialableSocketAddr}. Kept deliberately
+ * permissive: anything with an `http(s)` (or `relay`) scheme is a relay.
+ */
+export function isRelayUrl(s: string): boolean {
+  return /^(https?|relay):\/\//i.test(s);
+}
+
+/**
  * Interpret a generic {@link ServiceRecord} as an iroh-http {@link DiscoveredPeer}.
  *
  * Reads the peer's public key from the `pk` TXT property, falling back to the
  * instance label. Returns `null` when neither yields a node id.
+ *
+ * Addresses are sanitised for the dialer (#346): dialable `address` TXT
+ * candidates carry the authoritative QUIC endpoints. When present, they
+ * replace resolved SRV socket addresses, whose port can belong only to the
+ * DNS-SD carrier (the test service intentionally advertises port `1`). Without
+ * an authoritative TXT address, well-formed resolved `ip:port` addresses are
+ * used. Bare, port-less hosts and `:0` addresses are dropped so they can never
+ * fail `parse_direct_addrs` and poison the whole list.
+ *
+ * Relay URLs are preserved (the `relay` TXT entry and any relay-scheme entry in
+ * `addrs`) so an off-LAN / NAT'd peer stays reachable via its home relay —
+ * the `ip:port` hardening applies only to direct addresses (#350 review W3).
  */
 export function asIrohPeer(record: ServiceRecord): DiscoveredPeer | null {
   const nodeId = record.txt[TXT_KEY_PUBLIC_KEY] ?? record.instanceName;
   if (!nodeId) return null;
-  return { nodeId, addrs: record.addrs, isActive: record.isActive };
+
+  const addrs: string[] = [];
+  const push = (a: string | undefined) => {
+    if (!a || addrs.includes(a)) return;
+    // Relay URLs are dialable but are not `ip:port`; keep them verbatim.
+    if (isRelayUrl(a) || isDialableSocketAddr(a)) addrs.push(a);
+  };
+
+  // The `address` TXT may carry several comma-separated candidates — a node can
+  // be on multiple routable interfaces (e.g. a VPN `10.x` and the real LAN
+  // `192.168.x`), and advertising them all lets the dialer race the paths and
+  // reach the peer over whichever is actually reachable (#348). Each candidate
+  // is still validated as a dialable `ip:port` by `push`.
+  for (const a of (record.txt[TXT_KEY_ADDRESS] ?? "").split(",")) {
+    push(a.trim());
+  }
+  const hasAuthoritativeDirectAddr = addrs.some(isDialableSocketAddr);
+  push(record.txt[TXT_KEY_RELAY]);
+  for (const a of record.addrs) {
+    if (!hasAuthoritativeDirectAddr || isRelayUrl(a)) push(a);
+  }
+
+  return { nodeId, addrs, isActive: record.isActive };
 }

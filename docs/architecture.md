@@ -223,7 +223,8 @@ Error codes are a finite enum: `InvalidInput`, `ConnectionFailed`, `Timeout`, `B
 
 ## Compression
 
-Optional (feature-gated: `compression`). Policy: **zstd-only**.
+Always compiled in and runtime-opt-in through `NodeOptions.compression`.
+Policy: **zstd-only**.
 
 ```rust
 tower_http::decompression::DecompressionLayer::new()

@@ -6,6 +6,7 @@
 
 import { dirname, fromFileUrl, resolve } from "@std/path";
 import type {
+  DiscoveryInfo,
   EndpointInfo,
   EndpointStats,
   NodeAddrInfo,
@@ -323,6 +324,18 @@ function createYieldFn(): {
 // the -1 shutdown sentinel without a timing-dependent delay.
 const serveCancellers = new Map<number, () => void>();
 
+// `serveStart` crosses the async JSON dispatch bridge. Keep its registration
+// promise so an immediate self-fetch or stop cannot overtake native setup.
+const serveStartOps = new Map<number, Promise<Record<never, never>>>();
+
+async function waitForServeStart(endpointHandle: number): Promise<void> {
+  await serveStartOps.get(endpointHandle)?.catch(() => {});
+}
+
+async function waitForServeStop(endpointHandle: number): Promise<void> {
+  await serveStopOps.get(endpointHandle);
+}
+
 // #245: The `stopServe` FFI call is a non-blocking op (`iroh_http_call`).
 // If it is left floating it can still be in flight when a test's `sanitizeOps`
 // snapshot is taken, which Deno's leak sanitizer reports as a leaked op. This
@@ -363,6 +376,7 @@ const METHOD_BUFS: Record<string, Uint8Array> = Object.fromEntries(
     "endpointStats",
     "nodeAddr",
     "homeRelay",
+    "discoveryInfo",
     "peerInfo",
     "startTransportEvents",
     "nextTransportEvent",
@@ -647,6 +661,11 @@ export const rawFetch: RawFetchFn = async (
   directAddrs: string[] | null,
   fetchOptions?: FetchOptions,
 ) => {
+  // A serve call made immediately before this fetch may still be registering
+  // its in-process service on the Rust side. Preserve call order across the
+  // async FFI bridge so self-fetch observes the server that JS just started.
+  await waitForServeStart(endpointHandle);
+
   // #126: Callback-based fetch — Rust notifies via UnsafeCallback when done,
   // then we call poll_fetch once to retrieve the result.  This avoids both
   // spin-polling (which blocks the JS event loop, starving same-process
@@ -793,10 +812,24 @@ export const rawServe: RawServeFn = (
 ): Promise<void> => {
   // FFI handle as BigInt — endpoint handles are u64 on the Rust side.
   const eh = BigInt(endpointHandle);
-  return call<Record<never, never>>("serveStart", {
+  const serveStart = call<Record<never, never>>("serveStart", {
     endpointHandle,
     ...options.serveOptions,
-  }).then(
+  });
+  serveStartOps.set(endpointHandle, serveStart);
+  void serveStart.then(
+    () => {
+      if (serveStartOps.get(endpointHandle) === serveStart) {
+        serveStartOps.delete(endpointHandle);
+      }
+    },
+    () => {
+      if (serveStartOps.get(endpointHandle) === serveStart) {
+        serveStartOps.delete(endpointHandle);
+      }
+    },
+  );
+  return serveStart.then(
     () => {
       // Start connection event polling loop if a callback was supplied.
       if (options.onConnectionEvent) {
@@ -914,7 +947,11 @@ export const rawServe: RawServeFn = (
         }
       })();
     },
-  ).catch((err) => {
+  ).catch(async (err) => {
+    // A stop requested while registration was failing still owns an async FFI
+    // op. Drain it even though the polling loop (and its finally block) never
+    // existed, so `finished` cannot outlive a Deno op-sanitizer boundary.
+    await waitForServeStop(endpointHandle);
     // close_all / closeEndpoint can win the race before serveStart returns.
     if (isEndpointGoneError(err)) return;
     throw err;
@@ -1010,6 +1047,8 @@ export async function closeEndpoint(
   handle: number,
   force?: boolean,
 ): Promise<void> {
+  await waitForServeStart(handle);
+  await waitForServeStop(handle);
   await call<Record<never, never>>("closeEndpoint", {
     endpointHandle: handle,
     force: force ?? null,
@@ -1023,8 +1062,12 @@ export function stopServe(handle: number): void {
   // #245: Register the in-flight op so the serve loop can await it before
   // resolving `finished`; otherwise this non-blocking FFI op can outlive the
   // test boundary and trip Deno's `sanitizeOps` leak detector under load.
-  const op = call<Record<never, never>>("stopServe", { endpointHandle: handle })
-    .catch(() => {});
+  const op = (async () => {
+    // Do not let stop overtake an in-flight serve registration. This also
+    // guarantees the polling loop has installed its cancellation hook first.
+    await waitForServeStart(handle);
+    await call<Record<never, never>>("stopServe", { endpointHandle: handle });
+  })().catch(() => {});
   serveStopOps.set(handle, op);
   void op.finally(() => {
     if (serveStopOps.get(handle) === op) serveStopOps.delete(handle);
@@ -1061,6 +1104,12 @@ export const denoAddrFns = {
     });
     return res;
   },
+  discoveryInfo: async (handle: number) => {
+    const res = await call<DiscoveryInfo>("discoveryInfo", {
+      endpointHandle: handle,
+    });
+    return res;
+  },
   peerInfo: async (handle: number, nodeId: string) => {
     const res = await call<NodeAddrInfo | null>("peerInfo", {
       endpointHandle: handle,
@@ -1087,10 +1136,8 @@ export const denoDiscoveryFns = {
   browsePeersNext: async (browseHandle: number) => {
     return call<PeerDiscoveryEvent | null>("browsePeersNext", { browseHandle });
   },
-  browsePeersClose: (browseHandle: number) => {
-    call<Record<never, never>>("browsePeersClose", { browseHandle }).catch(
-      () => {},
-    );
+  browsePeersClose: async (browseHandle: number) => {
+    await call<Record<never, never>>("browsePeersClose", { browseHandle });
   },
   advertisePeer: async (handle: number, serviceName: string) => {
     return call<number>("advertisePeer", {
@@ -1098,10 +1145,8 @@ export const denoDiscoveryFns = {
       serviceName,
     });
   },
-  advertisePeerClose: (advertiseHandle: number) => {
-    call<Record<never, never>>("advertisePeerClose", { advertiseHandle }).catch(
-      () => {},
-    );
+  advertisePeerClose: async (advertiseHandle: number) => {
+    await call<Record<never, never>>("advertisePeerClose", { advertiseHandle });
   },
   advertise: async (config: ServiceConfig) => {
     return call<number>("advertise", {
@@ -1113,11 +1158,8 @@ export const denoDiscoveryFns = {
       protocol: config.protocol,
     });
   },
-  advertiseClose: (advertiseHandle: number) => {
-    call<Record<never, never>>("advertiseClose", { advertiseHandle })
-      .catch(
-        () => {},
-      );
+  advertiseClose: async (advertiseHandle: number) => {
+    await call<Record<never, never>>("advertiseClose", { advertiseHandle });
   },
   browse: async (serviceName: string, protocol?: DnsSdProtocol) => {
     return call<number>("browse", { serviceName, protocol });
@@ -1125,10 +1167,8 @@ export const denoDiscoveryFns = {
   browseNext: async (browseHandle: number) => {
     return call<ServiceRecord | null>("browseNext", { browseHandle });
   },
-  browseClose: (browseHandle: number) => {
-    call<Record<never, never>>("browseClose", { browseHandle }).catch(
-      () => {},
-    );
+  browseClose: async (browseHandle: number) => {
+    await call<Record<never, never>>("browseClose", { browseHandle });
   },
 };
 
@@ -1395,6 +1435,8 @@ export class DenoAdapter extends IrohAdapter {
   // ── Lifecycle ───────────────────────────────────────────────────────────────
 
   async closeEndpoint(handle: number, force?: boolean): Promise<void> {
+    await waitForServeStart(handle);
+    await waitForServeStop(handle);
     await call<Record<never, never>>("closeEndpoint", {
       endpointHandle: handle,
       force: force ?? null,
@@ -1425,6 +1467,10 @@ export class DenoAdapter extends IrohAdapter {
 
   async homeRelay(handle: number): Promise<string | null> {
     return call<string | null>("homeRelay", { endpointHandle: handle });
+  }
+
+  override async discoveryInfo(handle: number): Promise<DiscoveryInfo> {
+    return call<DiscoveryInfo>("discoveryInfo", { endpointHandle: handle });
   }
 
   async peerInfo(handle: number, nodeId: string): Promise<NodeAddrInfo | null> {
@@ -1460,10 +1506,8 @@ export class DenoAdapter extends IrohAdapter {
     return call<PeerDiscoveryEvent | null>("browsePeersNext", { browseHandle });
   }
 
-  override browsePeersClose(browseHandle: number): void {
-    call<Record<never, never>>("browsePeersClose", { browseHandle }).catch(
-      () => {},
-    );
+  override async browsePeersClose(browseHandle: number): Promise<void> {
+    await call<Record<never, never>>("browsePeersClose", { browseHandle });
   }
 
   override advertisePeer(
@@ -1473,10 +1517,8 @@ export class DenoAdapter extends IrohAdapter {
     return call<number>("advertisePeer", { endpointHandle, serviceName });
   }
 
-  override advertisePeerClose(advertiseHandle: number): void {
-    call<Record<never, never>>("advertisePeerClose", { advertiseHandle }).catch(
-      () => {},
-    );
+  override async advertisePeerClose(advertiseHandle: number): Promise<void> {
+    await call<Record<never, never>>("advertisePeerClose", { advertiseHandle });
   }
 
   // ── Generic DNS-SD ────────────────────────────────────────────────
@@ -1492,11 +1534,8 @@ export class DenoAdapter extends IrohAdapter {
     });
   }
 
-  override advertiseClose(advertiseHandle: number): void {
-    call<Record<never, never>>("advertiseClose", { advertiseHandle })
-      .catch(
-        () => {},
-      );
+  override async advertiseClose(advertiseHandle: number): Promise<void> {
+    await call<Record<never, never>>("advertiseClose", { advertiseHandle });
   }
 
   override browse(
@@ -1512,10 +1551,8 @@ export class DenoAdapter extends IrohAdapter {
     return call<ServiceRecord | null>("browseNext", { browseHandle });
   }
 
-  override browseClose(browseHandle: number): void {
-    call<Record<never, never>>("browseClose", { browseHandle }).catch(
-      () => {},
-    );
+  override async browseClose(browseHandle: number): Promise<void> {
+    await call<Record<never, never>>("browseClose", { browseHandle });
   }
 
   // ── Sessions ────────────────────────────────────────────────────────────────
@@ -1575,20 +1612,24 @@ export class DenoAdapter extends IrohAdapter {
   override async nextPathChange(
     _endpointHandle: number,
     nodeId: string,
+    subscriptionId: number,
   ): Promise<PathInfo | null> {
     return call<PathInfo | null>("nextPathChange", {
       endpointHandle: this.#eh,
       nodeId,
+      subscriptionId,
     });
   }
 
   override async unsubscribePathChanges(
     _endpointHandle: number,
     nodeId: string,
+    subscriptionId: number,
   ): Promise<void> {
     await call<null>("unsubscribePathChanges", {
       endpointHandle: this.#eh,
       nodeId,
+      subscriptionId,
     });
   }
 }

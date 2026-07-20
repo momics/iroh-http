@@ -10,6 +10,7 @@ permissions = [
   "allow-node-addr",
   "allow-node-ticket",
   "allow-home-relay",
+  "allow-discovery-info",
   "allow-peer-info",
   "allow-peer-stats",
   "allow-endpoint-stats",

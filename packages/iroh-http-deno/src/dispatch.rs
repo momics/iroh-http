@@ -32,13 +32,12 @@ use crate::serve_registry;
 #[cfg(feature = "discovery")]
 use iroh_http_discovery as _;
 #[cfg(feature = "discovery")]
-use slab::Slab;
+use std::collections::{HashMap, HashSet};
 #[cfg(feature = "discovery")]
-use std::sync::Arc;
-#[cfg(feature = "discovery")]
-use std::sync::{Mutex, OnceLock};
-#[cfg(feature = "discovery")]
-use tokio::sync::Mutex as TokioMutex;
+use std::sync::{
+    atomic::{AtomicU32, Ordering},
+    Arc, Mutex, OnceLock,
+};
 
 struct PathSub {
     rx: tokio::sync::Mutex<
@@ -47,11 +46,22 @@ struct PathSub {
     notify: tokio::sync::Notify,
 }
 
-type PathRxMap = dashmap::DashMap<(u64, String), std::sync::Arc<PathSub>>;
+type PathRxMap = dashmap::DashMap<(u64, String, u32), std::sync::Arc<PathSub>>;
 
 fn path_change_rxs() -> &'static PathRxMap {
     static PATH_CHANGE_RXS: std::sync::OnceLock<PathRxMap> = std::sync::OnceLock::new();
     PATH_CHANGE_RXS.get_or_init(dashmap::DashMap::new)
+}
+
+fn clear_path_change_rxs(endpoint_handle: u64) {
+    path_change_rxs().retain(|key, sub| {
+        if key.0 == endpoint_handle {
+            sub.notify.notify_waiters();
+            false
+        } else {
+            true
+        }
+    });
 }
 
 // ── Endpoint helpers ─────────────────────────────────────────────────────────
@@ -65,7 +75,10 @@ fn remove_endpoint(handle: u64) -> Option<IrohEndpoint> {
 }
 
 fn insert_endpoint(ep: IrohEndpoint) -> u64 {
-    registry::insert_endpoint(ep)
+    let handle = registry::insert_endpoint(ep);
+    #[cfg(feature = "discovery")]
+    activate_endpoint_discovery(handle);
+    handle
 }
 
 use iroh_http_adapter::{
@@ -207,6 +220,7 @@ pub async fn dispatch(method: &str, payload: &[u8]) -> Value {
         sync  "nodeAddr"                => node_addr_dispatch,
         sync  "nodeTicket"              => node_ticket_dispatch,
         sync  "homeRelay"               => home_relay_dispatch,
+        sync  "discoveryInfo"           => discovery_info_dispatch,
         async "peerInfo"                => peer_info_dispatch,
         async "peerStats"               => peer_stats_dispatch,
         sync  "endpointStats"           => endpoint_stats_dispatch,
@@ -339,10 +353,10 @@ async fn create_endpoint(p: Value) -> Value {
             proxy_from_env: args.proxy_from_env.unwrap_or(false),
             disabled: args.disable_networking.unwrap_or(false),
         },
-        discovery: DiscoveryOptions {
-            dns_server: args.dns_discovery,
-            enabled: args.dns_discovery_enabled.unwrap_or(true),
-        },
+        discovery: DiscoveryOptions::new(
+            args.dns_discovery,
+            args.dns_discovery_enabled.unwrap_or(true),
+        ),
         pool: PoolOptions {
             max_connections: args.max_pooled_connections,
             idle_timeout_ms: endpoint.pool_idle_timeout_ms,
@@ -394,11 +408,14 @@ async fn close_endpoint(p: Value) -> Value {
             format!("node closed or not found (handle {handle})"),
         ),
         Some(ep) => {
+            #[cfg(feature = "discovery")]
+            retire_endpoint_discovery(handle);
             if force {
                 ep.close_force().await;
             } else {
                 ep.close().await;
             }
+            clear_path_change_rxs(handle);
             // Remove from registry only after close completes.
             remove_endpoint(handle);
             ok(json!({}))
@@ -453,6 +470,25 @@ fn home_relay_dispatch(p: Value) -> Value {
             format!("node closed or not found (handle {handle})"),
         ),
         Some(ep) => ok(ep.home_relay()),
+    }
+}
+
+fn discovery_info_dispatch(p: Value) -> Value {
+    let handle = match p["endpointHandle"].as_u64() {
+        Some(h) => h,
+        None => return err("missing endpointHandle"),
+    };
+    match get_endpoint(handle) {
+        None => err_code(
+            "INVALID_HANDLE",
+            format!("node closed or not found (handle {handle})"),
+        ),
+        Some(ep) => ok(json!({
+            "nodeId": ep.node_id(),
+            "directAddress": ep.dialable_direct_address(),
+            "directAddresses": ep.dialable_direct_addresses(),
+            "relayUrl": ep.home_relay(),
+        })),
     }
 }
 
@@ -1012,19 +1048,94 @@ fn generate_secret_key_dispatch() -> Value {
 
 // ── mDNS browse / advertise ──────────────────────────────────────────────────
 
+/// Shared by peer and generic discovery resources. Allocation never wraps, so
+/// a closed raw handle can never identify a later resource of any kind.
 #[cfg(feature = "discovery")]
-type BrowseHandle = Arc<TokioMutex<iroh_http_discovery::BrowseSession>>;
+static DISCOVERY_HANDLE_COUNTER: AtomicU32 = AtomicU32::new(1);
 
 #[cfg(feature = "discovery")]
-fn browse_slab() -> &'static Mutex<Slab<BrowseHandle>> {
-    static S: OnceLock<Mutex<Slab<BrowseHandle>>> = OnceLock::new();
-    S.get_or_init(|| Mutex::new(Slab::new()))
+fn alloc_discovery_handle() -> Result<u32, &'static str> {
+    DISCOVERY_HANDLE_COUNTER
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            current.checked_add(1)
+        })
+        .map_err(|_| "discovery handle space exhausted")
 }
 
 #[cfg(feature = "discovery")]
-fn advertise_slab() -> &'static Mutex<Slab<iroh_http_discovery::AdvertiseSession>> {
-    static S: OnceLock<Mutex<Slab<iroh_http_discovery::AdvertiseSession>>> = OnceLock::new();
-    S.get_or_init(|| Mutex::new(Slab::new()))
+struct EndpointOwned<T> {
+    endpoint: u64,
+    resource: T,
+}
+
+#[cfg(feature = "discovery")]
+fn drain_endpoint_owned<K, T>(resources: &mut HashMap<K, EndpointOwned<T>>, endpoint: u64) -> Vec<T>
+where
+    K: Copy + Eq + std::hash::Hash,
+{
+    let handles: Vec<K> = resources
+        .iter()
+        .filter_map(|(handle, owned)| (owned.endpoint == endpoint).then_some(*handle))
+        .collect();
+    handles
+        .into_iter()
+        .filter_map(|handle| resources.remove(&handle).map(|owned| owned.resource))
+        .collect()
+}
+
+#[cfg(feature = "discovery")]
+#[derive(Default)]
+struct DiscoveryState {
+    active_endpoints: HashSet<u64>,
+    peer_browses: HashMap<u32, EndpointOwned<Arc<iroh_http_discovery::BrowseSession>>>,
+    peer_advertisements: HashMap<u32, EndpointOwned<iroh_http_discovery::AdvertiseSession>>,
+    generic_browses: HashMap<u32, Arc<iroh_http_discovery::ServiceBrowseSession>>,
+    generic_advertisements: HashMap<u32, iroh_http_discovery::AdvertiseSession>,
+}
+
+#[cfg(feature = "discovery")]
+fn discovery_state() -> &'static Mutex<DiscoveryState> {
+    static STATE: OnceLock<Mutex<DiscoveryState>> = OnceLock::new();
+    STATE.get_or_init(|| Mutex::new(DiscoveryState::default()))
+}
+
+#[cfg(feature = "discovery")]
+fn lock_discovery_state() -> std::sync::MutexGuard<'static, DiscoveryState> {
+    discovery_state()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+}
+
+#[cfg(feature = "discovery")]
+fn activate_endpoint_discovery(endpoint_handle: u64) {
+    lock_discovery_state()
+        .active_endpoints
+        .insert(endpoint_handle);
+}
+
+#[cfg(feature = "discovery")]
+fn retire_endpoint_discovery(endpoint_handle: u64) {
+    // Removing the endpoint from `active_endpoints` under the same mutex used
+    // to publish sessions linearizes teardown against a concurrent start.
+    let (browses, advertisements) = {
+        let mut state = lock_discovery_state();
+        state.active_endpoints.remove(&endpoint_handle);
+        let browses = drain_endpoint_owned(&mut state.peer_browses, endpoint_handle);
+        let advertisements = drain_endpoint_owned(&mut state.peer_advertisements, endpoint_handle);
+        (browses, advertisements)
+    };
+    for session in browses {
+        session.close();
+    }
+    drop(advertisements);
+}
+
+#[cfg(feature = "discovery")]
+fn parse_discovery_handle(payload: &Value, field: &str) -> Result<u32, String> {
+    let raw = payload[field]
+        .as_u64()
+        .ok_or_else(|| format!("missing {field}"))?;
+    u32::try_from(raw).map_err(|_| format!("invalid {field}: {raw}"))
 }
 
 async fn browse_peers_dispatch(_p: Value) -> Value {
@@ -1050,10 +1161,31 @@ async fn browse_peers_dispatch(_p: Value) -> Value {
         match iroh_http_discovery::browse_peers(ep.raw(), service_name).await {
             Err(e) => err_code("REFUSED", e),
             Ok(session) => {
-                let h = browse_slab()
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .insert(Arc::new(TokioMutex::new(session))) as u32;
+                let session = Arc::new(session);
+                let mut state = lock_discovery_state();
+                if !state.active_endpoints.contains(&handle) {
+                    drop(state);
+                    session.close();
+                    return err_code(
+                        "INVALID_HANDLE",
+                        format!("node closed during discovery start (handle {handle})"),
+                    );
+                }
+                let h = match alloc_discovery_handle() {
+                    Ok(handle) => handle,
+                    Err(error) => {
+                        drop(state);
+                        session.close();
+                        return err_code("HANDLE_EXHAUSTED", error);
+                    }
+                };
+                state.peer_browses.insert(
+                    h,
+                    EndpointOwned {
+                        endpoint: handle,
+                        resource: session,
+                    },
+                );
                 ok(json!(h))
             }
         }
@@ -1065,20 +1197,29 @@ async fn browse_peers_dispatch(_p: Value) -> Value {
 async fn browse_peers_next_dispatch(_p: Value) -> Value {
     #[cfg(feature = "discovery")]
     {
-        let handle = match _p["browseHandle"].as_u64() {
-            Some(h) => h,
-            None => return err("missing browseHandle"),
+        let handle = match parse_discovery_handle(&_p, "browseHandle") {
+            Ok(handle) => handle,
+            Err(error) => return err(error),
         };
-        let session = match browse_slab()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(handle as usize)
-            .cloned()
+        let session = match lock_discovery_state()
+            .peer_browses
+            .get(&handle)
+            .map(|owned| Arc::clone(&owned.resource))
         {
             Some(s) => s,
             None => return err(format!("invalid browse handle: {handle}")),
         };
-        let event = session.lock().await.next_event().await;
+        let event = session.next_event().await;
+        if event.is_none() {
+            let mut state = lock_discovery_state();
+            let is_same = state
+                .peer_browses
+                .get(&handle)
+                .is_some_and(|owned| Arc::ptr_eq(&owned.resource, &session));
+            if is_same {
+                state.peer_browses.remove(&handle);
+            }
+        }
         match event {
             None => ok(json!(null)),
             Some(ev) => ok(json!({
@@ -1095,13 +1236,24 @@ async fn browse_peers_next_dispatch(_p: Value) -> Value {
 fn browse_peers_close_dispatch(_p: Value) -> Value {
     #[cfg(feature = "discovery")]
     {
-        let handle = match _p["browseHandle"].as_u64() {
-            Some(h) => h,
-            None => return err("missing browseHandle"),
+        let handle = match parse_discovery_handle(&_p, "browseHandle") {
+            Ok(handle) => handle,
+            Err(error) => return err(error),
         };
-        let mut slab = browse_slab().lock().unwrap_or_else(|e| e.into_inner());
-        if slab.contains(handle as usize) {
-            slab.remove(handle as usize);
+        let session = lock_discovery_state()
+            .peer_browses
+            .get(&handle)
+            .map(|owned| Arc::clone(&owned.resource));
+        if let Some(session) = session {
+            session.close();
+            let mut state = lock_discovery_state();
+            let is_same = state
+                .peer_browses
+                .get(&handle)
+                .is_some_and(|owned| Arc::ptr_eq(&owned.resource, &session));
+            if is_same {
+                state.peer_browses.remove(&handle);
+            }
         }
     }
     ok(json!({}))
@@ -1130,10 +1282,30 @@ fn advertise_peer_dispatch(_p: Value) -> Value {
         match iroh_http_discovery::advertise_peer(ep.raw(), service_name) {
             Err(e) => err_code("REFUSED", e),
             Ok(session) => {
-                let h = advertise_slab()
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .insert(session) as u32;
+                let mut state = lock_discovery_state();
+                if !state.active_endpoints.contains(&handle) {
+                    drop(state);
+                    drop(session);
+                    return err_code(
+                        "INVALID_HANDLE",
+                        format!("node closed during discovery start (handle {handle})"),
+                    );
+                }
+                let h = match alloc_discovery_handle() {
+                    Ok(handle) => handle,
+                    Err(error) => {
+                        drop(state);
+                        drop(session);
+                        return err_code("HANDLE_EXHAUSTED", error);
+                    }
+                };
+                state.peer_advertisements.insert(
+                    h,
+                    EndpointOwned {
+                        endpoint: handle,
+                        resource: session,
+                    },
+                );
                 ok(json!(h))
             }
         }
@@ -1145,28 +1317,17 @@ fn advertise_peer_dispatch(_p: Value) -> Value {
 fn advertise_peer_close_dispatch(_p: Value) -> Value {
     #[cfg(feature = "discovery")]
     {
-        let handle = match _p["advertiseHandle"].as_u64() {
-            Some(h) => h,
-            None => return err("missing advertiseHandle"),
+        let handle = match parse_discovery_handle(&_p, "advertiseHandle") {
+            Ok(handle) => handle,
+            Err(error) => return err(error),
         };
-        let mut slab = advertise_slab().lock().unwrap_or_else(|e| e.into_inner());
-        if slab.contains(handle as usize) {
-            slab.remove(handle as usize);
-        }
+        let session = lock_discovery_state().peer_advertisements.remove(&handle);
+        drop(session);
     }
     ok(json!({}))
 }
 
 // ── Generic DNS-SD ───────────────────────────────────────────────────────────
-
-#[cfg(feature = "discovery")]
-type GenericBrowseHandle = Arc<TokioMutex<iroh_http_discovery::ServiceBrowseSession>>;
-
-#[cfg(feature = "discovery")]
-fn generic_browse_slab() -> &'static Mutex<Slab<GenericBrowseHandle>> {
-    static S: OnceLock<Mutex<Slab<GenericBrowseHandle>>> = OnceLock::new();
-    S.get_or_init(|| Mutex::new(Slab::new()))
-}
 
 #[cfg(feature = "discovery")]
 fn parse_protocol(p: &Value) -> Result<iroh_http_discovery::Protocol, String> {
@@ -1224,10 +1385,13 @@ fn advertise_dispatch(_p: Value) -> Value {
         match iroh_http_discovery::advertise(config) {
             Err(e) => err_code("REFUSED", e),
             Ok(session) => {
-                let h = advertise_slab()
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .insert(session) as u32;
+                let h = match alloc_discovery_handle() {
+                    Ok(handle) => handle,
+                    Err(error) => return err_code("HANDLE_EXHAUSTED", error),
+                };
+                lock_discovery_state()
+                    .generic_advertisements
+                    .insert(h, session);
                 ok(json!(h))
             }
         }
@@ -1239,14 +1403,14 @@ fn advertise_dispatch(_p: Value) -> Value {
 fn advertise_close_dispatch(_p: Value) -> Value {
     #[cfg(feature = "discovery")]
     {
-        let handle = match _p["advertiseHandle"].as_u64() {
-            Some(h) => h,
-            None => return err("missing advertiseHandle"),
+        let handle = match parse_discovery_handle(&_p, "advertiseHandle") {
+            Ok(handle) => handle,
+            Err(error) => return err(error),
         };
-        let mut slab = advertise_slab().lock().unwrap_or_else(|e| e.into_inner());
-        if slab.contains(handle as usize) {
-            slab.remove(handle as usize);
-        }
+        let session = lock_discovery_state()
+            .generic_advertisements
+            .remove(&handle);
+        drop(session);
     }
     ok(json!({}))
 }
@@ -1269,10 +1433,13 @@ fn browse_dispatch(_p: Value) -> Value {
         match iroh_http_discovery::browse(config) {
             Err(e) => err_code("REFUSED", e),
             Ok(session) => {
-                let h = generic_browse_slab()
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .insert(Arc::new(TokioMutex::new(session))) as u32;
+                let h = match alloc_discovery_handle() {
+                    Ok(handle) => handle,
+                    Err(error) => return err_code("HANDLE_EXHAUSTED", error),
+                };
+                lock_discovery_state()
+                    .generic_browses
+                    .insert(h, Arc::new(session));
                 ok(json!(h))
             }
         }
@@ -1284,20 +1451,25 @@ fn browse_dispatch(_p: Value) -> Value {
 async fn browse_next_dispatch(_p: Value) -> Value {
     #[cfg(feature = "discovery")]
     {
-        let handle = match _p["browseHandle"].as_u64() {
-            Some(h) => h,
-            None => return err("missing browseHandle"),
+        let handle = match parse_discovery_handle(&_p, "browseHandle") {
+            Ok(handle) => handle,
+            Err(error) => return err(error),
         };
-        let session = match generic_browse_slab()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(handle as usize)
-            .cloned()
-        {
+        let session = match lock_discovery_state().generic_browses.get(&handle).cloned() {
             Some(s) => s,
             None => return err(format!("invalid browse handle: {handle}")),
         };
-        let record = session.lock().await.next_record().await;
+        let record = session.next_record().await;
+        if record.is_none() {
+            let mut state = lock_discovery_state();
+            let is_same = state
+                .generic_browses
+                .get(&handle)
+                .is_some_and(|current| Arc::ptr_eq(current, &session));
+            if is_same {
+                state.generic_browses.remove(&handle);
+            }
+        }
         match record {
             None => ok(json!(null)),
             Some(r) => ok(json!({
@@ -1318,15 +1490,21 @@ async fn browse_next_dispatch(_p: Value) -> Value {
 fn browse_close_dispatch(_p: Value) -> Value {
     #[cfg(feature = "discovery")]
     {
-        let handle = match _p["browseHandle"].as_u64() {
-            Some(h) => h,
-            None => return err("missing browseHandle"),
+        let handle = match parse_discovery_handle(&_p, "browseHandle") {
+            Ok(handle) => handle,
+            Err(error) => return err(error),
         };
-        let mut slab = generic_browse_slab()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        if slab.contains(handle as usize) {
-            slab.remove(handle as usize);
+        let session = lock_discovery_state().generic_browses.get(&handle).cloned();
+        if let Some(session) = session {
+            session.close();
+            let mut state = lock_discovery_state();
+            let is_same = state
+                .generic_browses
+                .get(&handle)
+                .is_some_and(|current| Arc::ptr_eq(current, &session));
+            if is_same {
+                state.generic_browses.remove(&handle);
+            }
         }
     }
     ok(json!({}))
@@ -1708,6 +1886,7 @@ async fn next_transport_event_dispatch(p: Value) -> Value {
 struct NextPathChangePayload {
     endpoint_handle: u64,
     node_id: String,
+    subscription_id: u32,
 }
 
 async fn next_path_change_dispatch(p: Value) -> Value {
@@ -1730,11 +1909,15 @@ async fn next_path_change_dispatch(p: Value) -> Value {
         }
     };
 
-    let key = (payload.endpoint_handle, payload.node_id.clone());
+    let key = (
+        payload.endpoint_handle,
+        payload.node_id.clone(),
+        payload.subscription_id,
+    );
     let rx_arc = rxs
         .entry(key.clone())
         .or_insert_with(|| {
-            let rx = ep.subscribe_path_changes(&payload.node_id);
+            let rx = ep.subscribe_path_changes(&payload.node_id, payload.subscription_id);
             std::sync::Arc::new(PathSub {
                 rx: tokio::sync::Mutex::new(rx),
                 notify: tokio::sync::Notify::new(),
@@ -1779,12 +1962,25 @@ fn unsubscribe_path_changes_dispatch(p: Value) -> Value {
         }
     };
 
-    if let Some((_, sub)) =
-        path_change_rxs().remove(&(payload.endpoint_handle, payload.node_id.clone()))
-    {
-        sub.notify.notify_waiters();
+    let key = (
+        payload.endpoint_handle,
+        payload.node_id.clone(),
+        payload.subscription_id,
+    );
+    match path_change_rxs().entry(key) {
+        dashmap::mapref::entry::Entry::Occupied(entry) => {
+            let (_, sub) = entry.remove_entry();
+            sub.notify.notify_waiters();
+        }
+        dashmap::mapref::entry::Entry::Vacant(entry) => {
+            let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            entry.insert(std::sync::Arc::new(PathSub {
+                rx: tokio::sync::Mutex::new(rx),
+                notify: tokio::sync::Notify::new(),
+            }));
+        }
     }
-    ep.unsubscribe_path_changes(&payload.node_id);
+    ep.unsubscribe_path_changes(&payload.node_id, payload.subscription_id);
     ok(serde_json::Value::Null)
 }
 
@@ -1793,6 +1989,66 @@ mod tests {
     use super::*;
     use iroh_http_core::{NodeOptions, ResponseHeadEntry};
     use tokio::sync::oneshot;
+
+    #[cfg(feature = "discovery")]
+    #[test]
+    fn discovery_handles_are_monotonic_and_not_reused() -> Result<(), &'static str> {
+        let first = alloc_discovery_handle()?;
+        let second = alloc_discovery_handle()?;
+
+        assert!(second > first);
+        let mut resources = HashMap::from([(first, "old")]);
+        assert_eq!(resources.remove(&first), Some("old"));
+        resources.insert(second, "new");
+        assert!(!resources.contains_key(&first));
+        assert_eq!(resources.get(&second), Some(&"new"));
+        Ok(())
+    }
+
+    #[cfg(feature = "discovery")]
+    #[test]
+    fn endpoint_retirement_only_drains_owned_resources() {
+        let mut resources = HashMap::from([
+            (
+                10,
+                EndpointOwned {
+                    endpoint: 1,
+                    resource: "first",
+                },
+            ),
+            (
+                11,
+                EndpointOwned {
+                    endpoint: 2,
+                    resource: "other",
+                },
+            ),
+            (
+                12,
+                EndpointOwned {
+                    endpoint: 1,
+                    resource: "second",
+                },
+            ),
+        ]);
+
+        let mut retired = drain_endpoint_owned(&mut resources, 1);
+        retired.sort_unstable();
+
+        assert_eq!(retired, vec!["first", "second"]);
+        assert_eq!(resources.len(), 1);
+        assert_eq!(
+            resources.get(&11).map(|owned| owned.resource),
+            Some("other")
+        );
+    }
+
+    #[cfg(feature = "discovery")]
+    #[test]
+    fn discovery_handle_parser_rejects_values_outside_public_u32_range() {
+        let payload = json!({ "browseHandle": u64::from(u32::MAX) + 1 });
+        assert!(parse_discovery_handle(&payload, "browseHandle").is_err());
+    }
 
     async fn test_endpoint() -> (u64, IrohEndpoint) {
         let mut opts = NodeOptions::default();

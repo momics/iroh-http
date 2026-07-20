@@ -1,21 +1,63 @@
 //! Global state managed by the Tauri plugin.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
 
 use iroh_http_core::{endpoint::IrohEndpoint, registry};
 
 // ── Endpoint slab (delegates to core registry) ───────────────────────────────
-
-pub fn insert_endpoint(ep: IrohEndpoint) -> u64 {
-    registry::insert_endpoint(ep)
-}
 
 pub fn get_endpoint(handle: u64) -> Option<IrohEndpoint> {
     registry::get_endpoint(handle)
 }
 
 pub fn remove_endpoint(handle: u64) -> Option<IrohEndpoint> {
+    remove_endpoint_owner(handle);
     registry::remove_endpoint(handle)
+}
+
+fn endpoint_owners() -> &'static Mutex<HashMap<String, u64>> {
+    static S: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
+    S.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Insert an endpoint and make it the current owner for its stable node id.
+///
+/// A Tauri webview can be reloaded by the OS without destroying the Rust
+/// process. When JS boots again with the same persisted key, the previous
+/// native endpoint may still be present but no longer controlled by the new JS
+/// object. In that case the new endpoint replaces the old one.
+pub fn replace_endpoint_for_node_id(
+    node_id: String,
+    ep: IrohEndpoint,
+) -> (u64, Option<(u64, IrohEndpoint)>) {
+    let handle = registry::insert_endpoint(ep);
+    let old_handle = endpoint_owners()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(node_id, handle);
+
+    let old = old_handle
+        .filter(|old| *old != handle)
+        .and_then(|old| registry::remove_endpoint(old).map(|ep| (old, ep)));
+
+    (handle, old)
+}
+
+fn remove_endpoint_owner(handle: u64) {
+    endpoint_owners()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .retain(|_, owned_handle| *owned_handle != handle);
+}
+
+/// Clear stable-node ownership after process-wide endpoint teardown.
+pub(crate) fn clear_endpoint_owners() {
+    endpoint_owners()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .clear();
 }
 
 // ── Scheme handler state ─────────────────────────────────────────────────────

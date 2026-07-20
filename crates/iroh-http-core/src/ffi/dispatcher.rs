@@ -375,12 +375,14 @@ where
     });
     let svc = IrohHttpService { dispatcher };
 
-    // Register the service for in-process self-requests (ADR-015): a later
-    // `fetch()` to this node's own id dispatches to this exact service instead
-    // of dialing over QUIC (which iroh forbids). Cleared on serve stop / close.
-    endpoint.set_local_service(&svc);
+    let handle = serve_with_events(endpoint.clone(), options, svc.clone(), on_connection_event);
 
-    serve_with_events(endpoint, options, svc, on_connection_event)
+    // Register the service for in-process self-requests (ADR-015) against the
+    // exact token the common server path already installed. If stop_serve won
+    // the race after registration, the stopped token rejects this late service
+    // install instead of reviving a half-live local router.
+    endpoint.set_local_service_for(&handle, &svc);
+    handle
 }
 
 /// Back-compat 3-arg FFI serve entry: equivalent to

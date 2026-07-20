@@ -22,7 +22,6 @@ napi = { version = "3", features = ["async", "napi9"] }
 napi-derive = "3"
 tokio = { workspace = true, features = ["rt-multi-thread"] }
 bytes = { workspace = true }
-slab = { workspace = true }
 tracing = "0.1"
 serde_json = "1"
 dashmap = "6"

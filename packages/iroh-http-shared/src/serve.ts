@@ -273,6 +273,7 @@ export function makeServe(
         // Peer-Id is stripped (spoof prevention) and re-injected from the
         // authenticated QUIC connection identity in Rust core. No duplication here.
         const headers: [string, string][] = [...payload.headers];
+        const inboundHeaders = new Headers(headers);
 
         const reqInit: RequestInit & { duplex?: "half" } = {
           method: payload.method,
@@ -285,6 +286,19 @@ export function makeServe(
           payload.url,
           reqInit,
         );
+
+        // Chromium-based runtimes may still apply the forbidden request-header
+        // filter while constructing a Request, even though this is an inbound
+        // server request and the native transport has already received the
+        // headers. Expose that authoritative set to the handler rather than the
+        // constructor's potentially filtered copy. This is intentionally
+        // header-agnostic so platform policy cannot silently discard other
+        // legitimate inbound fields.
+        Object.defineProperty(req, "headers", {
+          value: inboundHeaders,
+          configurable: true,
+          enumerable: true,
+        });
 
         // Invoke the user handler with onError fallback.
         let res: Response;
@@ -306,7 +320,26 @@ export function makeServe(
           }
         }
 
-        const bodyStream = res.body ?? emptyStream();
+        // #338: Some platforms — notably the Android System WebView — return a
+        // falsy `res.body` for a body-carrying Response (`new Response("text")`
+        // yields no usable ReadableStream). `res.body ?? emptyStream()` then
+        // silently dropped the body, so remote peers saw the correct status and
+        // headers but zero bytes. When `res.body` is absent, buffer the bytes via
+        // `res.arrayBuffer()` into a one-shot stream (empty for a genuine 204/304).
+        // When `res.body` is present we use it directly, so streaming responses on
+        // desktop/iOS/Node/Deno are never forced to fully buffer (no regression).
+        let bodyStream: ReadableStream<Uint8Array>;
+        if (res.body) {
+          bodyStream = res.body;
+        } else {
+          const buffered = new Uint8Array(await res.arrayBuffer());
+          bodyStream = new ReadableStream<Uint8Array>({
+            start(controller) {
+              if (buffered.byteLength > 0) controller.enqueue(buffered);
+              controller.close();
+            },
+          });
+        }
         const doPipe = async () => {
           await pipeToWriter(adapter, bodyStream, payload.resBodyHandle, {
             maxChunkSizeBytes,
@@ -421,14 +454,6 @@ export function makeServe(
 function defaultOnError(error: unknown): Response {
   console.error("[iroh-http] unhandled handler error:", error);
   return new Response("Internal Server Error", { status: 500 });
-}
-
-function emptyStream(): ReadableStream<Uint8Array> {
-  return new ReadableStream<Uint8Array>({
-    start(controller) {
-      controller.close();
-    },
-  });
 }
 
 function headerValue(
