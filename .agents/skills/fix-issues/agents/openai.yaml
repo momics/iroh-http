@@ -1,0 +1,4 @@
+interface:
+  display_name: "Fix iroh-http Issues"
+  short_description: "Resolve issue groups through reviewed branches"
+  default_prompt: "Use $fix-issues to plan and resolve this group of iroh-http issues."

@@ -101,7 +101,11 @@ async fn graceful_shutdown_drains_in_flight() {
     // Let the handler complete.
     handler_proceed.notify_one();
 
-    // Drain should complete now that the handler has finished.
+    // Drain should complete now that the handler has finished and the peer has
+    // acknowledged the response stream. ASan reliably stresses the client
+    // enough to expose a transport-delivery race here: graceful shutdown used
+    // to close the QUIC connection immediately after queuing the response,
+    // before the peer received even the response head.
     tokio::time::timeout(std::time::Duration::from_secs(10), drain_done_rx.notified())
         .await
         .expect("drain should complete after handler finishes");

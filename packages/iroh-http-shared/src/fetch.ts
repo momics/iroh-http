@@ -10,7 +10,7 @@
 import type { FfiResponse, IrohAdapter, IrohFetchInit } from "./IrohAdapter.js";
 import { bodyInitToStream, makeReadable, pipeToWriter } from "./streams.js";
 import { classifyError } from "./errors.js";
-import { decodeBase64 } from "./utils.js";
+import { decodeBase64, nodeAddrWithRelay } from "./utils.js";
 
 export type FetchFn = {
   /** Web-standard form: peer identity is embedded in the `httpi://` URL hostname. */
@@ -65,6 +65,7 @@ export function makeFetch(
     const method = init?.method ?? "GET";
     const signal = init?.signal ?? null;
     const directAddrs = init?.directAddrs ?? null;
+    const remoteNodeAddr = nodeAddrWithRelay(nodeId, init?.relayUrl);
     const requestTimeout = validateJsonSafeNumber(
       init?.requestTimeout,
       "requestTimeout",
@@ -152,7 +153,7 @@ export function makeFetch(
     // the body reader and causing a drain timeout (#122 follow-up).
     const fetchPromise = adapter.rawFetch(
       endpointHandle,
-      nodeId,
+      remoteNodeAddr,
       url,
       method,
       headers,

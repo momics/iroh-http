@@ -23,11 +23,14 @@
 use std::sync::Arc;
 
 pub(in crate::endpoint) mod bind;
+mod dns_nameservers;
 pub(in crate::endpoint) mod ffi_bridge;
 pub(in crate::endpoint) mod http_runtime;
 pub(in crate::endpoint) mod lifecycle;
 pub(in crate::endpoint) mod observe;
+mod scoped_dns_compat;
 pub(in crate::endpoint) mod session_runtime;
+mod source_scoped_lookup;
 pub(in crate::endpoint) mod transport;
 
 pub mod config;
@@ -36,6 +39,10 @@ pub mod stats;
 pub use bind::parse_direct_addrs;
 pub use config::{DiscoveryOptions, NetworkingOptions, NodeOptions, PoolOptions, StreamingOptions};
 pub use http::server::stack::CompressionOptions;
+pub use source_scoped_lookup::{
+    AddressLookupRemoval, AddressLookupSource, AddressLookupUpsert, AddressLookupUpsertError,
+    SourceScopedAddressLookup,
+};
 pub use stats::{ConnectionEvent, EndpointStats, NodeAddrInfo, PathInfo, PeerStats};
 
 use crate::ffi::handles::HandleStore;
@@ -89,16 +96,41 @@ impl IrohEndpoint {
 
     // ── Local serve service (self-request loopback) ──────────────────────────
 
-    /// Register the locally-running serve service so a self-request
-    /// (`fetch()` to this node's own id) can be dispatched in-process.
-    /// Called when `serve()` starts; see ADR-015.
-    pub(crate) fn set_local_service(&self, svc: &crate::ffi::dispatcher::IrohHttpService) {
-        *self
+    /// Allocate the stable identity for a new serve cycle on this endpoint.
+    pub(crate) fn next_serve_token(&self) -> crate::http::server::handle::ServeToken {
+        self.inner.session.next_serve_token()
+    }
+
+    /// Register the FFI service for in-process self-requests, but only while
+    /// `handle` is still the active, unstopped serve cycle.
+    ///
+    /// The common server path has already installed the token before this is
+    /// called. Holding the serve slot while checking identity and installing
+    /// the weak service makes a concurrent `stop_serve` linearizable: either
+    /// the service is installed and then cleared, or the stopped token rejects
+    /// the late install.
+    pub(crate) fn set_local_service_for(
+        &self,
+        handle: &crate::http::server::ServeHandle,
+        svc: &crate::ffi::dispatcher::IrohHttpService,
+    ) {
+        let serve_guard = self
             .inner
-            .ffi
-            .local_service
+            .session
+            .serve_handle
             .lock()
-            .unwrap_or_else(|e| e.into_inner()) = Some(svc.downgrade());
+            .unwrap_or_else(|e| e.into_inner());
+        let is_current = serve_guard
+            .as_ref()
+            .is_some_and(|current| current.is_same_cycle(handle));
+        if is_current && !handle.is_shutdown_requested() {
+            *self
+                .inner
+                .ffi
+                .local_service
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = Some(svc.downgrade());
+        }
     }
 
     /// Clear the registered serve service. Called on serve stop / close so a

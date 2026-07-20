@@ -59,11 +59,8 @@ fn install_panic_hook() {
 }
 
 use std::collections::HashMap;
-
 #[cfg(feature = "discovery")]
-use slab::Slab;
-#[cfg(feature = "discovery")]
-use tokio::sync::Mutex as TokioMutex;
+use std::collections::HashSet;
 
 use iroh_http_adapter::{
     coerce_endpoint_options, coerce_fetch_options, coerce_serve_options, core_error_to_json,
@@ -79,11 +76,22 @@ struct PathSub {
     notify: tokio::sync::Notify,
 }
 
-type PathRxMap = dashmap::DashMap<(u32, String), Arc<PathSub>>;
+type PathRxMap = dashmap::DashMap<(u32, String, u32), Arc<PathSub>>;
 
 fn path_change_rxs() -> &'static PathRxMap {
     static PATH_CHANGE_RXS: std::sync::OnceLock<PathRxMap> = std::sync::OnceLock::new();
     PATH_CHANGE_RXS.get_or_init(dashmap::DashMap::new)
+}
+
+fn clear_path_change_rxs(endpoint_handle: u32) {
+    path_change_rxs().retain(|key, sub| {
+        if key.0 == endpoint_handle {
+            sub.notify.notify_waiters();
+            false
+        } else {
+            true
+        }
+    });
 }
 
 // ── Endpoint helpers ──────────────────────────────────────────────────────────
@@ -230,30 +238,116 @@ fn get_endpoint(handle: u32) -> napi::Result<IrohEndpoint> {
 
 // ── Discovery slabs ───────────────────────────────────────────────────────────
 
+/// Discovery handles cross the JavaScript boundary as raw integers, so they
+/// must never identify a different resource after close. One counter is shared
+/// by every discovery resource kind; unlike a slab index, an old handle is
+/// permanently stale and cannot close a newer session (issue #365).
 #[cfg(feature = "discovery")]
-type BrowseHandle = Arc<TokioMutex<iroh_http_discovery::BrowseSession>>;
+static DISCOVERY_HANDLE_COUNTER: AtomicU32 = AtomicU32::new(1);
 
 #[cfg(feature = "discovery")]
-fn browse_slab() -> &'static Mutex<Slab<BrowseHandle>> {
-    static S: OnceLock<Mutex<Slab<BrowseHandle>>> = OnceLock::new();
-    S.get_or_init(|| Mutex::new(Slab::new()))
+fn alloc_discovery_handle() -> napi::Result<u32> {
+    DISCOVERY_HANDLE_COUNTER
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            current.checked_add(1)
+        })
+        .map_err(|_| {
+            napi::Error::new(
+                Status::GenericFailure,
+                format_error_json("HANDLE_EXHAUSTED", "discovery handle space exhausted"),
+            )
+        })
 }
 
 #[cfg(feature = "discovery")]
-fn advertise_slab() -> &'static Mutex<Slab<iroh_http_discovery::AdvertiseSession>> {
-    static S: OnceLock<Mutex<Slab<iroh_http_discovery::AdvertiseSession>>> = OnceLock::new();
-    S.get_or_init(|| Mutex::new(Slab::new()))
+struct EndpointOwned<E, T> {
+    endpoint: E,
+    resource: T,
 }
 
-/// Generic (non-iroh) DNS-SD browse sessions, keyed independently of the
-/// iroh-http peer-browse slab. See `dns_sd_*` entry points.
 #[cfg(feature = "discovery")]
-type GenericBrowseHandle = Arc<TokioMutex<iroh_http_discovery::ServiceBrowseSession>>;
+fn drain_endpoint_owned<K, E, T>(
+    resources: &mut HashMap<K, EndpointOwned<E, T>>,
+    endpoint: &E,
+) -> Vec<T>
+where
+    K: Copy + Eq + std::hash::Hash,
+    E: Eq,
+{
+    let handles: Vec<K> = resources
+        .iter()
+        .filter_map(|(handle, owned)| (&owned.endpoint == endpoint).then_some(*handle))
+        .collect();
+    handles
+        .into_iter()
+        .filter_map(|handle| resources.remove(&handle).map(|owned| owned.resource))
+        .collect()
+}
 
 #[cfg(feature = "discovery")]
-fn generic_browse_slab() -> &'static Mutex<Slab<GenericBrowseHandle>> {
-    static S: OnceLock<Mutex<Slab<GenericBrowseHandle>>> = OnceLock::new();
-    S.get_or_init(|| Mutex::new(Slab::new()))
+#[derive(Default)]
+struct DiscoveryState {
+    active_endpoints: HashSet<u32>,
+    peer_browses: HashMap<u32, EndpointOwned<u32, Arc<iroh_http_discovery::BrowseSession>>>,
+    peer_advertisements: HashMap<u32, EndpointOwned<u32, iroh_http_discovery::AdvertiseSession>>,
+    generic_browses: HashMap<u32, Arc<iroh_http_discovery::ServiceBrowseSession>>,
+    generic_advertisements: HashMap<u32, iroh_http_discovery::AdvertiseSession>,
+}
+
+#[cfg(feature = "discovery")]
+fn discovery_state() -> &'static Mutex<DiscoveryState> {
+    static STATE: OnceLock<Mutex<DiscoveryState>> = OnceLock::new();
+    STATE.get_or_init(|| Mutex::new(DiscoveryState::default()))
+}
+
+#[cfg(feature = "discovery")]
+fn lock_discovery_state() -> napi::Result<MutexGuard<'static, DiscoveryState>> {
+    discovery_state().lock().map_err(|_| {
+        ffi_generic(FfiError::InternalLock {
+            resource: "discovery_state",
+        })
+    })
+}
+
+#[cfg(feature = "discovery")]
+fn activate_endpoint_discovery(endpoint_handle: u32) -> napi::Result<()> {
+    lock_discovery_state()?
+        .active_endpoints
+        .insert(endpoint_handle);
+    Ok(())
+}
+
+#[cfg(feature = "discovery")]
+fn endpoint_closed_during_discovery_start(endpoint_handle: u32) -> napi::Error {
+    napi::Error::new(
+        Status::InvalidArg,
+        format_error_json(
+            "INVALID_HANDLE",
+            format!("node closed during discovery start (handle {endpoint_handle})"),
+        ),
+    )
+}
+
+/// Atomically makes the endpoint unavailable to late discovery starts and
+/// detaches every resource it owns. Browse sessions are closed after releasing
+/// the registry mutex so pending `next` calls wake without lock inversion;
+/// dropping advertisements unregisters them synchronously.
+#[cfg(feature = "discovery")]
+fn retire_endpoint_discovery(endpoint_handle: u32) -> napi::Result<()> {
+    // Removing the endpoint from `active_endpoints` under the same mutex used
+    // to publish sessions linearizes teardown against a concurrent start.
+    let (browses, advertisements) = {
+        let mut state = lock_discovery_state()?;
+        state.active_endpoints.remove(&endpoint_handle);
+        let browses = drain_endpoint_owned(&mut state.peer_browses, &endpoint_handle);
+        let advertisements = drain_endpoint_owned(&mut state.peer_advertisements, &endpoint_handle);
+        (browses, advertisements)
+    };
+    for session in browses {
+        session.close();
+    }
+    drop(advertisements);
+    Ok(())
 }
 
 // ── Endpoint lifecycle ────────────────────────────────────────────────────────
@@ -353,10 +447,10 @@ pub async fn create_endpoint(options: Option<JsNodeOptions>) -> napi::Result<JsE
                     proxy_from_env: o.proxy_from_env.unwrap_or(false),
                     disabled: o.disable_networking.unwrap_or(false),
                 },
-                discovery: DiscoveryOptions {
-                    dns_server: o.dns_discovery,
-                    enabled: o.dns_discovery_enabled.unwrap_or(true),
-                },
+                discovery: DiscoveryOptions::new(
+                    o.dns_discovery,
+                    o.dns_discovery_enabled.unwrap_or(true),
+                ),
                 pool: PoolOptions {
                     max_connections: o.max_pooled_connections.map(|v| v as usize),
                     idle_timeout_ms: endpoint.pool_idle_timeout_ms,
@@ -398,6 +492,8 @@ pub async fn create_endpoint(options: Option<JsNodeOptions>) -> napi::Result<JsE
     let node_id = ep.node_id().to_string();
     let handle_u64 = registry::insert_endpoint(ep);
     let handle = alloc_local_handle(handle_u64);
+    #[cfg(feature = "discovery")]
+    activate_endpoint_discovery(handle)?;
 
     Ok(JsEndpointInfo {
         endpoint_handle: handle,
@@ -416,11 +512,14 @@ pub async fn create_endpoint(options: Option<JsNodeOptions>) -> napi::Result<JsE
 #[napi]
 pub async fn close_endpoint(endpoint_handle: u32, force: Option<bool>) -> napi::Result<()> {
     let ep = get_endpoint(endpoint_handle)?;
+    #[cfg(feature = "discovery")]
+    retire_endpoint_discovery(endpoint_handle)?;
     if force.unwrap_or(false) {
         ep.close_force().await;
     } else {
         ep.close().await;
     }
+    clear_path_change_rxs(endpoint_handle);
     // Remove from both the local handle map and the global registry.
     if let Some(registry_handle) = remove_local_handle(endpoint_handle) {
         registry::remove_endpoint(registry_handle);
@@ -452,7 +551,24 @@ pub async fn browse_peers(endpoint_handle: u32, service_name: String) -> napi::R
     let session = iroh_http_discovery::browse_peers(ep.raw(), &service_name)
         .await
         .map_err(|e| napi::Error::new(Status::GenericFailure, format_error_json("REFUSED", e)))?;
-    let handle = lock_browse_slab()?.insert(Arc::new(TokioMutex::new(session))) as u32;
+    let session = Arc::new(session);
+    let handle = {
+        let mut state = lock_discovery_state()?;
+        if !state.active_endpoints.contains(&endpoint_handle) {
+            drop(state);
+            session.close();
+            return Err(endpoint_closed_during_discovery_start(endpoint_handle));
+        }
+        let handle = alloc_discovery_handle()?;
+        state.peer_browses.insert(
+            handle,
+            EndpointOwned {
+                endpoint: endpoint_handle,
+                resource: session,
+            },
+        );
+        handle
+    };
     Ok(handle)
 }
 
@@ -470,17 +586,32 @@ pub async fn browse_peers(_endpoint_handle: u32, _service_name: String) -> napi:
 #[napi]
 #[cfg(feature = "discovery")]
 pub async fn browse_peers_next(browse_handle: u32) -> napi::Result<Option<JsPeerDiscoveryEvent>> {
-    let session =
-        { lock_browse_slab()?.get(browse_handle as usize).cloned() }.ok_or_else(|| {
-            napi::Error::new(
-                Status::InvalidArg,
-                format_error_json(
-                    "INVALID_HANDLE",
-                    format!("invalid browse handle: {browse_handle}"),
-                ),
-            )
-        })?;
-    let event = session.lock().await.next_event().await;
+    let session = {
+        lock_discovery_state()?
+            .peer_browses
+            .get(&browse_handle)
+            .map(|owned| Arc::clone(&owned.resource))
+    }
+    .ok_or_else(|| {
+        napi::Error::new(
+            Status::InvalidArg,
+            format_error_json(
+                "INVALID_HANDLE",
+                format!("invalid browse handle: {browse_handle}"),
+            ),
+        )
+    })?;
+    let event = session.next_event().await;
+    if event.is_none() {
+        let mut state = lock_discovery_state()?;
+        let is_same = state
+            .peer_browses
+            .get(&browse_handle)
+            .is_some_and(|owned| Arc::ptr_eq(&owned.resource, &session));
+        if is_same {
+            state.peer_browses.remove(&browse_handle);
+        }
+    }
     Ok(event.map(|ev| JsPeerDiscoveryEvent {
         is_active: ev.is_active,
         node_id: ev.node_id,
@@ -501,12 +632,27 @@ pub async fn browse_peers_next(_browse_handle: u32) -> napi::Result<Option<JsPee
 #[napi]
 #[cfg(feature = "discovery")]
 pub fn browse_peers_close(browse_handle: u32) {
-    if let Ok(mut slab) = browse_slab().lock() {
-        if slab.contains(browse_handle as usize) {
-            slab.remove(browse_handle as usize);
+    let session = match discovery_state().lock() {
+        Ok(state) => state
+            .peer_browses
+            .get(&browse_handle)
+            .map(|owned| Arc::clone(&owned.resource)),
+        Err(_) => {
+            tracing::error!("iroh-http-node: discovery state lock poisoned during browse close");
+            None
         }
-    } else {
-        tracing::error!("iroh-http-node: browse slab lock poisoned during close");
+    };
+    if let Some(session) = session {
+        session.close();
+        if let Ok(mut state) = discovery_state().lock() {
+            let is_same = state
+                .peer_browses
+                .get(&browse_handle)
+                .is_some_and(|owned| Arc::ptr_eq(&owned.resource, &session));
+            if is_same {
+                state.peer_browses.remove(&browse_handle);
+            }
+        }
     }
 }
 
@@ -532,7 +678,23 @@ pub async fn advertise_peer(endpoint_handle: u32, service_name: String) -> napi:
         .map_err(ffi_invalid_arg)?;
     let session = iroh_http_discovery::advertise_peer(ep.raw(), &service_name)
         .map_err(|e| napi::Error::new(Status::GenericFailure, format_error_json("REFUSED", e)))?;
-    let handle = lock_advertise_slab()?.insert(session) as u32;
+    let handle = {
+        let mut state = lock_discovery_state()?;
+        if !state.active_endpoints.contains(&endpoint_handle) {
+            drop(state);
+            drop(session);
+            return Err(endpoint_closed_during_discovery_start(endpoint_handle));
+        }
+        let handle = alloc_discovery_handle()?;
+        state.peer_advertisements.insert(
+            handle,
+            EndpointOwned {
+                endpoint: endpoint_handle,
+                resource: session,
+            },
+        );
+        handle
+    };
     Ok(handle)
 }
 
@@ -549,13 +711,14 @@ pub async fn advertise_peer(_endpoint_handle: u32, _service_name: String) -> nap
 #[napi]
 #[cfg(feature = "discovery")]
 pub fn advertise_peer_close(advertise_handle: u32) {
-    if let Ok(mut slab) = advertise_slab().lock() {
-        if slab.contains(advertise_handle as usize) {
-            slab.remove(advertise_handle as usize);
+    let session = match discovery_state().lock() {
+        Ok(mut state) => state.peer_advertisements.remove(&advertise_handle),
+        Err(_) => {
+            tracing::error!("iroh-http-node: discovery state lock poisoned during advertise close");
+            None
         }
-    } else {
-        tracing::error!("iroh-http-node: advertise slab lock poisoned during close");
-    }
+    };
+    drop(session);
 }
 
 #[napi]
@@ -665,7 +828,10 @@ pub async fn advertise(config: JsServiceConfig) -> napi::Result<u32> {
     let cfg = js_config_to_service_config(config)?;
     let session = iroh_http_discovery::advertise(cfg)
         .map_err(|e| napi::Error::new(Status::GenericFailure, format_error_json("REFUSED", e)))?;
-    let handle = lock_advertise_slab()?.insert(session) as u32;
+    let handle = alloc_discovery_handle()?;
+    lock_discovery_state()?
+        .generic_advertisements
+        .insert(handle, session);
     Ok(handle)
 }
 
@@ -682,13 +848,14 @@ pub async fn advertise(_config: JsServiceConfig) -> napi::Result<u32> {
 #[napi]
 #[cfg(feature = "discovery")]
 pub fn advertise_close(advertise_handle: u32) {
-    if let Ok(mut slab) = advertise_slab().lock() {
-        if slab.contains(advertise_handle as usize) {
-            slab.remove(advertise_handle as usize);
+    let session = match discovery_state().lock() {
+        Ok(mut state) => state.generic_advertisements.remove(&advertise_handle),
+        Err(_) => {
+            tracing::error!("iroh-http-node: discovery state lock poisoned during advertise close");
+            None
         }
-    } else {
-        tracing::error!("iroh-http-node: advertise slab lock poisoned during close");
-    }
+    };
+    drop(session);
 }
 
 #[napi]
@@ -708,7 +875,10 @@ pub async fn browse(service_name: String, protocol: Option<String>) -> napi::Res
     };
     let session = iroh_http_discovery::browse(cfg)
         .map_err(|e| napi::Error::new(Status::GenericFailure, format_error_json("REFUSED", e)))?;
-    let handle = lock_generic_browse_slab()?.insert(Arc::new(TokioMutex::new(session))) as u32;
+    let handle = alloc_discovery_handle()?;
+    lock_discovery_state()?
+        .generic_browses
+        .insert(handle, Arc::new(session));
     Ok(handle)
 }
 
@@ -727,8 +897,9 @@ pub async fn browse(_service_name: String, _protocol: Option<String>) -> napi::R
 #[cfg(feature = "discovery")]
 pub async fn browse_next(browse_handle: u32) -> napi::Result<Option<JsServiceRecord>> {
     let session = {
-        lock_generic_browse_slab()?
-            .get(browse_handle as usize)
+        lock_discovery_state()?
+            .generic_browses
+            .get(&browse_handle)
             .cloned()
     }
     .ok_or_else(|| {
@@ -740,7 +911,17 @@ pub async fn browse_next(browse_handle: u32) -> napi::Result<Option<JsServiceRec
             ),
         )
     })?;
-    let record = session.lock().await.next_record().await;
+    let record = session.next_record().await;
+    if record.is_none() {
+        let mut state = lock_discovery_state()?;
+        let is_same = state
+            .generic_browses
+            .get(&browse_handle)
+            .is_some_and(|current| Arc::ptr_eq(current, &session));
+        if is_same {
+            state.generic_browses.remove(&browse_handle);
+        }
+    }
     Ok(record.map(service_record_to_js))
 }
 
@@ -757,12 +938,24 @@ pub async fn browse_next(_browse_handle: u32) -> napi::Result<Option<JsServiceRe
 #[napi]
 #[cfg(feature = "discovery")]
 pub fn browse_close(browse_handle: u32) {
-    if let Ok(mut slab) = generic_browse_slab().lock() {
-        if slab.contains(browse_handle as usize) {
-            slab.remove(browse_handle as usize);
+    let session = match discovery_state().lock() {
+        Ok(state) => state.generic_browses.get(&browse_handle).cloned(),
+        Err(_) => {
+            tracing::error!("iroh-http-node: discovery state lock poisoned during browse close");
+            None
         }
-    } else {
-        tracing::error!("iroh-http-node: generic browse slab lock poisoned during close");
+    };
+    if let Some(session) = session {
+        session.close();
+        if let Ok(mut state) = discovery_state().lock() {
+            let is_same = state
+                .generic_browses
+                .get(&browse_handle)
+                .is_some_and(|current| Arc::ptr_eq(current, &session));
+            if is_same {
+                state.generic_browses.remove(&browse_handle);
+            }
+        }
     }
 }
 
@@ -778,6 +971,14 @@ pub fn browse_close(_browse_handle: u32) {}
 pub struct JsNodeAddrInfo {
     pub id: String,
     pub addrs: Vec<String>,
+}
+
+#[napi(object)]
+pub struct JsDiscoveryInfo {
+    pub node_id: String,
+    pub direct_address: Option<String>,
+    pub direct_addresses: Vec<String>,
+    pub relay_url: Option<String>,
 }
 
 #[napi(object)]
@@ -831,6 +1032,24 @@ pub fn node_ticket(endpoint_handle: u32) -> napi::Result<String> {
 pub fn home_relay(endpoint_handle: u32) -> napi::Result<Option<String>> {
     let ep = get_endpoint(endpoint_handle)?;
     Ok(ep.home_relay())
+}
+
+/// Discovery info: node id + dialable direct `ip:port` address + relay URL.
+///
+/// `directAddress` carries the candidate's authoritative real port (or null
+/// when only loopback/link-local addresses are available); only `:0`/`:1`
+/// placeholders borrow a same-family bound port. `directAddresses` carries
+/// *all* routable candidates so an advertiser can publish them and let the
+/// dialer race the paths (#348/#350).
+#[napi]
+pub fn discovery_info(endpoint_handle: u32) -> napi::Result<JsDiscoveryInfo> {
+    let ep = get_endpoint(endpoint_handle)?;
+    Ok(JsDiscoveryInfo {
+        node_id: ep.node_id().to_string(),
+        direct_address: ep.dialable_direct_address(),
+        direct_addresses: ep.dialable_direct_addresses(),
+        relay_url: ep.home_relay(),
+    })
 }
 
 /// Known addresses for a remote peer, or null if unknown.
@@ -1019,18 +1238,19 @@ pub async fn start_transport_events(
 pub async fn next_path_change(
     endpoint_handle: u32,
     node_id: String,
+    subscription_id: u32,
 ) -> napi::Result<Option<String>> {
     let rxs = path_change_rxs();
 
     validate_node_id(&node_id).map_err(ffi_adapter_invalid_arg)?;
     let ep = get_endpoint(endpoint_handle)?;
 
-    let key = (endpoint_handle, node_id.clone());
+    let key = (endpoint_handle, node_id.clone(), subscription_id);
 
     let rx_arc = rxs
         .entry(key.clone())
         .or_insert_with(|| {
-            let rx = ep.subscribe_path_changes(&node_id);
+            let rx = ep.subscribe_path_changes(&node_id, subscription_id);
             Arc::new(PathSub {
                 rx: tokio::sync::Mutex::new(rx),
                 notify: tokio::sync::Notify::new(),
@@ -1058,13 +1278,30 @@ pub async fn next_path_change(
 
 /// Unsubscribe from path changes for a specific peer.
 #[napi]
-pub fn unsubscribe_path_changes(endpoint_handle: u32, node_id: String) -> napi::Result<()> {
+pub fn unsubscribe_path_changes(
+    endpoint_handle: u32,
+    node_id: String,
+    subscription_id: u32,
+) -> napi::Result<()> {
     validate_node_id(&node_id).map_err(ffi_adapter_invalid_arg)?;
     let ep = get_endpoint(endpoint_handle)?;
-    if let Some((_, sub)) = path_change_rxs().remove(&(endpoint_handle, node_id.clone())) {
-        sub.notify.notify_waiters();
+    let key = (endpoint_handle, node_id.clone(), subscription_id);
+    match path_change_rxs().entry(key) {
+        dashmap::mapref::entry::Entry::Occupied(entry) => {
+            let (_, sub) = entry.remove_entry();
+            sub.notify.notify_waiters();
+        }
+        dashmap::mapref::entry::Entry::Vacant(entry) => {
+            // A synchronous unsubscribe can overtake the async N-API future.
+            // Leave a closed one-shot receiver for that future to consume.
+            let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            entry.insert(Arc::new(PathSub {
+                rx: tokio::sync::Mutex::new(rx),
+                notify: tokio::sync::Notify::new(),
+            }));
+        }
     }
-    ep.unsubscribe_path_changes(&node_id);
+    ep.unsubscribe_path_changes(&node_id, subscription_id);
     Ok(())
 }
 
@@ -1429,8 +1666,11 @@ pub async fn wait_serve_stop(endpoint_handle: u32) -> napi::Result<()> {
 /// This is used to surface `node.closed` reliably even without an explicit `close()`.
 #[napi]
 pub async fn wait_endpoint_closed(endpoint_handle: u32) -> napi::Result<()> {
-    let ep = get_endpoint(endpoint_handle)?;
-    ep.wait_closed().await;
+    // The close operation may remove the handle before this async waiter is
+    // first polled. An absent endpoint has already reached the requested state.
+    if let Ok(ep) = get_endpoint(endpoint_handle) {
+        ep.wait_closed().await;
+    }
     Ok(())
 }
 
@@ -1545,34 +1785,6 @@ pub async fn session_close_handle(
     session
         .close(code, reason.as_deref().unwrap_or(""))
         .map_err(|e| napi::Error::new(Status::GenericFailure, core_error_to_json(&e)))
-}
-
-#[cfg(feature = "discovery")]
-fn lock_browse_slab() -> napi::Result<MutexGuard<'static, Slab<BrowseHandle>>> {
-    browse_slab().lock().map_err(|_| {
-        ffi_generic(FfiError::InternalLock {
-            resource: "browse_slab",
-        })
-    })
-}
-
-#[cfg(feature = "discovery")]
-fn lock_advertise_slab(
-) -> napi::Result<MutexGuard<'static, Slab<iroh_http_discovery::AdvertiseSession>>> {
-    advertise_slab().lock().map_err(|_| {
-        ffi_generic(FfiError::InternalLock {
-            resource: "advertise_slab",
-        })
-    })
-}
-
-#[cfg(feature = "discovery")]
-fn lock_generic_browse_slab() -> napi::Result<MutexGuard<'static, Slab<GenericBrowseHandle>>> {
-    generic_browse_slab().lock().map_err(|_| {
-        ffi_generic(FfiError::InternalLock {
-            resource: "generic_browse_slab",
-        })
-    })
 }
 
 /// Wait for a session to close. Returns close info { closeCode, reason }.
@@ -1712,6 +1924,64 @@ pub fn generate_secret_key() -> napi::Result<Buffer> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn wait_endpoint_closed_treats_a_removed_handle_as_closed() {
+        assert!(wait_endpoint_closed(u32::MAX).await.is_ok());
+    }
+
+    #[cfg(feature = "discovery")]
+    #[test]
+    fn discovery_handles_are_monotonic_and_not_reused() -> napi::Result<()> {
+        let first = alloc_discovery_handle()?;
+        let second = alloc_discovery_handle()?;
+
+        assert!(second > first);
+        let mut resources = HashMap::from([(first, "old")]);
+        assert_eq!(resources.remove(&first), Some("old"));
+        resources.insert(second, "new");
+        assert!(!resources.contains_key(&first));
+        assert_eq!(resources.get(&second), Some(&"new"));
+        Ok(())
+    }
+
+    #[cfg(feature = "discovery")]
+    #[test]
+    fn endpoint_retirement_only_drains_owned_resources() {
+        let mut resources = HashMap::from([
+            (
+                10,
+                EndpointOwned {
+                    endpoint: 1,
+                    resource: "first",
+                },
+            ),
+            (
+                11,
+                EndpointOwned {
+                    endpoint: 2,
+                    resource: "other",
+                },
+            ),
+            (
+                12,
+                EndpointOwned {
+                    endpoint: 1,
+                    resource: "second",
+                },
+            ),
+        ]);
+
+        let mut retired = drain_endpoint_owned(&mut resources, &1);
+        retired.sort_unstable();
+
+        assert_eq!(retired, vec!["first", "second"]);
+        assert_eq!(resources.len(), 1);
+        assert_eq!(
+            resources.get(&11).map(|owned| owned.resource),
+            Some("other")
+        );
+    }
 
     #[test]
     fn validate_node_id_accepts_base32ish_input() {

@@ -70,3 +70,8 @@ id_ecdsa.pub
 # Benchmark outputs (uploaded as CI artifacts)
 bench/results/*
 !bench/results/.gitkeep
+
+# Interop result collector (local device-test artifacts + persisted identity)
+tests/interop/reporter/reports/*
+!tests/interop/reporter/reports/.gitkeep
+tests/interop/reporter/.identity.b32

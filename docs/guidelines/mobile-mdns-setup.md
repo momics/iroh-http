@@ -2,30 +2,33 @@
 
 Applies to Tauri apps built with `iroh-http-tauri` that use local-network
 discovery — the iroh peer path (`node.advertisePeer()` / `node.browsePeers()`)
-and the generic DNS-SD path (`node.advertise()` / `node.browse()`). Both run over
-the same native bridge (`NsdManager` on Android, `NWBrowser` / `NWListener` on
-iOS) and need the same permissions and service-type declarations below.
+and the generic DNS-SD path (`node.advertise()` / `node.browse()`). Both run
+over the same native bridge (`NsdManager` on Android, `NWBrowser` / `NetService`
+on iOS) and need the platform-specific setup below.
 
 > **Generic records on iOS.** Android resolves full generic records (host, port,
 > TXT, addresses). On iOS, `NWBrowser` yields the instance name, service type
 > and TXT but not the host/port/addresses (resolving those needs an
 > `NWConnection`), so iOS generic records arrive with `host = null`, `port = 0`
-> and best-effort `addrs`. The iroh peer path is unaffected — it resolves peers
-> by node id through the in-process address lookup.
+> and empty `addrs`. The iroh peer path is unaffected: the shared Rust
+> projection reads the peer identity and dial addresses from its canonical TXT
+> record and feeds them into the endpoint lookup.
 
 > **Tauri permission.** Grant `iroh-http:discovery` in your capability file; it
 > covers both the peer and generic discovery commands.
 
-On desktop, mDNS works with no configuration. On mobile, the OS gates
-local-network access behind **permissions** and **static service-type
-declarations** that a plugin cannot inject into your app for you. You must add
-them to your app's own iOS `Info.plist` and Android `AndroidManifest.xml`.
+On desktop, mDNS works with no configuration. On iOS, the application must link
+the required framework and own its local-network description plus static Bonjour
+declarations. On Android, the plugin merges its current manifest permissions;
+the application owns `INTERNET` and any future runtime permission flow required
+by its target SDK. The platform-specific split is detailed below.
 
 > **Service name → service type.** `node.advertisePeer({ serviceName })` and
-> `node.browsePeers({ serviceName })` map `serviceName` to the DNS-SD service type
-> `_<serviceName>._udp`. The default `serviceName` is `"iroh-http"`, i.e.
-> `_iroh-http._udp`. Every custom `serviceName` you use needs its own declared
-> entry on iOS (see below).
+> `node.browsePeers({ serviceName })` map `serviceName` to the DNS-SD service
+> type `_<serviceName>._udp`. The default `serviceName` is `"iroh-http"`, i.e.
+> `_iroh-http._udp`. Generic discovery additionally accepts `protocol: "tcp"`;
+> iOS declarations are therefore per service-name/protocol pair, such as
+> `_printers._tcp`, not just per service name.
 
 ---
 
@@ -60,8 +63,8 @@ symbols).
 
 ### 2. Declare the Local Network permission and Bonjour services
 
-iOS denies `NWBrowser` / `NWListener` (`NWError -65555 NoAuth`) unless your app
-both describes *why* it needs local-network access **and** statically lists
+iOS denies `NWBrowser` / `NetService` (`NWError -65555 NoAuth`) unless your app
+both describes _why_ it needs local-network access **and** statically lists
 every service type it browses or advertises.
 
 Create `src-tauri/Info.ios.plist` — Tauri merges it into the generated iOS
@@ -73,75 +76,70 @@ Create `src-tauri/Info.ios.plist` — Tauri merges it into the generated iOS
   "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <!-- Shown in the "allow local network access" prompt on first browse. -->
+  <!-- Shown on the first local browse or advertisement. -->
   <key>NSLocalNetworkUsageDescription</key>
   <string>Discover and connect to nearby peers on your local network.</string>
 
-  <!-- One entry per serviceName you browse or advertise.
-       serviceName "iroh-http" → _iroh-http._udp -->
+  <!-- One entry per serviceName + protocol pair you browse or advertise. -->
   <key>NSBonjourServices</key>
   <array>
     <string>_iroh-http._udp</string>
+    <string>_printers._tcp</string>
   </array>
 </dict>
 </plist>
 ```
 
-Add a line to `NSBonjourServices` for each additional `serviceName` your app
-uses (e.g. `_my-app._udp`).
+Add a line to `NSBonjourServices` for each additional pair your app uses. For
+example, `serviceName: "my-app", protocol: "udp"` needs `_my-app._udp`, while
+`serviceName: "printers", protocol: "tcp"` needs `_printers._tcp`.
 
 ### The Local Network prompt
 
-iOS asks for Local Network permission the **first time** you browse. Until the
-user taps **Allow**, browsing is denied. If they deny it (or you triggered a
-browse before granting), re-enable it under
-**Settings → Privacy & Security → Local Network → your app**.
+iOS asks for Local Network permission the first time the app browses or
+advertises. Until the user taps **Allow**, local discovery is denied. If they
+deny it (or the app attempted discovery before permission was granted),
+re-enable it under **Settings → Privacy & Security → Local Network → your app**.
 
 ---
 
 ## Android
 
-Add the network permissions to `src-tauri/gen/android/app/src/main/AndroidManifest.xml`
-(or your app's manifest):
+The plugin supports Android API 21 and newer. It merges `ACCESS_NETWORK_STATE`
+and `CHANGE_WIFI_MULTICAST_STATE` into the final application manifest. Tauri
+applications normally already declare `INTERNET`; if yours does not, add it to
+`src-tauri/gen/android/app/src/main/AndroidManifest.xml`:
 
 ```xml
 <uses-permission android:name="android.permission.INTERNET" />
-<uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
-<uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
 ```
 
-Android 13+ (API 33+) additionally requires the nearby-devices permission for
-network service discovery:
+On Android 12 and older, and Android 13 devices before T extension 7, the plugin
+shares one `WifiManager.MulticastLock` across active DNS-SD browse and
+advertisement sessions and releases it after the last native session becomes
+terminal. Starting at T extension 7, foreground apps receive multicast through
+the system and the plugin does not acquire a lock. See Android's
+[`NsdManager` multicast-lock guidance](https://developer.android.com/reference/android/net/nsd/NsdManager#wi-fi-multicast-lock).
 
-```xml
-<uses-permission
-  android:name="android.permission.NEARBY_WIFI_DEVICES"
-  android:usesPermissionFlags="neverForLocation" />
-```
-
-If your app genuinely needs device location alongside discovery, use the
-pre-33 location path instead:
-
-```xml
-<uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES" />
-<uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
-```
-
-`CHANGE_WIFI_MULTICAST_STATE` is what lets the app receive the multicast mDNS
-traffic; without it `NsdManager` discovery silently returns nothing on many
-devices.
+`NEARBY_WIFI_DEVICES` is a Wi-Fi management permission and is not required for
+the `NsdManager` API used here. Starting with Android 17, applications that
+_target API 37 or newer_ must instead declare and request the runtime
+`ACCESS_LOCAL_NETWORK` permission (or adopt a system-mediated picker). The
+current plugin compiles against API 34, so do not add that future permission
+until the application upgrades its target and implements the runtime prompt. See
+Android's
+[Local network permission](https://developer.android.com/privacy-and-security/local-network-permission)
+guide for the target-SDK transition.
 
 ---
 
 ## Verifying discovery on a LAN
 
-- **iOS ↔ iOS / Android**, and **desktop ↔ desktop**, discover each other
-  out of the box (same-stack).
-- **mobile → desktop** works today.
-- **desktop → mobile** requires the desktop side to advertise standard DNS-SD
-  records (a `PTR` record in particular). See
-  [issue #329](https://github.com/momics/iroh-http/issues/329) — this is being
-  standardized so a phone can discover a desktop/server node on the same Wi-Fi.
+- **desktop ↔ desktop**, **desktop ↔ mobile**, and **iOS ↔ Android** are all
+  supported when both apps are active on the same LAN and use the same service
+  name.
+- Guest-network client isolation, platform firewalls, and background execution
+  limits can still prevent multicast visibility.
 
 To sanity-check what is actually on the wire from a Mac, use Apple's built-in
 browser:

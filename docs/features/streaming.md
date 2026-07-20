@@ -80,7 +80,9 @@ Large uploads and downloads do not accumulate in memory.
 
 There is no enforced body size limit at the iroh-http layer. Chunked transfer encoding is applied automatically when no `Content-Length` is known (i.e. for streaming bodies). When a `Content-Length` header is present, raw framing is used instead.
 
-The maximum chunk size across the FFI boundary is configurable via `NodeOptions.maxChunkSizeBytes` (default 64 KB). Larger chunks are split transparently; JS always receives them reassembled.
+The maximum chunk size across the FFI boundary is configurable via
+`NodeOptions.internals.maxChunkSizeBytes` (default 64 KB). Larger chunks are
+split transparently; JS always receives them reassembled.
 
 ## Cancellation
 

@@ -8,6 +8,7 @@ use std::sync::atomic::Ordering;
 use iroh::endpoint::TransportAddrUsage;
 
 use super::{
+    session_runtime::PathSubscriptions,
     stats::{EndpointStats, NodeAddrInfo, PathInfo, PeerStats},
     IrohEndpoint,
 };
@@ -22,7 +23,13 @@ impl IrohEndpoint {
         let pool_size = self.inner.http.pool.entry_count_approx() as usize;
         let active_connections = self.inner.http.active_connections.load(Ordering::Relaxed);
         let active_requests = self.inner.http.active_requests.load(Ordering::Relaxed);
-        let active_path_subscriptions = self.inner.session.path_subs.len();
+        let active_path_subscriptions = self
+            .inner
+            .session
+            .path_subs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len();
         let active_path_watchers = self
             .inner
             .session
@@ -46,20 +53,88 @@ impl IrohEndpoint {
         self.inner.transport.ep.bound_sockets()
     }
 
+    /// Whether the underlying QUIC transport is still usable.
+    ///
+    /// This is deliberately distinct from "the endpoint handle exists". A
+    /// handle can keep resolving from the registry long after the transport
+    /// behind it has been torn down (`close`/`close_force`) or — on mobile —
+    /// after the OS has invalidated the socket during suspension. Mobile
+    /// foreground recovery must key off this, not handle existence: see #336,
+    /// where a half-live iOS node reported healthy because its handle survived,
+    /// leaving desktop peers hanging until a long timeout.
+    ///
+    /// Returns `false` once the endpoint is closed or has no bound sockets.
+    /// A `true` result means the transport has not been observed as dead; it
+    /// is a necessary, not a sufficient, signal, so callers on mobile should
+    /// still bound their requests with a timeout and treat repeated failures
+    /// as a trigger to recreate the endpoint.
+    pub fn transport_alive(&self) -> bool {
+        !self.inner.transport.ep.is_closed() && !self.bound_sockets().is_empty()
+    }
+
+    /// Reconciled direct socket addresses for this endpoint.
+    ///
+    /// Real candidate ports are authoritative and preserved, including
+    /// reflexive QAD ports that differ from the local listener. Only platform
+    /// placeholders (`:0`/`:1`, observed on iOS in #346) borrow a same-family
+    /// bound port; an unrepairable placeholder is omitted. Relay URLs are not
+    /// included. This is the direct-address list that should be advertised.
+    pub fn direct_socket_addrs(&self) -> Vec<std::net::SocketAddr> {
+        let candidates: Vec<std::net::SocketAddr> =
+            self.inner.transport.ep.addr().ip_addrs().copied().collect();
+        let bound = self.bound_sockets();
+        super::bind::reconcile_direct_addr_ports(&candidates, &bound)
+    }
+
     /// Full node address: node ID + relay URL(s) + direct socket addresses.
+    ///
+    /// Real candidate ports are preserved. A platform placeholder such as the
+    /// `:0` observed on iOS (#346) borrows a same-family bound port; one that
+    /// cannot be repaired is dropped rather than advertised as undialable.
     pub fn node_addr(&self) -> NodeAddrInfo {
         let addr = self.inner.transport.ep.addr();
         let mut addrs = Vec::new();
         for relay in addr.relay_urls() {
             addrs.push(relay.to_string());
         }
-        for da in addr.ip_addrs() {
+        for da in self.direct_socket_addrs() {
             addrs.push(da.to_string());
         }
         NodeAddrInfo {
             id: self.inner.transport.node_id_str.clone(),
             addrs,
         }
+    }
+
+    /// The first routable dialable direct address as `ip:port`, or `None` when
+    /// only loopback / unspecified / link-local addresses are available.
+    ///
+    /// Ports are already reconciled against the real bound QUIC socket by
+    /// [`Self::direct_socket_addrs`], so the returned address carries the true
+    /// bound port rather than a platform placeholder such as iOS's `:0`/`:1`
+    /// (#346). Routability filtering mirrors `select_advertise_address` in
+    /// `iroh-http-discovery` (#350 W1): a link-local address is only valid on
+    /// its own segment, so advertising it as a dialable address makes a browsing
+    /// peer's direct dial fail. Generic `advertise` callers publish this value
+    /// in the `address` TXT so peers can direct-dial over the LAN instead of
+    /// falling back to relay-only.
+    pub fn dialable_direct_address(&self) -> Option<String> {
+        select_dialable_direct(&self.direct_socket_addrs())
+    }
+
+    /// All routable dialable direct addresses as `ip:port`, in enumeration
+    /// order, deduplicated.
+    ///
+    /// Unlike [`Self::dialable_direct_address`], which returns only the first
+    /// routable candidate, this exposes every routable direct address so an
+    /// advertiser can publish them all and let the dialing peer race the paths
+    /// (iroh probes candidate addresses concurrently). This is what lets a node
+    /// with several routable interfaces — e.g. a mobile device on both a VPN
+    /// `10.x` interface and the real LAN `192.168.x` — be reached over the LAN
+    /// instead of only advertising whichever interface happens to sort first
+    /// (#348). Ports are already reconciled against the bound QUIC socket.
+    pub fn dialable_direct_addresses(&self) -> Vec<String> {
+        select_dialable_directs(&self.direct_socket_addrs())
     }
 
     /// Home relay URL, or `None` if not connected to a relay.
@@ -164,23 +239,40 @@ impl IrohEndpoint {
     /// The watcher polls `peer_stats()` every 200 ms and emits on the returned
     /// channel whenever the active path changes.
     ///
-    /// Re-subscribing to a peer that already has a live watcher reuses that
-    /// watcher: only the sender is swapped, so no additional task is spawned and
-    /// `active_path_watchers` still counts exactly one live watcher per peer.
+    /// Additional subscriptions to a peer reuse its watcher and receive the
+    /// same changes. `subscription_id` scopes cancellation to its own receiver.
     pub fn subscribe_path_changes(
         &self,
         node_id_str: &str,
+        subscription_id: u32,
     ) -> tokio::sync::mpsc::UnboundedReceiver<PathInfo> {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        // Replace any existing sender; the running watcher (if any) picks up the
-        // new sender on its next poll. `insert` returns the previous sender when
-        // a watcher is already live for this peer.
-        let had_existing_watcher = self
-            .inner
-            .session
-            .path_subs
-            .insert(node_id_str.to_string(), tx)
-            .is_some();
+        let (peer_subscriptions, had_existing_watcher) = {
+            let mut subscriptions = self
+                .inner
+                .session
+                .path_subs
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let (peer_subscriptions, had_existing) = match subscriptions
+                .entry(node_id_str.to_string())
+            {
+                std::collections::hash_map::Entry::Occupied(entry) => (entry.get().clone(), true),
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    let peer_subscriptions = std::sync::Arc::new(PathSubscriptions {
+                        senders: std::sync::Mutex::new(std::collections::HashMap::new()),
+                    });
+                    entry.insert(peer_subscriptions.clone());
+                    (peer_subscriptions, false)
+                }
+            };
+            peer_subscriptions
+                .senders
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(subscription_id, tx);
+            (peer_subscriptions, had_existing)
+        };
 
         // A watcher already exists for this peer — reuse it. Spawning another
         // would leak a task and over-count `active_path_watchers`.
@@ -202,18 +294,47 @@ impl IrohEndpoint {
             loop {
                 // Exit immediately if the endpoint has been closed.
                 if *closed_rx.borrow() {
-                    ep.inner.session.path_subs.remove(&nid);
+                    let mut subscriptions = ep
+                        .inner
+                        .session
+                        .path_subs
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    if subscriptions
+                        .get(&nid)
+                        .is_some_and(|current| std::sync::Arc::ptr_eq(current, &peer_subscriptions))
+                    {
+                        subscriptions.remove(&nid);
+                    }
                     break;
                 }
-                let is_closed = ep
-                    .inner
-                    .session
-                    .path_subs
-                    .get(&nid)
-                    .map(|s| s.is_closed())
-                    .unwrap_or(true);
+                let is_closed = {
+                    let mut subscriptions = ep
+                        .inner
+                        .session
+                        .path_subs
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let Some(current) = subscriptions.get(&nid) else {
+                        break;
+                    };
+                    if !std::sync::Arc::ptr_eq(current, &peer_subscriptions) {
+                        break;
+                    }
+                    let is_empty = {
+                        let mut senders = peer_subscriptions
+                            .senders
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        senders.retain(|_, sender| !sender.is_closed());
+                        senders.is_empty()
+                    };
+                    if is_empty {
+                        subscriptions.remove(&nid);
+                    }
+                    is_empty
+                };
                 if is_closed {
-                    ep.inner.session.path_subs.remove(&nid);
                     break;
                 }
 
@@ -222,8 +343,22 @@ impl IrohEndpoint {
                         let key = format!("{}:{}", active.relay, active.addr);
                         if Some(&key) != last_key.as_ref() {
                             last_key = Some(key);
-                            if let Some(sender) = ep.inner.session.path_subs.get(&nid) {
-                                let _ = sender.send(active.clone());
+                            let subscriptions = ep
+                                .inner
+                                .session
+                                .path_subs
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            if subscriptions.get(&nid).is_some_and(|current| {
+                                std::sync::Arc::ptr_eq(current, &peer_subscriptions)
+                            }) {
+                                let senders = peer_subscriptions
+                                    .senders
+                                    .lock()
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                                for sender in senders.values() {
+                                    let _ = sender.send(active.clone());
+                                }
                             }
                             let _ = event_tx.try_send(
                                 crate::http::events::TransportEvent::path_change(
@@ -241,7 +376,16 @@ impl IrohEndpoint {
                     _ = tokio::time::sleep(std::time::Duration::from_millis(200)) => {}
                     result = closed_rx.wait_for(|v| *v) => {
                         let _ = result;
-                        ep.inner.session.path_subs.remove(&nid);
+                        let mut subscriptions = ep.inner
+                            .session
+                            .path_subs
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        if subscriptions.get(&nid).is_some_and(|current| {
+                            std::sync::Arc::ptr_eq(current, &peer_subscriptions)
+                        }) {
+                            subscriptions.remove(&nid);
+                        }
                         break;
                     }
                 }
@@ -256,7 +400,192 @@ impl IrohEndpoint {
     }
 
     /// Stop watching path changes for a specific peer.
-    pub fn unsubscribe_path_changes(&self, node_id_str: &str) {
-        self.inner.session.path_subs.remove(node_id_str);
+    pub fn unsubscribe_path_changes(&self, node_id_str: &str, subscription_id: u32) {
+        let subscriptions = self
+            .inner
+            .session
+            .path_subs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(peer_subscriptions) = subscriptions.get(node_id_str) {
+            peer_subscriptions
+                .senders
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&subscription_id);
+        }
+    }
+}
+
+/// Pick the first routable `ip:port` from a set of already port-reconciled
+/// direct addresses, formatted for advertisement.
+///
+/// The input addresses come from [`IrohEndpoint::direct_socket_addrs`], so each
+/// already carries its authoritative dialable port. This only applies the
+/// routability filter. Kept in sync with `select_advertise_address` in
+/// `iroh-http-discovery`; the two cannot share a single helper without
+/// introducing a cross-crate dependency (both crates depend on `iroh`, neither
+/// on the other).
+fn select_dialable_direct(addrs: &[std::net::SocketAddr]) -> Option<String> {
+    addrs
+        .iter()
+        .copied()
+        .find(|a| is_routable_ip(&a.ip()) && !super::bind::is_placeholder_port(a.port()))
+        .map(|a| a.to_string())
+}
+
+/// All routable, non-placeholder-port direct addresses, formatted for
+/// advertisement, deduplicated in enumeration order.
+///
+/// The plural of [`select_dialable_direct`]: an advertiser publishes every
+/// routable candidate so a browsing peer can direct-dial whichever interface is
+/// actually reachable, rather than only the first-enumerated one (#348).
+fn select_dialable_directs(addrs: &[std::net::SocketAddr]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for a in addrs {
+        if is_routable_ip(&a.ip()) && !super::bind::is_placeholder_port(a.port()) {
+            let s = a.to_string();
+            if !out.contains(&s) {
+                out.push(s);
+            }
+        }
+    }
+    out
+}
+
+/// Whether `ip` is routable off-link: not loopback, unspecified, or link-local.
+///
+/// A link-local address (IPv4 `169.254.0.0/16`, IPv6 `fe80::/10`) is only valid
+/// on its own segment, so advertising it as this node's dialable address makes a
+/// browsing peer's direct dial fail (#350). `Ipv6Addr::is_unicast_link_local` is
+/// still unstable, so the `fe80::/10` prefix is matched by hand. Mirrors the
+/// identical predicate in `iroh-http-discovery` and `iroh-http-tauri`.
+fn is_routable_ip(ip: &std::net::IpAddr) -> bool {
+    if ip.is_loopback() || ip.is_unspecified() {
+        return false;
+    }
+    match ip {
+        std::net::IpAddr::V4(v4) => !v4.is_link_local(),
+        std::net::IpAddr::V6(v6) => (v6.segments()[0] & 0xffc0) != 0xfe80,
+    }
+}
+
+#[cfg(test)]
+mod dialable_tests {
+    use super::{is_routable_ip, select_dialable_direct, select_dialable_directs};
+    use std::net::SocketAddr;
+
+    #[test]
+    fn selects_first_routable_ip_with_reconciled_port() {
+        // A reconciled address already carries its authoritative real port; the
+        // selector just filters for routability and formats it.
+        let addrs: Vec<SocketAddr> = vec![
+            "127.0.0.1:59234".parse().unwrap(),
+            "192.168.1.42:59234".parse().unwrap(),
+        ];
+        assert_eq!(
+            select_dialable_direct(&addrs),
+            Some("192.168.1.42:59234".to_string())
+        );
+    }
+
+    #[test]
+    fn skips_loopback_and_unspecified() {
+        let addrs: Vec<SocketAddr> = vec![
+            "127.0.0.1:59234".parse().unwrap(),
+            "0.0.0.0:59234".parse().unwrap(),
+        ];
+        assert_eq!(select_dialable_direct(&addrs), None);
+    }
+
+    #[test]
+    fn skips_link_local() {
+        // A link-local address must not be advertised as dialable (#350);
+        // prefer the real LAN address that follows it.
+        let addrs: Vec<SocketAddr> = vec![
+            "169.254.10.1:59234".parse().unwrap(),
+            "10.0.0.5:59234".parse().unwrap(),
+        ];
+        assert_eq!(
+            select_dialable_direct(&addrs),
+            Some("10.0.0.5:59234".to_string())
+        );
+    }
+
+    #[test]
+    fn none_when_only_non_routable() {
+        let addrs: Vec<SocketAddr> = vec!["169.254.10.1:59234".parse().unwrap()];
+        assert_eq!(select_dialable_direct(&addrs), None);
+    }
+
+    // Regression: #350 F5 — a routable IP paired with a placeholder port must
+    // never be selected as dialable; prefer a following real address.
+    #[test]
+    fn skips_placeholder_port_selects_real() {
+        let addrs: Vec<SocketAddr> = vec![
+            "192.168.1.42:1".parse().unwrap(),
+            "10.0.0.5:59234".parse().unwrap(),
+        ];
+        assert_eq!(
+            select_dialable_direct(&addrs),
+            Some("10.0.0.5:59234".to_string())
+        );
+    }
+
+    #[test]
+    fn none_when_only_placeholder_port() {
+        let addrs: Vec<SocketAddr> = vec!["192.168.1.42:1".parse().unwrap()];
+        assert_eq!(select_dialable_direct(&addrs), None);
+    }
+
+    #[test]
+    fn brackets_ipv6() {
+        let addrs: Vec<SocketAddr> = vec!["[2001:db8::1]:443".parse().unwrap()];
+        assert_eq!(
+            select_dialable_direct(&addrs),
+            Some("[2001:db8::1]:443".to_string())
+        );
+    }
+
+    #[test]
+    fn routable_ip_predicate() {
+        assert!(is_routable_ip(&"192.168.1.1".parse().unwrap()));
+        assert!(is_routable_ip(&"2001:db8::1".parse().unwrap()));
+        assert!(!is_routable_ip(&"127.0.0.1".parse().unwrap()));
+        assert!(!is_routable_ip(&"0.0.0.0".parse().unwrap()));
+        assert!(!is_routable_ip(&"169.254.1.1".parse().unwrap()));
+        assert!(!is_routable_ip(&"fe80::1".parse().unwrap()));
+    }
+
+    // Regression: #348 — every routable candidate is advertised, not just the
+    // first, so a node on both a VPN `10.x` interface and the real LAN can be
+    // direct-dialed over the LAN. Non-routable and placeholder-port addresses
+    // are still dropped, and duplicates collapse.
+    #[test]
+    fn plural_keeps_all_routable_candidates() {
+        let addrs: Vec<SocketAddr> = vec![
+            "127.0.0.1:59234".parse().unwrap(),
+            "10.12.222.17:56604".parse().unwrap(),
+            "192.168.50.227:56604".parse().unwrap(),
+            "169.254.10.1:56604".parse().unwrap(),
+            "192.168.50.227:1".parse().unwrap(),
+            "10.12.222.17:56604".parse().unwrap(),
+        ];
+        assert_eq!(
+            select_dialable_directs(&addrs),
+            vec![
+                "10.12.222.17:56604".to_string(),
+                "192.168.50.227:56604".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn plural_empty_when_none_routable() {
+        let addrs: Vec<SocketAddr> = vec![
+            "127.0.0.1:59234".parse().unwrap(),
+            "169.254.10.1:56604".parse().unwrap(),
+        ];
+        assert!(select_dialable_directs(&addrs).is_empty());
     }
 }

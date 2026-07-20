@@ -25,9 +25,9 @@ what made desktop nodes visible to iOS `NWBrowser` / Android `NsdManager`.
 But the *public API* is specialized for iroh peer discovery and is lossy:
 
 - **Advertise** forces the instance name to the base32 endpoint id, takes the
-  port from `ep.bound_sockets()`, and emits a fixed TXT set (`pk` + optional
-  `relay`). A caller cannot advertise a non-iroh service, set a custom instance
-  name, or attach custom TXT.
+  port from the endpoint, and emits peer TXT (`pk` plus optional `relay` and
+  dialable `address` values). A caller cannot advertise a non-iroh service, set
+  a custom instance name, or attach custom TXT through this specialization.
 - **Browse** (`resolved_to_event`) reads only `pk`/`relay` and **discards**
   every other TXT property, the port, the instance name, and the host. The
   `PeerDiscoveryEvent` / `DiscoveredPeer` types expose only `nodeId`, `addrs`,
@@ -88,12 +88,11 @@ the iroh-http behavior as a thin layer on top.
    and make the API mirror the layering: the generic engine is the primitive;
    the peer path is the specialization that does strictly more.
 
-2. **One engine, thin iroh seam.** Rust exposes a generic engine
-   `dns_sd::advertise(ServiceConfig)` and `dns_sd::browse(BrowseConfig)` yielding
-   a full `ServiceRecord`. `advertise_peer`/`browse_peers` become ~15-line
-   adapters: advertise builds a `ServiceConfig` from the endpoint; browse calls
-   the generic engine and additionally registers + feeds the `AddressLookup`.
-   Both funnel through the same daemon slab, pump, and record marshalling.
+2. **One engine, thin iroh seam.** Rust exposes a generic engine yielding full
+   `ServiceRecord` values. `advertise_peer` builds a canonical `ServiceConfig`
+   from the endpoint; `browse_peers` projects the generic record stream into a
+   source-scoped endpoint `AddressLookup`. Desktop and mobile then differ only
+   in the transport implementation below that engine seam.
 
 3. **Two FFI entry points, one engine.** Because the endpoint is genuinely
    required for the iroh path (authoritative port; address-lookup wiring), we
@@ -102,11 +101,12 @@ the iroh-http behavior as a thin layer on top.
    over the single `dns_sd` engine — not a second bridge. This is the accepted
    "separate FFI calls where required" from the design decision.
 
-4. **Lossless record + merged TXT.** `ServiceRecord` carries `serviceName`,
-   `instanceName`, `host`, `port`, `addrs`, `txt`, and `isActive`.
-   `DiscoveredPeer` gains optional `txt`/`port`/`instanceName`/`host` so the
-   iroh path is no longer lossy. `node.advertise({ txt })` merges caller TXT on
-   top of the reserved `pk`/`relay` keys (reserved keys win).
+4. **Lossless generic record; deliberately small peer record.**
+   `ServiceRecord` carries `serviceType`, `instanceName`, `host`, `port`,
+   `addrs`, `txt`, and `isActive`. `DiscoveredPeer` remains the stable
+   `{ nodeId, addrs, isActive }` projection. Generic `node.advertise({ txt })`
+   preserves caller TXT; the peer specialization alone owns its reserved
+   `pk`/`relay`/`address` keys.
 
 5. **`protocol` is first-class.** `ServiceConfig`/`BrowseConfig` take
    `protocol?: "udp" | "tcp"` (default `udp`). The iroh path stays `udp`.
@@ -117,20 +117,17 @@ the iroh-http behavior as a thin layer on top.
 
 7. **One discovery permission.** The Tauri plugin previously shipped two
    permission sets — `iroh-http:mdns` (peer discovery) and `iroh-http:dns-sd`
-   (generic). Since the peer path is a specialization of the generic one and
-   both drive the same commands, collapse them into a single
-   `iroh-http:discovery` set covering all ten discovery commands
-   (`mdns_*` + `dns_sd_*`). A capability grants discovery once and gets both.
+   (generic). Since the peer path is a specialization of the generic one,
+   collapse them into one `iroh-http:discovery` set covering both public command
+   families. A capability grants discovery once and gets both.
 
 8. **Mobile parity.** Generic DNS-SD is implemented on mobile, not just
-   desktop. The mobile bridge (`mobile_mdns.rs`) gains generic
-   advertise/browse methods, and the native plugins add `dns_sd_*`
-   commands over the same NsdManager (Android) / NWBrowser–NWListener (iOS)
-   machinery already used for peer discovery. Android resolves full records
-   (host, port, TXT, addresses) via `resolveService`; iOS surfaces the instance
-   name, service type and TXT but leaves host/port/addresses unresolved, because
-   `NWBrowser` does not resolve an endpoint without opening an `NWConnection` —
-   a documented best-effort limitation rather than a hard "not supported".
+   desktop. The native plugins expose one generic advertise/browse adapter over
+   `NsdManager` (Android) or `NWBrowser`/`NetService` (iOS); peer APIs reuse it
+   through the Rust projection instead of adding native peer engines. Android
+   resolves full records via `resolveService`; iOS surfaces instance, service
+   type, and TXT but leaves host/port/addresses unresolved because doing more
+   requires an `NWConnection` per result.
 
 Accepted trade-off: generic DNS-SD via this library requires an iroh node
 (the FFI is loaded through the node addon). This is fine — the library exists to
@@ -147,9 +144,8 @@ serve iroh-http, not to be a standalone Bonjour replacement.
 - Tauri permissions: `iroh-http:mdns` and `iroh-http:dns-sd` are replaced by a
   single `iroh-http:discovery` set (breaking; capabilities must be updated).
 - Shared TS: generic `node.advertise`/`node.browse` + iroh-http
-  `node.advertisePeer`/`node.browsePeers`, `ServiceConfig`/`ServiceRecord`/`DiscoveredService`
-  types, `IrohAdapter` gains generic methods, `DiscoveredPeer` gains optional
-  fields, interop helpers exported.
+  `node.advertisePeer`/`node.browsePeers`, `ServiceConfig`/`ServiceRecord` types,
+  generic adapter methods, and interop helpers. `DiscoveredPeer` stays minimal.
 - Docs: discovery feature doc updated; examples may show a non-iroh service.
 
 ## Next steps
@@ -161,7 +157,7 @@ serve iroh-http, not to be a standalone Bonjour replacement.
 - [x] shared TS: generic `node.advertise`/`node.browse` + iroh `advertisePeer`/`browsePeers`, types, adapter methods, interop helpers.
 - [x] discovery feature doc + example (deno / node / tauri).
 - [x] unify `iroh-http:mdns` + `iroh-http:dns-sd` into `iroh-http:discovery`.
-- [x] mobile generic DNS-SD (Android full records; iOS metadata-only) — native Swift/Kotlin pending on-device verification.
+- [x] mobile generic DNS-SD (Android full records; iOS metadata-only) and Rust peer projection — pending on-device verification.
 
 ## Naming convention (as shipped)
 
@@ -179,7 +175,7 @@ mirror the TypeScript API surface at every layer:
 | Deno dispatch key | `advertise` / `browse` / `browseNext` / … | `advertisePeer` / `browsePeers` / `browsePeersNext` / … |
 | Tauri command | `advertise` / `browse` / `browse_next` / … | `advertise_peer` / `browse_peers` / `browse_peers_next` / … |
 | Tauri permission leaf | `allow-advertise` / `allow-browse` / `allow-browse-next` / … | `allow-advertise-peer` / `allow-browse-peers` / `allow-browse-peers-next` / … |
-| Mobile native method | `advertise_start/stop` / `browse_start/poll/stop` | `advertise_peer_start/stop` / `browse_peers_start/poll/stop` |
+| Mobile native method | `advertise_start/update/stop` / `browse_start/poll/stop` | None — peer APIs project the generic engine in Rust |
 
 The single `iroh-http:discovery` permission set and the high-level `node`
 methods are the stable surface; the FFI export, Tauri command, permission-leaf,

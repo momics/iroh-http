@@ -60,6 +60,14 @@ export async function handleRequest(req) {
     return new Response(method, { status: 200 });
   }
 
+  // --- /hello ---
+  // Static response body (not an echo). Directly exercises the #338 regression:
+  // Android serve() dropped constant response bodies, so this returns empty
+  // there while every other platform returns "hello".
+  if (path === "/hello") {
+    return new Response("hello", { status: 200 });
+  }
+
   // --- /echo-path[/*] ---
   if (path === "/echo-path" || path.startsWith("/echo-path/")) {
     return new Response(path, { status: 200 });
