@@ -19,9 +19,15 @@ With options:
 
 ```ts
 const node = await createNode({
-  key: savedKey,                              // Uint8Array, restores a stable identity
-  relayMode: "https://my-relay.example.com",  // custom relay (or "default", "staging", "disabled")
-  advanced: { drainTimeout: 30_000 },         // ms to wait for in-flight requests on close
+  key: savedKey, // Uint8Array, restores a stable identity
+  relay: {
+    mode: "default", // or "staging" / "disabled"
+    urls: ["https://my-relay.example.com"], // optional custom relay list
+  },
+  discovery: {
+    dns: true,
+    mdns: { serviceName: "my-app" },
+  },
 });
 ```
 

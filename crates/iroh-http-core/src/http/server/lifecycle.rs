@@ -1,8 +1,9 @@
 //! Typed lifecycle objects for the serve loop (Slice C.4 of #182, closes #178).
 //!
 //! [`ConnectionTracker`] folds the previous inline `PeerConnectionGuard` +
-//! `TotalGuard` into a single Drop-owning object. [`RequestTracker`] is the
-//! previous inline `ReqGuard` lifted to module scope.
+//! `TotalGuard` into a single Drop-owning object. [`RequestTracker`] owns the
+//! public active-request statistic, while [`DeliveryTracker`] owns the private
+//! graceful-drain boundary through transport acknowledgement.
 //!
 //! Counter mutations and connect/disconnect-event firing happen exactly once
 //! in `acquire` / `Drop`, so a future change can no longer drift between
@@ -96,38 +97,48 @@ impl Drop for ConnectionTracker {
 
 // ── RequestTracker ────────────────────────────────────────────────────────────
 
-/// Per-request lifecycle: increments two counters (per-connection and
-/// crate-wide in-flight) on construction, decrements both on drop, and
-/// notifies any drain waiters when in-flight reaches zero.
+/// Per-request processing lifecycle exposed through endpoint statistics.
 pub(crate) struct RequestTracker {
     counter: Arc<AtomicUsize>,
-    in_flight: Arc<AtomicUsize>,
-    drain_notify: Arc<tokio::sync::Notify>,
 }
 
 impl RequestTracker {
-    /// Acquire a request slot. The caller is responsible for ensuring the
-    /// counter increments happened before this call (the accept loop
-    /// fetch_add's both before spawning the request task so that the
-    /// counts can be read synchronously from the connection task).
-    pub(crate) fn new(
-        counter: Arc<AtomicUsize>,
-        in_flight: Arc<AtomicUsize>,
-        drain_notify: Arc<tokio::sync::Notify>,
-    ) -> Self {
-        RequestTracker {
-            counter,
-            in_flight,
-            drain_notify,
-        }
+    /// Own a request slot already incremented by the accept loop.
+    pub(crate) fn new(counter: Arc<AtomicUsize>) -> Self {
+        RequestTracker { counter }
     }
 }
 
 impl Drop for RequestTracker {
     fn drop(&mut self) {
         self.counter.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+// ── DeliveryTracker ──────────────────────────────────────────────────────────
+
+/// Private graceful-drain lifecycle. A request remains delivery-in-flight until
+/// the response stream is transport-acknowledged, stopped, or its connection
+/// fails. This deliberately does not affect public active-request statistics.
+pub(crate) struct DeliveryTracker {
+    in_flight: Arc<AtomicUsize>,
+    drain_notify: Arc<tokio::sync::Notify>,
+}
+
+impl DeliveryTracker {
+    /// Own a delivery slot already incremented by the accept loop.
+    pub(crate) fn new(in_flight: Arc<AtomicUsize>, drain_notify: Arc<tokio::sync::Notify>) -> Self {
+        DeliveryTracker {
+            in_flight,
+            drain_notify,
+        }
+    }
+}
+
+impl Drop for DeliveryTracker {
+    fn drop(&mut self) {
         if self.in_flight.fetch_sub(1, Ordering::AcqRel) == 1 {
-            // Last in-flight request completed — signal drain.
+            // Last in-flight delivery completed — signal drain.
             self.drain_notify.notify_waiters();
         }
     }
@@ -171,7 +182,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn request_tracker_notifies_when_in_flight_reaches_zero() {
+    async fn delivery_tracker_notifies_when_in_flight_reaches_zero() {
         let counter = Arc::new(AtomicUsize::new(1));
         let in_flight = Arc::new(AtomicUsize::new(1));
         let drain = Arc::new(tokio::sync::Notify::new());
@@ -184,15 +195,20 @@ mod tests {
         // Give the waiter a chance to register.
         tokio::task::yield_now().await;
 
-        let tracker = RequestTracker::new(counter.clone(), in_flight.clone(), drain.clone());
-        drop(tracker);
+        let request = RequestTracker::new(counter.clone());
+        let delivery = DeliveryTracker::new(in_flight.clone(), drain.clone());
+
+        drop(request);
+        assert_eq!(counter.load(Ordering::Relaxed), 0);
+        assert_eq!(in_flight.load(Ordering::Relaxed), 1);
+
+        drop(delivery);
 
         tokio::time::timeout(std::time::Duration::from_millis(100), waited)
             .await
             .expect("waiter must be notified")
             .unwrap();
 
-        assert_eq!(counter.load(Ordering::Relaxed), 0);
         assert_eq!(in_flight.load(Ordering::Relaxed), 0);
     }
 }

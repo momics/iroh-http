@@ -65,6 +65,20 @@ test("createNode exposes secretKey only when a key is supplied", async () => {
   }
 });
 
+test("an immediate serve close survives native registration", {
+  timeout: 5_000,
+}, async () => {
+  const node = await createNode({ disableNetworking: true });
+  try {
+    for (let i = 0; i < 10; i++) {
+      const handle = node.serve(() => new Response("ok"));
+      await handle.close();
+    }
+  } finally {
+    await node.close();
+  }
+});
+
 test("fetch numeric validation rejects invalid values instead of defaulting", async () => {
   const node = await createNode({ disableNetworking: true });
   const handle = node.serve(() => new Response("ok"));

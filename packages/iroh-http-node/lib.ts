@@ -114,6 +114,7 @@ process.once("SIGINT", () => _closeAllEndpoints("SIGINT"));
 class NodeAdapter extends IrohAdapter {
   #eh: number;
   #sessionFns: RawSessionFns;
+  #serveStopRequested = false;
 
   constructor(endpointHandle: number) {
     super();
@@ -265,49 +266,61 @@ class NodeAdapter extends IrohAdapter {
     },
     callback: (payload: RequestPayload) => Promise<FfiResponseHead>,
   ): Promise<void> {
+    // `napiRawServe` registers the native serve handle asynchronously. A
+    // caller may close the JS ServeHandle before that registration completes,
+    // in which case the first `napiStopServe` is necessarily a no-op. Remember
+    // the request and retry it once registration is known to be complete.
+    this.#serveStopRequested = false;
     // #119: Track in-flight handler tasks so waitServeStop drains them before resolving.
     const pending = new Set<Promise<void>>();
-    await napiRawServe(
-      endpointHandle,
-      (options.serveOptions ?? null) as Parameters<typeof napiRawServe>[1],
-      (
-        payload: Parameters<typeof napiRawServe>[2] extends
-          (arg: infer A) => void ? A
-          : never,
-      ) => {
-        const typed = payload as unknown as RequestPayload;
-        const task = callback(typed)
-          .then((head) => {
-            try {
-              napiRawRespond(
-                endpointHandle,
-                typed.reqHandle,
-                head.status,
-                head.headers as string[][],
-              );
-            } catch (respondErr) {
-              console.error("[iroh-http-node] rawRespond failed:", respondErr);
-            }
-          })
-          .catch((err: unknown) => {
-            console.error("[iroh-http-node] serve handler error:", err);
-            try {
-              napiRawRespond(endpointHandle, typed.reqHandle, 500, []);
-            } catch (respondErr) {
-              console.error(
-                "[iroh-http-node] rawRespond (fallback 500) failed:",
-                respondErr,
-              );
-            }
-          });
-        pending.add(task);
-        task.finally(() => pending.delete(task));
-      },
-      options.onConnectionEvent ?? null,
-    );
-    return napiWaitServeStop(endpointHandle)
-      .then(() => Promise.allSettled([...pending]))
-      .then(() => {});
+    try {
+      await napiRawServe(
+        endpointHandle,
+        (options.serveOptions ?? null) as Parameters<typeof napiRawServe>[1],
+        (
+          payload: Parameters<typeof napiRawServe>[2] extends
+            (arg: infer A) => void ? A
+            : never,
+        ) => {
+          const typed = payload as unknown as RequestPayload;
+          const task = callback(typed)
+            .then((head) => {
+              try {
+                napiRawRespond(
+                  endpointHandle,
+                  typed.reqHandle,
+                  head.status,
+                  head.headers as string[][],
+                );
+              } catch (respondErr) {
+                console.error(
+                  "[iroh-http-node] rawRespond failed:",
+                  respondErr,
+                );
+              }
+            })
+            .catch((err: unknown) => {
+              console.error("[iroh-http-node] serve handler error:", err);
+              try {
+                napiRawRespond(endpointHandle, typed.reqHandle, 500, []);
+              } catch (respondErr) {
+                console.error(
+                  "[iroh-http-node] rawRespond (fallback 500) failed:",
+                  respondErr,
+                );
+              }
+            });
+          pending.add(task);
+          task.finally(() => pending.delete(task));
+        },
+        options.onConnectionEvent ?? null,
+      );
+      if (this.#serveStopRequested) napiStopServe(endpointHandle);
+      await napiWaitServeStop(endpointHandle);
+      await Promise.allSettled([...pending]);
+    } finally {
+      this.#serveStopRequested = false;
+    }
   }
 
   // ── Lifecycle ───────────────────────────────────────────────────────────────
@@ -316,6 +329,7 @@ class NodeAdapter extends IrohAdapter {
     return closeEndpoint(handle, force ?? null);
   }
   stopServe(handle: number): void {
+    this.#serveStopRequested = true;
     napiStopServe(handle);
   }
   waitEndpointClosed(handle: number): Promise<void> {
@@ -464,8 +478,13 @@ class NodeAdapter extends IrohAdapter {
   override async nextPathChange(
     endpointHandle: number,
     nodeId: string,
+    subscriptionId: number,
   ): Promise<PathInfo | null> {
-    const json = await napiNextPathChange(endpointHandle, nodeId);
+    const json = await napiNextPathChange(
+      endpointHandle,
+      nodeId,
+      subscriptionId,
+    );
     if (json === null || json === undefined) return null;
     return JSON.parse(json) as PathInfo;
   }
@@ -473,8 +492,9 @@ class NodeAdapter extends IrohAdapter {
   override unsubscribePathChanges(
     endpointHandle: number,
     nodeId: string,
+    subscriptionId: number,
   ): Promise<void> {
-    napiUnsubscribePathChanges(endpointHandle, nodeId);
+    napiUnsubscribePathChanges(endpointHandle, nodeId, subscriptionId);
     return Promise.resolve();
   }
 }

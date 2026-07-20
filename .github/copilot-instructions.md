@@ -2,6 +2,9 @@
 
 Peer-to-peer HTTP over Iroh QUIC transport. Rust core + FFI adapters for Node.js, Deno, and Tauri. Nodes addressed by Ed25519 public key, not DNS.
 
+Follow the cross-agent repository and Git conventions in
+[`AGENTS.md`](../AGENTS.md).
+
 ## Principles
 
 These govern every action. No exceptions.
@@ -50,6 +53,7 @@ Read the relevant doc before acting in that area. Don't read all docs upfront.
 
 ## Skills
 
-- [manage-issues](.github/skills/manage-issues/SKILL.md) — create, close, and label GitHub issues. Includes regression test policy and commit-linking format.
-- [git-conventions](.github/skills/git-conventions/SKILL.md) — commit messages, branch names, PR titles. Follow Conventional Commits for every commit.
-- [fix-issues](.github/skills/fix-issues/SKILL.md) — systematically resolve open issues: triage → group → fix → CI → commit → close → push.
+- [manage-issues](../.agents/skills/manage-issues/SKILL.md) — create, triage, update, and close GitHub issues.
+- [fix-issues](../.agents/skills/fix-issues/SKILL.md) — systematically resolve open issues through reviewed branches.
+- [regression-first](../.agents/skills/regression-first/SKILL.md) — reproduce bugs that escaped a release before fixing them.
+- [analyze-git-diff](../.agents/skills/analyze-git-diff/SKILL.md) — generate an evidence-based HTML breakdown of review churn and footprint.

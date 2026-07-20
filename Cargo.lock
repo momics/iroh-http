@@ -1841,6 +1841,7 @@ dependencies = [
  "iroh",
  "iroh-http-core",
  "mdns-sd",
+ "n0-watcher",
  "tokio",
  "tracing",
 ]

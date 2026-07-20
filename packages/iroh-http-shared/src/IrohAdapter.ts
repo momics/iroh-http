@@ -302,6 +302,7 @@ export abstract class IrohAdapter {
   nextPathChange(
     _endpointHandle: number,
     _nodeId: string,
+    _subscriptionId: number,
   ): Promise<PathInfo | null> {
     return Promise.reject(
       new Error("nextPathChange() not supported by this adapter"),
@@ -312,6 +313,7 @@ export abstract class IrohAdapter {
   unsubscribePathChanges(
     _endpointHandle: number,
     _nodeId: string,
+    _subscriptionId: number,
   ): Promise<void> {
     return Promise.resolve();
   }

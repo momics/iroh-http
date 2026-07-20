@@ -275,7 +275,7 @@ export function stressTests({ createNode, test, assert, assertEqual }) {
         await handle.finished;
       }
 
-      assertEqual(errors, [], `stale-handle errors: ${errors.join(" | ")}`);
+      assertEqual(errors.length, 0, `stale-handle errors: ${errors.join(" | ")}`);
     } finally {
       console.error = originalError;
       await server.close();

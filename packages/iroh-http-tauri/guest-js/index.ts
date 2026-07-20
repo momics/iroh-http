@@ -68,6 +68,7 @@ interface TauriRequestPayload {
 class TauriAdapter extends IrohAdapter {
   #epHandle: number;
   #sessionFnsCache: RawSessionFns;
+  #serveStopRequested = false;
   // #338: How `sendChunk` encodes body bytes over the Tauri IPC channel. Starts
   // on the fast raw-binary path and sticks to base64 once a platform WebView is
   // found to reject raw payloads (the Android System WebView). Per-adapter, so
@@ -232,6 +233,7 @@ class TauriAdapter extends IrohAdapter {
     },
     callback: (payload: RequestPayload) => Promise<FfiResponseHead>,
   ): Promise<void> {
+    this.#serveStopRequested = false;
     const channel = new Channel<TauriRequestPayload>();
 
     let connChannel: Channel<PeerConnectionEvent> | undefined;
@@ -318,15 +320,23 @@ class TauriAdapter extends IrohAdapter {
     // leaving the shared `serveRunning` guard corrupted across serve/stop
     // cycles, so a later serve() threw "serve() is already running" (#336).
     return started.then(
-      () =>
+      async () => {
+        // `stopServe` may race the asynchronous `serve` command and arrive
+        // before Rust has registered this cycle's native handle. Retry that
+        // early stop now that registration is known to be complete.
+        if (this.#serveStopRequested) {
+          await invoke(`${PLUGIN}|stop_serve`, {
+            endpointHandle: Number(endpointHandle),
+          }).catch(() => {});
+        }
         // Resolve only after the native serve loop has stopped AND all
         // in-flight JS handler tasks have settled (responses written), so the
         // serve/finished contract holds the same as Node and Deno.
-        invoke<void>(`${PLUGIN}|wait_serve_stop`, {
+        await invoke<void>(`${PLUGIN}|wait_serve_stop`, {
           endpointHandle: Number(endpointHandle),
-        })
-          .then(() => Promise.allSettled([...pending]))
-          .then(() => {}),
+        });
+        await Promise.allSettled([...pending]);
+      },
       (err: unknown) => {
         // `serve` itself failed to start: surface it and settle `finished`
         // rather than hanging on `wait_serve_stop` for a loop that never ran.
@@ -335,7 +345,9 @@ class TauriAdapter extends IrohAdapter {
           throw err;
         });
       },
-    );
+    ).finally(() => {
+      this.#serveStopRequested = false;
+    });
   }
 
   closeEndpoint(handle: number, force?: boolean): Promise<void> {
@@ -346,6 +358,7 @@ class TauriAdapter extends IrohAdapter {
   }
 
   stopServe(handle: number): void {
+    this.#serveStopRequested = true;
     void invoke(`${PLUGIN}|stop_serve`, { endpointHandle: Number(handle) })
       .catch(() => {});
   }
@@ -510,20 +523,24 @@ class TauriAdapter extends IrohAdapter {
   override async nextPathChange(
     endpointHandle: number,
     nodeId: string,
+    subscriptionId: number,
   ): Promise<PathInfo | null> {
     return invoke<PathInfo | null>(`${PLUGIN}|next_path_change`, {
       endpointHandle: Number(endpointHandle),
       nodeId,
+      subscriptionId,
     });
   }
 
   override async unsubscribePathChanges(
     endpointHandle: number,
     nodeId: string,
+    subscriptionId: number,
   ): Promise<void> {
     await invoke<void>(`${PLUGIN}|unsubscribe_path_changes`, {
       endpointHandle: Number(endpointHandle),
       nodeId,
+      subscriptionId,
     });
   }
 }
