@@ -161,7 +161,7 @@ the discovery crate, but it may not weaken their behavior.
 | Platform | Transport adapter | Generic browse result | Minimum/support constraint |
 | --- | --- | --- | --- |
 | Node, Deno, Tauri desktop | Rust `mdns-sd` | Fully resolved | Discovery remains optional behind the existing `mdns`/`discovery` feature gates. No discovery policy moves into always-on `iroh-http-core`. |
-| Android | `NsdManager` native adapter | Fully resolved after `resolveService` | `minSdk = 21` in [`android/build.gradle.kts`](../../packages/iroh-http-tauri/android/build.gradle.kts). The serialized legacy resolve queue and both API-21/current-AOSP listener orderings remain supported. Android 13+ permission requirements remain documented. |
+| Android | `NsdManager` native adapter | Fully resolved after `resolveService` | `minSdk = 21` in [`android/build.gradle.kts`](../../packages/iroh-http-tauri/android/build.gradle.kts). The serialized legacy resolve queue and both API-21/current-AOSP listener orderings remain supported. Pre-T-extension-7 sessions share a plugin-owned multicast lock; newer foreground sessions use system-managed multicast. |
 | iOS | `NWBrowser` plus native registration adapter | Metadata-only, as described above | iOS 14 in [`ios/Package.swift`](../../packages/iroh-http-tauri/ios/Package.swift). Static `NSBonjourServices` declarations and Local Network permission remain required. |
 
 Mobile setup and permissions remain as documented in
