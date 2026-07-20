@@ -67,7 +67,7 @@ The stop signal is intentionally cheap: two iterations is short enough to catch 
 To make D1 and D2 reachable without reading the full principles file:
 
 - [`.github/copilot-instructions.md`](../../.github/copilot-instructions.md) gains a "Before writing custom HTTP / middleware code" pointer to this ADR and to `axum/src/serve/mod.rs`.
-- [`.github/skills/fix-issues/SKILL.md`](../../.github/skills/fix-issues/SKILL.md) gains the stop-signal heuristic in its fix-loop guardrails so any agent fixing an issue inherits it automatically.
+- [`.agents/skills/fix-issues/SKILL.md`](../../.agents/skills/fix-issues/SKILL.md) gains the stop-signal heuristic in its fix-loop guardrails so any agent fixing an issue inherits it automatically.
 
 ## Consequences
 
@@ -81,4 +81,4 @@ To make D1 and D2 reachable without reading the full principles file:
 - [x] Land ADR-013 alongside ADR-014.
 - [x] Update `docs/principles.md` to cross-reference ADR-013 from principle #3.
 - [x] Update `.github/copilot-instructions.md` with the "before writing custom HTTP/middleware code" pointer.
-- [x] Update `.github/skills/fix-issues/SKILL.md` with the stop-signal heuristic.
+- [x] Update `.agents/skills/fix-issues/SKILL.md` with the stop-signal heuristic.

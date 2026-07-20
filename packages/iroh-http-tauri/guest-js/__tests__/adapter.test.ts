@@ -36,6 +36,23 @@ afterEach(() => {
   clearMocks();
 });
 
+async function resolvesWithin(
+  promise: Promise<unknown>,
+  timeoutMs = 50,
+): Promise<boolean> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise.then(() => true),
+      new Promise<false>((resolve) => {
+        timeout = setTimeout(() => resolve(false), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeout !== undefined) clearTimeout(timeout);
+  }
+}
+
 // ── nextChunk prefix byte protocol ──────────────────────────────────────────
 
 describe("nextChunk prefix byte protocol", () => {
@@ -151,6 +168,30 @@ describe("sendChunk IPC", () => {
   });
 });
 
+// ── reconnectEnabled gating (#350 F3) ───────────────────────────────────────
+
+describe("reconnectEnabled", () => {
+  it("honors an explicit auto:false even on mobile", async () => {
+    const { reconnectEnabled } = await import("../index.ts");
+    // The destructive #350 F3 bug: mobile force-enabled the listener and could
+    // permanently close a node whose reconnect the caller had disabled.
+    expect(reconnectEnabled(false, true)).toBe(false);
+    expect(reconnectEnabled(false, false)).toBe(false);
+  });
+
+  it("enables implicitly on mobile when unset", async () => {
+    const { reconnectEnabled } = await import("../index.ts");
+    expect(reconnectEnabled(undefined, true)).toBe(true);
+    expect(reconnectEnabled(undefined, false)).toBe(false);
+  });
+
+  it("enables on explicit auto:true regardless of platform", async () => {
+    const { reconnectEnabled } = await import("../index.ts");
+    expect(reconnectEnabled(true, false)).toBe(true);
+    expect(reconnectEnabled(true, true)).toBe(true);
+  });
+});
+
 // ── createNode IPC ──────────────────────────────────────────────────────────
 
 describe("createNode IPC", () => {
@@ -189,6 +230,181 @@ describe("createNode IPC", () => {
     expect(node.secretKey).toBeUndefined();
     expect(invokedCommands).toContain("plugin:iroh-http|create_endpoint");
     expect(invokedCommands).toContain("plugin:iroh-http|wait_endpoint_closed");
+  });
+});
+
+// ── foreground reconnect ownership ─────────────────────────────────────────
+
+describe("foreground reconnect ownership", () => {
+  beforeEach(() => {
+    mockWindows("main");
+  });
+
+  it("closes the unusable node when async recovery rejects", async () => {
+    const recoveryError = new Error("replacement failed");
+    let surfacedError: unknown;
+    mockIPC((cmd) => {
+      if (cmd === "plugin:iroh-http|create_endpoint") {
+        return {
+          endpointHandle: 1,
+          nodeId: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        };
+      }
+      if (cmd === "plugin:iroh-http|wait_endpoint_closed") {
+        return new Promise(() => {});
+      }
+      if (cmd === "plugin:iroh-http|ping") return false;
+      if (cmd === "plugin:iroh-http|close_endpoint") return null;
+    });
+
+    const { createNode } = await import("../index.ts");
+    const node = await createNode({
+      disableNetworking: true,
+      reconnect: {
+        auto: true,
+        maxRetries: 1,
+        onReconnectNeeded: async () => {
+          throw recoveryError;
+        },
+        onReconnectError: (error) => {
+          surfacedError = error;
+        },
+      },
+    });
+
+    document.dispatchEvent(new Event("visibilitychange"));
+
+    // Rejected recovery must not leave a half-dead node alive. `closed` is the
+    // public hand-off signal for callers that need to retry elsewhere.
+    expect(await resolvesWithin(node.closed)).toBe(true);
+    expect(surfacedError).toBe(recoveryError);
+  });
+
+  it("surfaces both a rejected recovery and a failed fail-safe close", async () => {
+    const recoveryError = new Error("replacement failed");
+    const closeError = new Error("native close failed");
+    const surfacedErrors: unknown[] = [];
+    let resolveBothErrors!: () => void;
+    const bothErrors = new Promise<void>((resolve) => {
+      resolveBothErrors = resolve;
+    });
+
+    mockIPC((cmd) => {
+      if (cmd === "plugin:iroh-http|create_endpoint") {
+        return {
+          endpointHandle: 1,
+          nodeId: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        };
+      }
+      if (cmd === "plugin:iroh-http|wait_endpoint_closed") {
+        return new Promise(() => {});
+      }
+      if (cmd === "plugin:iroh-http|ping") return false;
+      if (cmd === "plugin:iroh-http|close_endpoint") throw closeError;
+    });
+
+    const { createNode } = await import("../index.ts");
+    await createNode({
+      disableNetworking: true,
+      reconnect: {
+        auto: true,
+        maxRetries: 1,
+        onReconnectNeeded: async () => {
+          throw recoveryError;
+        },
+        onReconnectError: (error) => {
+          surfacedErrors.push(error);
+          if (surfacedErrors.length === 2) resolveBothErrors();
+        },
+      },
+    });
+
+    document.dispatchEvent(new Event("visibilitychange"));
+
+    expect(await resolvesWithin(bothErrors)).toBe(true);
+    expect(surfacedErrors).toEqual([recoveryError, closeError]);
+  });
+
+  it("starts only one successful async replacement across foreground events", async () => {
+    let resolveNativeClosed!: () => void;
+    const nativeClosed = new Promise<void>((resolve) => {
+      resolveNativeClosed = resolve;
+    });
+    mockIPC((cmd) => {
+      if (cmd === "plugin:iroh-http|create_endpoint") {
+        return {
+          endpointHandle: 1,
+          nodeId: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        };
+      }
+      if (cmd === "plugin:iroh-http|wait_endpoint_closed") return nativeClosed;
+      if (cmd === "plugin:iroh-http|ping") return false;
+      if (cmd === "plugin:iroh-http|close_endpoint") {
+        resolveNativeClosed();
+        return null;
+      }
+    });
+
+    let replacements = 0;
+    let resolveReplacementStarted!: () => void;
+    const replacementStarted = new Promise<void>((resolve) => {
+      resolveReplacementStarted = resolve;
+    });
+    let resolveReplacement!: () => void;
+    const replacement = new Promise<void>((resolve) => {
+      resolveReplacement = resolve;
+    });
+
+    const { createNode } = await import("../index.ts");
+    const node = await createNode({
+      disableNetworking: true,
+      reconnect: {
+        auto: true,
+        maxRetries: 1,
+        onReconnectNeeded: () => {
+          replacements += 1;
+          resolveReplacementStarted();
+          return replacement;
+        },
+      },
+    });
+
+    document.dispatchEvent(new Event("visibilitychange"));
+    expect(await resolvesWithin(replacementStarted)).toBe(true);
+
+    window.dispatchEvent(new PageTransitionEvent("pageshow"));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(replacements).toBe(1);
+
+    resolveReplacement();
+    await node.close();
+  });
+
+  it("preserves close options while releasing its foreground listener", async () => {
+    let closeForce: unknown;
+    mockIPC((cmd, args) => {
+      if (cmd === "plugin:iroh-http|create_endpoint") {
+        return {
+          endpointHandle: 1,
+          nodeId: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        };
+      }
+      if (cmd === "plugin:iroh-http|wait_endpoint_closed") return null;
+      if (cmd === "plugin:iroh-http|close_endpoint") {
+        closeForce = (args as { force?: unknown }).force;
+        return null;
+      }
+    });
+
+    const { createNode } = await import("../index.ts");
+    const node = await createNode({
+      disableNetworking: true,
+      reconnect: { auto: true },
+    });
+
+    await node.close({ force: true });
+
+    expect(closeForce).toBe(true);
   });
 });
 
@@ -272,6 +488,168 @@ describe("error propagation", () => {
 
     const { createNode } = await import("../index.ts");
     await expect(createNode()).rejects.toThrow();
+  });
+});
+
+// ── serve / stop / serve cycles on one node (issue #336 follow-up) ───────────
+
+describe("serve restart cycles", () => {
+  beforeEach(() => {
+    mockWindows("main");
+  });
+
+  /**
+   * Build a `mockIPC` handler that faithfully models the Rust serve lifecycle
+   * for `serve` / `stop_serve` / `wait_serve_stop`:
+   *
+   * - `serve` registers a NEW loop whose done-signal starts `false`. Like the
+   *   real Tokio command, `set_serve_handle` runs a macrotask *after* the JS
+   *   `invoke("serve")` call returns — so the registration is deferred.
+   * - `stop_serve` flips the current loop's done-signal to `true`.
+   * - `wait_serve_stop` captures whatever loop is registered *at call time* and
+   *   resolves when that loop's done-signal is `true` (immediately if already
+   *   `true`). This is the crux: the previous cycle's loop stays latched `true`,
+   *   so a `wait_serve_stop` that runs before the current cycle's `serve`
+   *   registered its loop reads the STALE `true` and resolves early.
+   */
+  function makeServeLifecycleIPC() {
+    type Loop = { done: boolean; notify: (() => void) | null };
+    let current: Loop | null = null;
+
+    return (cmd: string): unknown => {
+      switch (cmd) {
+        case "plugin:iroh-http|create_endpoint":
+          return {
+            endpointHandle: 1,
+            nodeId: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          };
+        case "plugin:iroh-http|wait_endpoint_closed":
+          return new Promise(() => {});
+        case "plugin:iroh-http|serve":
+          // Defer registration by a macrotask, mirroring the Rust command's
+          // async dispatch: `set_serve_handle` has NOT run when this invoke
+          // resolves-to-callers-synchronously in the buggy ordering.
+          return new Promise<null>((resolve) => {
+            setTimeout(() => {
+              current = { done: false, notify: null };
+              resolve(null);
+            }, 0);
+          });
+        case "plugin:iroh-http|stop_serve": {
+          const loop = current;
+          if (loop) {
+            loop.done = true;
+            loop.notify?.();
+          }
+          return null;
+        }
+        case "plugin:iroh-http|wait_serve_stop": {
+          const loop = current;
+          if (!loop || loop.done) return Promise.resolve(null);
+          return new Promise<null>((resolve) => {
+            loop.notify = () => resolve(null);
+          });
+        }
+        default:
+          return null;
+      }
+    };
+  }
+
+  it("does not issue wait_serve_stop until serve has resolved (correlates the loop-done wait to this cycle — #336 follow-up)", async () => {
+    const order: string[] = [];
+    let resolveServe: (() => void) | null = null;
+
+    mockIPC((cmd) => {
+      order.push(cmd);
+      switch (cmd) {
+        case "plugin:iroh-http|create_endpoint":
+          return {
+            endpointHandle: 1,
+            nodeId: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          };
+        case "plugin:iroh-http|wait_endpoint_closed":
+          return new Promise(() => {});
+        case "plugin:iroh-http|serve":
+          // Hold `serve` pending: on the Rust side this command runs
+          // `set_serve_handle`, which installs THIS cycle's loop-done signal.
+          return new Promise<null>((resolve) => {
+            resolveServe = () => resolve(null);
+          });
+        case "plugin:iroh-http|wait_serve_stop":
+          return Promise.resolve(null);
+        default:
+          return null;
+      }
+    });
+
+    const { createNode } = await import("../index.ts");
+    const node = await createNode({ disableNetworking: true });
+
+    const controller = new AbortController();
+    const handle = node.serve(
+      { signal: controller.signal },
+      () => new Response("ok"),
+    );
+
+    // Flush microtasks: `serve` has been invoked but is still pending.
+    await new Promise((r) => setTimeout(r, 0));
+    expect(order).toContain("plugin:iroh-http|serve");
+    // The bug: issuing wait_serve_stop now (before serve resolved) makes it
+    // latch the PREVIOUS cycle's already-`true` done signal on the Rust side,
+    // so the loop-done promise resolves against the wrong serve loop. It must
+    // wait until `serve` (set_serve_handle) has resolved.
+    expect(order).not.toContain("plugin:iroh-http|wait_serve_stop");
+
+    // Resolve `serve` (set_serve_handle done) → wait_serve_stop may now fire.
+    resolveServe?.();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(order).toContain("plugin:iroh-http|wait_serve_stop");
+
+    controller.abort();
+    await handle.finished;
+  });
+
+  it("does not lose a stop requested before serve registration completes", async () => {
+    mockIPC(makeServeLifecycleIPC());
+
+    const { createNode } = await import("../index.ts");
+    const node = await createNode({ disableNetworking: true });
+    const handle = node.serve(() => new Response("ok"));
+
+    expect(await resolvesWithin(handle.close(), 100)).toBe(true);
+  });
+
+  it("allows serve() → stop → serve() → stop → serve() on the same node", async () => {
+    mockIPC(makeServeLifecycleIPC());
+
+    const { createNode } = await import("../index.ts");
+    const node = await createNode({ disableNetworking: true });
+
+    // Three full serve/stop cycles on the same node — mirrors the device repro
+    // (Test server → stop → HTTP server → stop → Test server). Before the fix,
+    // the third serve() threw "serve() is already running on this node."
+    for (let cycle = 0; cycle < 3; cycle++) {
+      const controller = new AbortController();
+      const handle = node.serve(
+        { signal: controller.signal },
+        () => new Response("ok"),
+      );
+      // Let the deferred `serve` registration + wait_serve_stop wiring settle.
+      await new Promise((r) => setTimeout(r, 0));
+      controller.abort();
+      await handle.finished;
+      // Give the guard-reset microtask a turn.
+      await new Promise((r) => setTimeout(r, 0));
+    }
+
+    // A fourth serve() must still be allowed (guard fully reset every cycle).
+    const controller = new AbortController();
+    expect(() =>
+      node.serve({ signal: controller.signal }, () => new Response("ok"))
+    )
+      .not.toThrow();
+    controller.abort();
   });
 });
 

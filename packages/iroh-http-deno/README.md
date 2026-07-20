@@ -54,7 +54,7 @@ sessions, mDNS discovery, and Ed25519 crypto. See the
 
 ## Deno specifics
 
-- Requires `--unstable-ffi` and `--allow-ffi` flags (Deno FFI is unstable).
+- Requires the `--allow-ffi` permission.
 - Standalone crypto functions (`generateSecretKey`, `secretKeySign`,
   `publicKeyVerify`) are **async**. They round-trip through Rust via FFI.
 - Serve uses a pull model internally: JS polls for incoming requests via
@@ -65,7 +65,7 @@ sessions, mDNS discovery, and Ed25519 crypto. See the
 Deno's permission model applies on top of iroh-http. You'll need at minimum:
 
 ```sh
-deno run --unstable-ffi --allow-ffi --allow-net --allow-env your-app.ts
+deno run --allow-ffi --allow-net --allow-env your-app.ts
 ```
 
 ## Other runtimes
@@ -76,7 +76,5 @@ deno run --unstable-ffi --allow-ffi --allow-net --allow-env your-app.ts
 | Tauri v2 | [`@momics/iroh-http-tauri`](https://www.npmjs.com/package/@momics/iroh-http-tauri) |
 
 ## License
-
-MIT OR Apache-2.0
 
 MIT OR Apache-2.0

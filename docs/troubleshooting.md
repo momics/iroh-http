@@ -15,7 +15,7 @@ Common problems and how to resolve them. Error code meanings are in
 |---------|-------|-----|
 | Peer never receives the connection attempt | Wrong node ID | Double-check the peer's public key (`node.addr()`) |
 | Peer is not serving | `node.serve()` was not called | Call `serve()` before accepting connections |
-| Relay unreachable | No internet / relay down | Check relay reachability; try `relayMode: "disabled"` for LAN-only |
+| Relay unreachable | No internet / relay down | Check relay reachability; try `relay: { mode: "disabled" }` for LAN-only |
 | Both peers behind symmetric NAT | Hole-punching fails | Use relay (default); symmetric NAT cannot be hole-punched |
 
 **Diagnostic steps:**
@@ -78,7 +78,7 @@ for the full list. Most common causes:
    finished the body.
 
 3. **Handle expired by TTL sweep.** The default TTL is 5 minutes. If your
-   handler takes longer, increase `NodeOptions.advanced.handleTtl`. Very long
+   handler takes longer, increase `NodeOptions.internals.handleTtl`. Very long
    streaming operations (e.g., large file uploads over a slow channel) can
    exceed this limit.
 
@@ -174,7 +174,7 @@ console.log(stats);
 ```
 
 `totalHandles` growing unboundedly is a sign of leaked handles (see
-`IrohHandleError` above). `activeConnections` above `maxPooledConnections`
+`IrohHandleError` above). `activeConnections` above `connections.maxPooled`
 indicates the pool is saturated.
 
 ### Node ID format

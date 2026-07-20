@@ -9,6 +9,12 @@ const repoRoot = path.resolve(__dirname, "../..");
 export default defineConfig({
   resolve: {
     alias: {
+      // Shared sources are outside this test app, so normal importer-relative
+      // resolution cannot see the app-local dependency installed in CI.
+      "@tauri-apps/api": path.resolve(
+        __dirname,
+        "node_modules/@tauri-apps/api",
+      ),
       "@momics/iroh-http-tauri": path.resolve(
         __dirname,
         "../../packages/iroh-http-tauri/guest-js/index.ts",

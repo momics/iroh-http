@@ -1,0 +1,4 @@
+interface:
+  display_name: "Manage iroh-http Issues"
+  short_description: "Triage and maintain repository issues safely"
+  default_prompt: "Use $manage-issues to investigate and update this iroh-http issue."

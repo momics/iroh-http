@@ -21,7 +21,7 @@ impl IrohEndpoint {
             h.drain().await;
         }
         self.clear_local_service();
-        self.inner.transport.ep.close().await;
+        self.inner.transport.close().await;
         let _ = self.inner.session.closed_tx.send(true);
     }
 
@@ -38,7 +38,7 @@ impl IrohEndpoint {
             h.abort();
         }
         self.clear_local_service();
-        self.inner.transport.ep.close().await;
+        self.inner.transport.close().await;
         let _ = self.inner.session.closed_tx.send(true);
     }
 
@@ -48,18 +48,34 @@ impl IrohEndpoint {
         let _ = rx.wait_for(|v| *v).await;
     }
 
-    /// Store a serve handle so that `close()` can drain it.
-    ///
-    /// If `stop_serve()` was called before this (the JS abort raced ahead of
-    /// the napi async setup), the handle is immediately shut down so the
-    /// serve loop drains without a second `stop_serve()` call.
-    pub fn set_serve_handle(&self, handle: crate::http::server::ServeHandle) {
-        // Clear the early-stop flag and check if it was set.
-        let was_stopped = self
+    /// Install a newly-created serve cycle in the endpoint's identity-scoped
+    /// slot. Called by the common pure-Rust server path before it spawns the
+    /// accept task, so lifecycle control never depends on an adapter handing
+    /// the handle back later.
+    pub(crate) fn register_serve_handle(&self, handle: crate::http::server::ServeHandle) {
+        let mut guard = self
             .inner
             .session
-            .serve_stopped_early
-            .swap(false, std::sync::atomic::Ordering::AcqRel);
+            .serve_handle
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        if guard
+            .as_ref()
+            .is_some_and(|current| current.is_same_cycle(&handle))
+        {
+            return;
+        }
+
+        if let Some(prev) = guard.take() {
+            prev.shutdown_and_close();
+        }
+
+        // A pure-Rust service has no FFI self-dispatch target, while an FFI
+        // service installs its new weak target only after this token is active.
+        // Clearing here prevents a replacement cycle from briefly routing
+        // self-requests through the previous handler.
+        self.clear_local_service();
 
         *self
             .inner
@@ -67,37 +83,46 @@ impl IrohEndpoint {
             .serve_done_rx
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = Some(handle.subscribe_done());
-
-        if was_stopped {
-            handle.shutdown();
-        }
-
-        *self
-            .inner
-            .session
-            .serve_handle
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = Some(handle);
+        *guard = Some(handle);
     }
 
-    /// Signal the serve loop to stop accepting new connections.
-    pub fn stop_serve(&self) {
-        self.clear_local_service();
+    /// Confirm the serve handle returned to an adapter.
+    ///
+    /// The common server path already registered this token before returning.
+    /// A matching hand-off is therefore a no-op; a different token is a late
+    /// adapter hand-off for an already-replaced cycle and is shut down without
+    /// disturbing the current cycle.
+    pub fn set_serve_handle(&self, handle: crate::http::server::ServeHandle) {
         let guard = self
             .inner
             .session
             .serve_handle
             .lock()
             .unwrap_or_else(|e| e.into_inner());
+        if guard
+            .as_ref()
+            .is_some_and(|current| current.is_same_cycle(&handle))
+        {
+            return;
+        }
+        handle.shutdown_and_close();
+    }
+
+    /// Signal the serve loop to stop accepting new connections.
+    pub fn stop_serve(&self) {
+        // Identity-scoped: the lock selects one concrete cycle, and both the
+        // local service clear and shutdown apply to that same token. A later
+        // serve call creates a new token and is not poisoned by this stop.
+        let guard = self
+            .inner
+            .session
+            .serve_handle
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        self.clear_local_service();
         if let Some(h) = guard.as_ref() {
+            self.inner.session.record_stopped_token(h.token());
             h.shutdown();
-        } else {
-            // Handle not registered yet — set a flag so that
-            // `set_serve_handle` will shut down as soon as it arrives.
-            self.inner
-                .session
-                .serve_stopped_early
-                .store(true, std::sync::atomic::Ordering::Release);
         }
     }
 

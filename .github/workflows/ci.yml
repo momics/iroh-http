@@ -7,7 +7,6 @@ on:
       - 'docs/**'
       - '**.md'
       - '.github/ISSUE_TEMPLATE/**'
-      - '.github/skills/**'
       - '.vscode/**'
       - 'CHANGELOG.md'
       - 'CONTRIBUTING.md'
@@ -19,7 +18,6 @@ on:
       - 'docs/**'
       - '**.md'
       - '.github/ISSUE_TEMPLATE/**'
-      - '.github/skills/**'
       - '.vscode/**'
       - 'CHANGELOG.md'
       - 'CONTRIBUTING.md'
@@ -46,6 +44,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+
+      - name: Agent skill regression tests
+        run: >-
+          python3 -m unittest discover
+          -s .agents/skills/analyze-git-diff/scripts
+          -p 'test_git_diff_report.py'
 
       # ── Formatting (fail fast, before any heavy setup) ───────────────────────
       - uses: denoland/setup-deno@v2
@@ -105,10 +109,16 @@ jobs:
       - name: guest-JS test (iroh-http-tauri)
         run: npm run test:tauri:guest --silent
 
-      - name: release-tooling test (ci-churn guard)
-        # Pure-bash regression test for release.sh's fail-closed auto-revert
-        # guard (#326). No build/publish side effects, so it stays fast.
-        run: npm run test:scripts
+      - name: release-tooling tests
+        # Pure-bash regression tests for release preparation and curated notes.
+        run: |
+          npm run test:scripts
+          bash scripts/tests/release-version.test.sh
+
+      - name: Release version consistency
+        run: |
+          VERSION=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)
+          bash scripts/check-release-version.sh "v$VERSION"
 
       - name: cargo check (no-default-features)
         run: |
@@ -123,6 +133,19 @@ jobs:
         run: |
           npm run typecheck --workspace=packages/iroh-http-shared
           npm run typecheck --workspace=packages/iroh-http-tauri
+
+      - name: Shared discovery lifecycle tests
+        run: npm test --workspace=packages/iroh-http-shared
+
+      - name: Example peer-registry tests
+        run: npm run test:example
+
+      # Clean example build (#350 F1): the Tauri example uses file: links to the
+      # local packages. A clean `tsc` build must resolve PR-only APIs against the
+      # freshly-built dist. This step is what catches the example importing
+      # exports that don't exist in the packages it depends on.
+      - name: Clean example build (examples/tauri)
+        run: npm run build:example
 
       # ── Security audit ────────────────────────────────────────────────────────
       - name: cargo deny (licenses, advisories, bans)
@@ -199,6 +222,15 @@ jobs:
       - name: Cross-runtime compliance (node↔deno)
         run: bash tests/http-compliance/run.sh
 
+      - name: Interop suite unit tests (suite.mjs accounting)
+        run: node --test tests/interop/suite.test.mjs
+
+      - name: Interop suite headless — Node (#340)
+        run: node tests/interop/run-node.mjs
+
+      - name: Interop suite headless — Deno (#340)
+        run: deno run -A tests/interop/run-deno.ts
+
   rust-check-macos:
     name: Rust check (macOS)
     if: github.event_name == 'pull_request' || startsWith(github.ref, 'refs/tags/')
@@ -220,6 +252,8 @@ jobs:
       # macOS job. See issue #333.
       - name: Compile iOS Swift plugin (FFI contract, #333)
         run: bash packages/iroh-http-tauri/scripts/ci-ios-swift-build.sh
+      - name: iOS discovery lifecycle contract
+        run: bash packages/iroh-http-tauri/ios/ContractTests/run.sh
 
   # ── Mobile FFI contract: compile the Android Kotlin plugin sources ───────────
   # Ubuntu (no macOS cost), build-only: no emulator, no NDK, no Rust
@@ -249,6 +283,8 @@ jobs:
           gradle-version: '8.14.3'
       - name: Compile Android Kotlin plugin (FFI contract, #333)
         run: bash packages/iroh-http-tauri/scripts/ci-android-gradle-build.sh
+      - name: Android discovery lifecycle contract
+        run: bash packages/iroh-http-tauri/android-contract-tests/run.sh
 
   rust-check-windows:
     name: Rust check (Windows)

@@ -16,6 +16,7 @@ use std::convert::Infallible;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
+use std::time::Duration;
 
 use bytes::Bytes;
 use iroh_http_core::{fetch, serve, Body, RemoteNodeId, ServeOptions};
@@ -97,4 +98,27 @@ async fn pure_rust_serve_round_trips_with_peer_id_extension() {
 
     // Make Arc references reachable so import is not unused on doc scrape
     let _ = Arc::new(());
+}
+
+/// A pure-Rust serve cycle is owned by the endpoint just like an FFI serve
+/// cycle. Callers must not need a second, adapter-specific registration call
+/// before `stop_serve()` can reach the loop.
+#[tokio::test]
+async fn pure_rust_serve_is_stoppable_in_one_call() {
+    let (server_ep, _client_ep) = common::make_pair().await;
+    let handle = serve(
+        server_ep.clone(),
+        ServeOptions::default(),
+        tower::service_fn(|_req| async {
+            Ok::<_, Infallible>(hyper::Response::new(Body::empty()))
+        }),
+    );
+    let mut done = handle.subscribe_done();
+
+    server_ep.stop_serve();
+
+    tokio::time::timeout(Duration::from_secs(5), done.wait_for(|value| *value))
+        .await
+        .expect("one stop_serve call must stop the pure-Rust serve cycle")
+        .expect("serve done channel must remain open");
 }

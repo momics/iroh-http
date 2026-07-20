@@ -7,6 +7,15 @@
 
 import type { NodeOptions, RelayMode } from "./options/NodeOptions.js";
 
+/**
+ * Encode an explicit relay hint in the node-ticket shape already understood by
+ * every native adapter. Keeping this policy here avoids growing each FFI with a
+ * relay-only argument beside the existing node address and direct hints.
+ */
+export function nodeAddrWithRelay(nodeId: string, relayUrl?: string): string {
+  return relayUrl ? JSON.stringify({ id: nodeId, addrs: [relayUrl] }) : nodeId;
+}
+
 // ── Relay mode normalisation ──────────────────────────────────────────────────
 
 export interface NormalisedRelay {

@@ -73,9 +73,9 @@ interface IrohNode {
   // signatures into one Rust call with the appropriate options struct.
 
   /** Open a WebTransport session to a peer. */
-  connect(
+  dial(
     peer: PublicKey | string,
-    init?: { directAddrs?: string[] },
+    init?: { directAddrs?: string[]; relayUrl?: string },
   ): Promise<IrohSession>;
 
   /** Discover iroh-http peers on the local network via mDNS. */
@@ -99,6 +99,11 @@ interface IrohNode {
   ticket(): Promise<string>;
   /** Get the home relay URL, or null if not connected. */
   homeRelay(): Promise<string | null>;
+  /**
+   * Get this node's own discovery information — its node ID plus the direct
+   * QUIC address(es) and relay URL a peer needs to dial it directly.
+   */
+  discoveryInfo(): Promise<DiscoveryInfo>;
   /** Get address info for a connected peer, or null. */
   peerInfo(peer: PublicKey | string): Promise<NodeAddrInfo | null>;
   /** Get connection statistics for a peer, or null. */
@@ -128,12 +133,14 @@ interface NodeOptions {
   key?: SecretKey | Uint8Array;
 
   // ── Connectivity ──────────────────────────────────────────────────
-  /** Relay mode: "default" | "staging" | "disabled" | relay URL(s). */
-  relayMode?: RelayMode;
+  relay?: { mode?: RelayMode; urls?: string[] };
   /** Local bind address(es). */
   bindAddr?: string | string[];
-  /** QUIC idle timeout in milliseconds. */
-  idleTimeout?: number;
+  connections?: {
+    maxPooled?: number;
+    idleTimeoutMs?: number;
+    poolIdleTimeoutMs?: number;
+  };
 
   // ── Discovery ─────────────────────────────────────────────────────
   discovery?: {
@@ -142,28 +149,23 @@ interface NodeOptions {
   };
 
   // ── Proxy ─────────────────────────────────────────────────────────
-  proxyUrl?: string;
-  proxyFromEnv?: boolean;
+  proxy?: { url?: string; fromEnv?: boolean };
 
   // ── Debug ─────────────────────────────────────────────────────────
-  keylog?: boolean;
-
-  // ── Connection pool ───────────────────────────────────────────────
-  maxPooledConnections?: number;
-  poolIdleTimeoutMs?: number;
+  debug?: { keylog?: boolean };
 
   // ── Compression ───────────────────────────────────────────────────
   compression?: boolean | { level?: number; minBodyBytes?: number };
 
   // ── Limits ────────────────────────────────────────────────────────
   /** Max header block size in bytes. Default: 65 536. */
-  maxHeaderBytes?: number;
+  limits?: { maxHeaderBytes?: number };
 
   // ── Reconnect ─────────────────────────────────────────────────────
   reconnect?: { auto?: boolean; maxRetries?: number };
 
   // ── Advanced ──────────────────────────────────────────────────────
-  advanced?: {
+  internals?: {
     channelCapacity?: number;
     maxChunkSizeBytes?: number;
     handleTtl?: number;
@@ -184,6 +186,8 @@ Extends the standard `RequestInit` with iroh-specific fields.
 interface IrohFetchInit extends RequestInit {
   /** Direct socket addresses to try before relay. */
   directAddrs?: string[];
+  /** Explicit home relay URL, usually obtained from peer discovery. */
+  relayUrl?: string;
 }
 ```
 
@@ -395,7 +399,7 @@ reason about errors.
 4. **TTL sweep.** Any handle that is neither consumed nor explicitly freed
    within the TTL window (default **5 minutes**) is removed by a background
    sweep that runs every 60 seconds. This prevents handle leaks when JS code
-   abandons a request mid-stream. Configure with `NodeOptions.advanced.handleTtl`
+   abandons a request mid-stream. Configure with `NodeOptions.internals.handleTtl`
    (milliseconds).
 
 5. **Per-endpoint scoping.** Each node has its own isolated HandleStore. A
@@ -473,6 +477,13 @@ type RelayMode = "default" | "staging" | "disabled" | string | string[];
 interface NodeAddrInfo {
   id: string;       // Base32-encoded public key
   addrs: string[];   // Relay URLs and/or "host:port" strings
+}
+
+interface DiscoveryInfo {
+  nodeId: string;               // Base32-encoded public key
+  directAddress: string | null; // First direct "host:port" candidate (back-compat)
+  directAddresses: string[];    // All routable direct "host:port" candidates (#348)
+  relayUrl: string | null;      // Home relay URL, or null if not connected
 }
 
 interface PeerStats {
@@ -707,7 +718,7 @@ StoreConfig {
 }
 ```
 
-Configurable via `NodeOptions.advanced` on the JS side:
+Configurable via `NodeOptions.internals` on the JS side:
 `channelCapacity`, `maxChunkSizeBytes`, `handleTtl`.
 
 ### `ServeHandle`
@@ -719,7 +730,7 @@ Returned by `serve()` / `serve_with_events()` at the Rust layer.
 | `shutdown()` | Notify the serve loop to stop accepting new connections |
 | `drain(self)` | Shutdown + await completion (respects `drainTimeout`) |
 | `abort()` | Forcefully cancel the serve task |
-| `done()` | Resolves when the serve task has fully exited |
+| `subscribe_done()` | Watch signal that becomes true when the task exits |
 
 The default drain timeout is **30 seconds** (`DEFAULT_DRAIN_TIMEOUT_MS`).
 `close()` on the JS side maps to `drain()`. `close_force()` maps to `abort()`.
