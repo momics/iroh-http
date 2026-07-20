@@ -25,6 +25,16 @@ use super::{
     EndpointInner, IrohEndpoint,
 };
 
+/// Whether QUIC may batch UDP datagrams using segmentation offload.
+///
+/// Android kernels can advertise this capability and then reject batched sends.
+/// Until noq retries rejected batches as individual datagrams, disabling the
+/// optimization avoids losing the affected packets on Android. Remove this
+/// policy after <https://github.com/n0-computer/noq/pull/746> is released.
+fn segmentation_offload_enabled(target_os: &str) -> bool {
+    target_os != "android"
+}
+
 impl IrohEndpoint {
     /// Bind an Iroh endpoint with the supplied options.
     pub async fn bind(opts: NodeOptions) -> Result<Self, crate::CoreError> {
@@ -142,21 +152,16 @@ impl IrohEndpoint {
             builder = builder.secret_key(SecretKey::from_bytes(&key_bytes));
         }
 
+        let mut transport = QuicTransportConfig::builder()
+            .max_concurrent_bidi_streams(128u32.into())
+            .enable_segmentation_offload(segmentation_offload_enabled(std::env::consts::OS));
         if let Some(ms) = opts.networking.idle_timeout_ms {
             let timeout = IdleTimeout::try_from(Duration::from_millis(ms)).map_err(|e| {
                 crate::CoreError::invalid_input(format!("idle_timeout_ms out of range: {e}"))
             })?;
-            let transport = QuicTransportConfig::builder()
-                .max_idle_timeout(Some(timeout))
-                .max_concurrent_bidi_streams(128u32.into())
-                .build();
-            builder = builder.transport_config(transport);
-        } else {
-            let transport = QuicTransportConfig::builder()
-                .max_concurrent_bidi_streams(128u32.into())
-                .build();
-            builder = builder.transport_config(transport);
+            transport = transport.max_idle_timeout(Some(timeout));
         }
+        builder = builder.transport_config(transport.build());
 
         // Bind address(es).
         for addr_str in &opts.networking.bind_addrs {
@@ -563,6 +568,26 @@ mod direct_addr_tests {
             assert!(
                 parse_direct_addrs(&Some(vec![s.to_string()])).is_err(),
                 "Rust must reject undialable {s:?} that the TS sanitiser rejects"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod transport_policy_tests {
+    use super::segmentation_offload_enabled;
+
+    #[test]
+    fn android_disables_udp_segmentation_offload() {
+        assert!(!segmentation_offload_enabled("android"));
+    }
+
+    #[test]
+    fn non_android_platforms_keep_udp_segmentation_offload() {
+        for target in ["ios", "macos", "linux", "windows"] {
+            assert!(
+                segmentation_offload_enabled(target),
+                "{target} should retain the upstream default"
             );
         }
     }
