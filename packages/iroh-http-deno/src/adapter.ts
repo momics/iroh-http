@@ -66,7 +66,7 @@ function libName(): string {
 }
 
 /** Version must match the tag used for GitHub releases (v0.1.0 → tag v0.1.0). */
-const VERSION = "0.6.0";
+const VERSION = "0.6.1";
 const DOWNLOAD_BASE =
   `https://github.com/momics/iroh-http/releases/download/v${VERSION}`;
 

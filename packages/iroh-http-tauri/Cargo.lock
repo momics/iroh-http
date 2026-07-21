@@ -2454,7 +2454,7 @@ dependencies = [
 
 [[package]]
 name = "iroh-http-adapter"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "iroh-http-core",
  "serde_json",
@@ -2462,7 +2462,7 @@ dependencies = [
 
 [[package]]
 name = "iroh-http-core"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "base32",
  "bytes",
@@ -2490,7 +2490,7 @@ dependencies = [
 
 [[package]]
 name = "iroh-http-discovery"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "base32",
  "futures",
@@ -5149,7 +5149,7 @@ dependencies = [
 
 [[package]]
 name = "tauri-plugin-iroh-http"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "base32",
  "base64 0.22.1",

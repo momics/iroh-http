@@ -1,3 +1,28 @@
+## [0.6.1] - 2026-07-21
+
+### 🐛 Bug Fixes
+
+- *(android)* Manage legacy DNS-SD multicast lifecycle
+- *(release)* Publish curated changelog notes
+- *(android)* Fail closed without legacy multicast service
+- *(core)* Disable QUIC GSO on Android
+- *(release)* Preserve dependency graph during version bump
+
+### 💼 Other
+
+- *(deps)* Bump js-yaml to 4.3.0
+
+### 📚 Documentation
+
+- Align skill review and closure language
+- Complete next-release readiness audit
+- Format mobile setup guides
+- Make mobile release gate executable
+- *(core)* Link Android GSO removal tracker
+
+### ⚙️ Miscellaneous Tasks
+
+- Consolidate project agent skills
 ## [0.6.0] - 2026-07-18
 
 ### 🚀 Features

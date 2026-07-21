@@ -7,7 +7,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-iroh-http-core = { path = "../iroh-http-core", version = "0.6.0" }
+iroh-http-core = { path = "../iroh-http-core", version = "0.6.1" }
 serde_json = "1"
 
 [dev-dependencies]

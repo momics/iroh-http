@@ -1,6 +1,6 @@
 [package]
 name = "tauri-plugin-iroh-http"
-version = "0.6.0"
+version = "0.6.1"
 edition = "2021"
 rust-version = "1.77.2"
 description = "Tauri plugin for iroh-http peer-to-peer HTTP"
@@ -27,8 +27,8 @@ default = ["discovery"]
 discovery = ["dep:iroh-http-discovery"]
 
 [dependencies]
-iroh-http-core = { path = "../../crates/iroh-http-core", version = "0.6.0" }
-iroh-http-adapter = { path = "../../crates/iroh-http-adapter", version = "0.6.0" }
+iroh-http-core = { path = "../../crates/iroh-http-core", version = "0.6.1" }
+iroh-http-adapter = { path = "../../crates/iroh-http-adapter", version = "0.6.1" }
 # Used directly for the endpoint address watcher that refreshes mobile peer
 # advertisements. Inherited from `[workspace.dependencies]` above so it stays
 # locked to the same iroh as iroh-http-core / -adapter.
@@ -58,12 +58,12 @@ if-addrs = "0.15"
 # Mobile always uses the platform-neutral engine, including no-default-feature
 # builds, but supplies native Android/iOS transports instead of Rust mdns.
 [target.'cfg(any(target_os = "android", target_os = "ios"))'.dependencies]
-iroh-http-discovery = { path = "../../crates/iroh-http-discovery", version = "0.6.0", default-features = false, features = ["runtime"] }
+iroh-http-discovery = { path = "../../crates/iroh-http-discovery", version = "0.6.1", default-features = false, features = ["runtime"] }
 
 # Desktop only: mDNS via Rust mdns-sd. On mobile (iOS/Android) mDNS is handled
 # by the native platform layer (NWBrowser / NsdManager) via the mobile bridge.
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
-iroh-http-discovery = { path = "../../crates/iroh-http-discovery", version = "0.6.0", optional = true, default-features = false, features = ["mdns"] }
+iroh-http-discovery = { path = "../../crates/iroh-http-discovery", version = "0.6.1", optional = true, default-features = false, features = ["mdns"] }
 
 [dev-dependencies]
 tauri = { version = "2", features = ["test"] }
