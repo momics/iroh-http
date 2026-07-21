@@ -1,0 +1,8 @@
+{
+  "snapshot": "v0.6.1",
+  "commit": "1473eca6f922f7c921df49ddb2005fa3e8c7a85b",
+  "ref": "refs/tags/v0.6.1",
+  "recorded_at": "2026-07-21T07:45:27Z",
+  "deno_version": "2.8.3",
+  "runner_os": "Linux"
+}
