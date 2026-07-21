@@ -5,6 +5,9 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 PASS=0
 FAIL=0
 
+WORKSPACE_VERSION="$(sed -n 's/^version = "\([^"]*\)"/\1/p' "$ROOT/Cargo.toml" | head -1)"
+RELEASE_TAG="v$WORKSPACE_VERSION"
+
 ok() { PASS=$((PASS + 1)); echo "  ✓ $1"; }
 bad() { FAIL=$((FAIL + 1)); echo "  ✗ $1"; }
 
@@ -55,16 +58,16 @@ new_fixture() {
 FIXTURE="$(new_fixture)"
 trap 'rm -rf "$FIXTURE" "${FIXTURE_2:-}" "${FIXTURE_3:-}" "${FIXTURE_4:-}"' EXIT
 
-expect_pass "consistent release" "$FIXTURE" v0.6.0
+expect_pass "consistent release" "$FIXTURE" "$RELEASE_TAG"
 expect_fail "malformed tag" "$FIXTURE" main
 
 FIXTURE_2="$(new_fixture)"
-sed -i.bak 's/version = "0.6.0"/version = "0.5.2"/' "$FIXTURE_2/packages/iroh-http-tauri/Cargo.toml"
-expect_fail "standalone manifest drift" "$FIXTURE_2" v0.6.0
+sed -i.bak "s/version = \"$WORKSPACE_VERSION\"/version = \"0.0.0\"/" "$FIXTURE_2/packages/iroh-http-tauri/Cargo.toml"
+expect_fail "standalone manifest drift" "$FIXTURE_2" "$RELEASE_TAG"
 
 FIXTURE_3="$(new_fixture)"
 sed -i.bak '/iroh-http-core =/d' "$FIXTURE_3/crates/iroh-http-discovery/Cargo.toml"
-expect_fail "missing internal dependency" "$FIXTURE_3" v0.6.0
+expect_fail "missing internal dependency" "$FIXTURE_3" "$RELEASE_TAG"
 
 FIXTURE_4="$(new_fixture)"
 node -e '
@@ -72,7 +75,7 @@ node -e '
   delete p.optionalDependencies["@momics/iroh-http-node-win32-x64-msvc"];
   fs.writeFileSync(file, JSON.stringify(p, null, 2) + "\n");
 ' "$FIXTURE_4/packages/iroh-http-node/package.json"
-expect_fail "missing Node platform package" "$FIXTURE_4" v0.6.0
+expect_fail "missing Node platform package" "$FIXTURE_4" "$RELEASE_TAG"
 
 echo ""
 echo "  $PASS passed, $FAIL failed"
