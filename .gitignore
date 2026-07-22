@@ -1,6 +1,17 @@
 # Rust
 target/
 
+# Android (Tauri mobile) - Gradle build artifacts
+**/android/.gradle/
+**/android/build/
+**/android/app/build/
+**/android/local.properties
+**/android/.cxx/
+**/gen/android/.gradle/
+**/gen/android/build/
+**/gen/android/app/build/
+**/gen/android/local.properties
+
 # Node
 node_modules/
 
