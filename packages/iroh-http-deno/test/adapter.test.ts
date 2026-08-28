@@ -144,8 +144,8 @@ Deno.test("publicKeyVerify — valid signature passes", async () => {
 
 // Regression #115: serve loop must not hold pending ops after shutdown.
 // This test uses sanitizeOps: true (the Deno default) intentionally —
-// if stopServe() doesn't drain the pending nextRequest() call, Deno's
-// sanitizeOps check will fail.
+// if stopServe() doesn't settle the request-ready wake loop, Deno's sanitizeOps
+// check will fail.
 Deno.test({
   name: "serve — no pending ops remain after signal abort (regression #115)",
   sanitizeOps: true,
@@ -369,19 +369,19 @@ Deno.test({
 
 // Regression #155: iroh_http_close_all (the SIGINT/SIGTERM handler) used to
 // only drain the endpoint registry, leaving serve queues live and the JS
-// polling loop spinning forever. The Deno process would never exit on CTRL+C
+// request loop running forever. The Deno process would never exit on CTRL+C
 // while .serve() was active. close_all must now also wake all serve queues.
 import { _closeAllForTesting } from "../src/adapter.ts";
 
 Deno.test({
-  name: "serve — close_all wakes pending polling loop (regression #155)",
+  name: "serve — close_all wakes pending request loop (regression #155)",
   sanitizeOps: false,
   sanitizeResources: false,
 }, async () => {
   const server = await createNode({ bindAddr: "127.0.0.1:0" });
   const handle = server.serve((_req: Request) => new Response("ok"));
 
-  // Simulate the SIGINT path. Without the fix this never wakes the polling
+  // Simulate the SIGINT path. Without the fix this never wakes the request
   // loop, the test times out, and Deno reports the leaked async op.
   _closeAllForTesting();
 

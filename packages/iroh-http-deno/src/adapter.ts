@@ -256,6 +256,11 @@ const lib = Deno.dlopen(
       result: "i32",
       nonblocking: false,
     },
+    iroh_http_set_request_ready_callback: {
+      parameters: ["u64", "u64", "pointer"],
+      result: "i32",
+      nonblocking: false,
+    },
     // #126: Split-fetch — sync start + sync poll, bypasses spawn_blocking.
     iroh_http_start_fetch: {
       parameters: ["buffer", "usize"],
@@ -276,52 +281,42 @@ const lib = Deno.dlopen(
   } as const,
 );
 
-// ── Fast event-loop yield ─────────────────────────────────────────────────────
-//
-// #126: MessageChannel.postMessage gives ~0.017ms yields vs setTimeout(0)'s
-// ~2.5ms in Deno.  This is critical for same-process client+server latency
-// where the serve loop and fetch completion both need the event loop.
-//
-// Creates a fresh channel per call to avoid keeping the event loop alive
-// when all serve loops have stopped.
+// ── Event-driven serve wakeups ────────────────────────────────────────────────
 
-function createYieldFn(): {
-  yield: () => Promise<void>;
-  cancel: () => void;
-  close: () => void;
-} {
-  const ch = new MessageChannel();
-  let pendingResolve: (() => void) | null = null;
+interface ServeWakeSignal {
+  wait(): Promise<void>;
+  wake(): void;
+}
+
+function createServeWakeSignal(): ServeWakeSignal {
+  let pending = false;
+  let resolve: (() => void) | undefined;
   return {
-    yield: () =>
-      new Promise<void>((resolve) => {
-        pendingResolve = resolve;
-        ch.port2.onmessage = () => {
-          pendingResolve = null;
-          resolve();
-        };
-        ch.port1.postMessage(undefined);
-      }),
-    // #115: Immediately resolve any in-flight yield so the polling loop
-    // can re-poll try_next_request and see the -1 shutdown sentinel
-    // without waiting for the next MessageChannel tick.
-    cancel: () => {
-      pendingResolve?.();
-      pendingResolve = null;
+    wait(): Promise<void> {
+      if (pending) {
+        pending = false;
+        return Promise.resolve();
+      }
+      return new Promise<void>((r) => {
+        resolve = r;
+      });
     },
-    close: () => {
-      ch.port1.close();
-      ch.port2.close();
+    wake(): void {
+      if (resolve) {
+        const current = resolve;
+        resolve = undefined;
+        current();
+      } else {
+        pending = true;
+      }
     },
   };
 }
 
 // ── Per-endpoint serve cancellation ───────────────────────────────────────────
 //
-// #115: stopServe fires an async FFI call. The polling loop may be suspended
-// in `await yielder.yield()` when the Rust side processes the stop. This map
-// lets stopServe immediately cancel the yield so the loop re-polls and sees
-// the -1 shutdown sentinel without a timing-dependent delay.
+// #115: stopServe fires an async FFI call. Wake its request loop immediately;
+// the native shutdown signal wakes it again once the -1 sentinel is visible.
 const serveCancellers = new Map<number, () => void>();
 
 let servePollObserverForTesting: (() => void) | undefined;
@@ -332,6 +327,17 @@ export function _observeServePollsForTesting(
 ): void {
   servePollObserverForTesting = observer;
 }
+
+let nextServeWakeToken = 1n;
+const serveWakeSignals = new Map<bigint, ServeWakeSignal>();
+const serveWakeCallback = Deno.UnsafeCallback.threadSafe(
+  { parameters: ["u64"], result: "void" } as const,
+  (token: bigint | number) => {
+    serveWakeSignals.get(BigInt(token))?.wake();
+  },
+);
+// Keep the module-lifetime pointer valid while allowing an idle process to exit.
+serveWakeCallback.unref();
 
 // `serveStart` crosses the async JSON dispatch bridge. Keep its registration
 // promise so an immediate self-fetch or stop cannot overtake native setup.
@@ -794,7 +800,7 @@ function syncRespond(
 }
 
 /**
- * Sync-poll serve loop (#122).
+ * Event-driven synchronous serve queue drain (#122, #397).
  *
  * Root cause of #122: `nextRequest` and `rawFetch` both go through
  * `iroh_http_call` with `nonblocking: true`, sharing Deno's fixed-size
@@ -802,11 +808,11 @@ function syncRespond(
  * threads, `nextRequest` can't get a thread → circular deadlock → 60s
  * timeout fires.
  *
- * Fix: `iroh_http_try_next_request` is a sync FFI symbol (`nonblocking: false`)
- * that does `try_recv()` on the serve queue — O(1), runs on the JS thread,
- * NEVER enters the thread pool.  JS polls with `setTimeout(0)` yield when
- * the queue is empty.  Under load the queue always has items so there's no
- * latency penalty.
+ * `iroh_http_try_next_request` remains a sync FFI symbol (`nonblocking: false`)
+ * that does `try_recv()` on the serve queue — O(1), runs on the JS thread, and
+ * never enters the thread pool. Rust invokes a module-lifetime, thread-safe
+ * `UnsafeCallback` with an opaque generation token when work arrives. JS then
+ * drains the queue synchronously until empty and sleeps until the next wake.
  *
  * The serve lifecycle still uses `serveStart` / `stopServe` through the
  * dispatch path (they're one-shot calls, no concurrency concern).
@@ -821,6 +827,11 @@ export const rawServe: RawServeFn = (
 ): Promise<void> => {
   // FFI handle as BigInt — endpoint handles are u64 on the Rust side.
   const eh = BigInt(endpointHandle);
+  const wakeToken = nextServeWakeToken++;
+  const wakeSignal = createServeWakeSignal();
+  serveWakeSignals.set(wakeToken, wakeSignal);
+  serveCancellers.set(endpointHandle, () => wakeSignal.wake());
+
   const serveStart = call<Record<never, never>>("serveStart", {
     endpointHandle,
     ...options.serveOptions,
@@ -840,7 +851,7 @@ export const rawServe: RawServeFn = (
   );
   return serveStart.then(
     () => {
-      // Start connection event polling loop if a callback was supplied.
+      // Start the separate connection-event polling loop if requested.
       if (options.onConnectionEvent) {
         const onEv = options.onConnectionEvent;
         (async () => {
@@ -873,13 +884,25 @@ export const rawServe: RawServeFn = (
       // Per-call output buffer for try_next_request (reused across polls).
       let pollBuf = new Uint8Array(4096) as Uint8Array<ArrayBuffer>;
 
+      const registerResult = lib.symbols.iroh_http_set_request_ready_callback(
+        eh,
+        wakeToken,
+        serveWakeCallback.pointer,
+      ) as number;
+      if (registerResult < 0) {
+        serveWakeSignals.delete(wakeToken);
+        serveCancellers.delete(endpointHandle);
+        throw classifyError(
+          JSON.stringify({
+            code: "INVALID_HANDLE",
+            message: "serve queue closed before callback registration",
+          }),
+        );
+      }
       return (async () => {
-        const yielder = createYieldFn();
-        // #115: Register cancel callback so stopServe can break the yield.
-        serveCancellers.set(endpointHandle, () => yielder.cancel());
         try {
           while (true) {
-            // Sync poll — runs on JS thread, never enters spawn_blocking pool.
+            // Sync drain — runs on JS thread, never enters spawn_blocking pool.
             let n = lib.symbols.iroh_http_try_next_request(
               eh,
               pollBuf,
@@ -904,11 +927,7 @@ export const rawServe: RawServeFn = (
             }
 
             if (n === 0) {
-              // Queue empty — yield to the event loop so rawFetch results
-              // and I/O can be processed, then poll again.
-              // #126: MessageChannel gives ~0.017ms yields vs setTimeout(0)'s
-              // ~2.5ms — critical for same-process client+server latency.
-              await yielder.yield();
+              await wakeSignal.wait();
               continue;
             }
 
@@ -947,7 +966,7 @@ export const rawServe: RawServeFn = (
           await Promise.allSettled([...pending]);
         } finally {
           serveCancellers.delete(endpointHandle);
-          yielder.close();
+          serveWakeSignals.delete(wakeToken);
           // #245: Drain the in-flight stopServe op (if any) before resolving
           // so no non-blocking FFI op survives past `handle.finished`.
           const stopOp = serveStopOps.get(endpointHandle);
@@ -956,8 +975,10 @@ export const rawServe: RawServeFn = (
       })();
     },
   ).catch(async (err) => {
+    serveCancellers.delete(endpointHandle);
+    serveWakeSignals.delete(wakeToken);
     // A stop requested while registration was failing still owns an async FFI
-    // op. Drain it even though the polling loop (and its finally block) never
+    // op. Drain it even though the request loop (and its finally block) never
     // existed, so `finished` cannot outlive a Deno op-sanitizer boundary.
     await waitForServeStop(endpointHandle);
     // close_all / closeEndpoint can win the race before serveStart returns.
@@ -979,10 +1000,7 @@ export function makeAllocBodyWriter(endpointHandle: number): AllocBodyWriterFn {
 // Sends QUIC CONNECTION_CLOSE frames so peers observe a clean disconnect.
 function _closeAllSync(): void {
   lib.symbols.iroh_http_close_all();
-  // #245: close_all removes the request queues, but a serve loop parked in
-  // `await yielder.yield()` only re-polls when its MessageChannel turn lands.
-  // Wake every loop explicitly so it sees the -1 sentinel promptly instead of
-  // relying on MessageChannel timing under load.
+  // Ensure every JS loop observes the native -1 shutdown sentinel promptly.
   for (const cancel of serveCancellers.values()) cancel();
 }
 Deno.addSignalListener("SIGTERM", _closeAllSync);
@@ -995,7 +1013,7 @@ globalThis.addEventListener("unload", _closeAllSync);
 /**
  * @internal Test-only hook that triggers the same path as the SIGINT/SIGTERM
  * signal handlers. Used by the regression test for issue #155 to verify that
- * `iroh_http_close_all` wakes pending serve polling loops.
+ * `iroh_http_close_all` wakes pending serve request loops.
  */
 export function _closeAllForTesting(): void {
   _closeAllSync();
@@ -1064,15 +1082,14 @@ export async function closeEndpoint(
 }
 
 export function stopServe(handle: number): void {
-  // #115: Cancel the yield immediately so the polling loop re-polls and
-  // sees the -1 shutdown sentinel without waiting for the MessageChannel.
+  // #115: Wake the drain loop while the native stop operation is starting.
   serveCancellers.get(handle)?.();
   // #245: Register the in-flight op so the serve loop can await it before
   // resolving `finished`; otherwise this non-blocking FFI op can outlive the
   // test boundary and trip Deno's `sanitizeOps` leak detector under load.
   const op = (async () => {
     // Do not let stop overtake an in-flight serve registration. This also
-    // guarantees the polling loop has installed its cancellation hook first.
+    // guarantees the request loop has installed its cancellation hook first.
     await waitForServeStart(handle);
     await call<Record<never, never>>("stopServe", { endpointHandle: handle });
   })().catch(() => {});
@@ -1436,7 +1453,7 @@ export class DenoAdapter extends IrohAdapter {
     },
     callback: (payload: RequestPayload) => Promise<FfiResponseHead>,
   ): Promise<void> {
-    // Delegate to the module-level rawServe which owns the polling loop.
+    // Delegate to the module-level rawServe which owns the request loop.
     return rawServe(endpointHandle, options, callback);
   }
 

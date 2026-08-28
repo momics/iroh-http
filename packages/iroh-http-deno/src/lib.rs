@@ -11,6 +11,8 @@
 //! - `iroh_http_respond`      — send response head for a pending request
 //! - `iroh_http_finish_body`  — signal body-complete (drop writer)
 //! - `iroh_http_cancel_reader`— cancel a body reader
+//! - `iroh_http_try_next_request` — drain a ready serve request
+//! - `iroh_http_set_request_ready_callback` — install serve wake notification
 //!
 //! All async symbols are `nonblocking: true` in the Deno `dlopen` call.
 //! Sync symbols are `nonblocking: false`.
@@ -563,17 +565,40 @@ pub extern "C" fn iroh_http_cancel_reader(endpoint_handle: u64, handle: u64) -> 
     0
 }
 
-// ── Non-blocking serve request polling ────────────────────────────────────────
+// ── Event-driven serve request draining ───────────────────────────────────────
 //
 // #122: The dispatch-based `nextRequest` (via `iroh_http_call` nonblocking:true)
 // deadlocks under concurrent load because it competes for Deno's
 // `spawn_blocking` thread pool with `rawFetch`.
 //
-// Fix: `iroh_http_try_next_request` is a sync FFI symbol (`nonblocking: false`)
-// that calls `try_recv()` on the serve queue — O(1), never blocks.
-// JS polls it in a tight loop with `setTimeout(0)` yield when empty.
-// This keeps request delivery on the JS thread, completely bypassing the
-// thread pool that `rawFetch` uses.
+// `iroh_http_try_next_request` is a sync FFI symbol (`nonblocking: false`) that
+// calls `try_recv()` on the serve queue — O(1), never blocks. A thread-safe
+// Deno callback wakes JS when the queue transitions to ready, then JS drains
+// synchronously until empty. This bypasses the thread pool without idle polling.
+
+/// Register the request-ready callback for the current serve generation.
+///
+/// The callback receives only the opaque `token`; request payloads remain owned
+/// by the bounded Rust queue and are retrieved through
+/// [`iroh_http_try_next_request`].
+///
+/// Returns `0` on success or `-1` if no serve queue exists for the endpoint.
+///
+/// # Safety
+/// `callback` must remain a valid function pointer for as long as the endpoint
+/// can serve. The Deno adapter satisfies this with one module-lifetime callback.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn iroh_http_set_request_ready_callback(
+    endpoint_handle: u64,
+    token: u64,
+    callback: extern "C" fn(u64),
+) -> i32 {
+    let Some(queue) = serve_registry::get(endpoint_handle) else {
+        return -1;
+    };
+    queue.set_request_ready_waker(serve_registry::RequestReadyWaker::new(callback, token));
+    0
+}
 
 /// Try to receive the next queued request without blocking.
 ///
@@ -581,7 +606,7 @@ pub extern "C" fn iroh_http_cancel_reader(endpoint_handle: u64, handle: u64) -> 
 ///
 /// Return value:
 /// - `n > 0` — bytes written; a request is available.
-/// - `0`     — queue empty; call again after yielding.
+/// - `0`     — queue empty; wait for the request-ready callback.
 /// - `-1`    — serve stopped or queue removed; exit the loop.
 /// - `n < -1`— buffer too small; `|n|` bytes required.
 ///
@@ -643,7 +668,7 @@ pub unsafe extern "C" fn iroh_http_try_next_request(
 /// frame before the process exits.
 #[unsafe(no_mangle)]
 pub extern "C" fn iroh_http_close_all() {
-    // Wake all serve polling loops first so JS handlers can settle before the
+    // Wake all serve drain loops first so JS handlers can settle before the
     // endpoints they hold are torn out from under them (regression: issue #155).
     serve_registry::shutdown_all();
     registry::close_all_endpoints();

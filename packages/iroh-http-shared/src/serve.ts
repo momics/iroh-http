@@ -201,7 +201,7 @@ export function makeServe(
   onPeerEvent?: (event: PeerConnectionEvent) => void,
   maxChunkSizeBytes?: number,
 ): ServeFn {
-  // #114: guard against starting two polling loops on the same endpoint.
+  // #114: guard against starting two request loops on the same endpoint.
   let serveRunning = false;
 
   return ((...args: unknown[]): ServeHandle => {
@@ -256,8 +256,8 @@ export function makeServe(
       decompress: options.decompress,
     };
 
-    // rawServe returns a Promise<void> that resolves when its internal polling
-    // loop exits (i.e. after stopServe() causes nextRequest to drain to null).
+    // rawServe resolves after its internal request loop observes native
+    // shutdown and drains all handler tasks.
     const loopDone = adapter.rawServe(
       endpointHandle,
       { onConnectionEvent, serveOptions: ffiServeOpts },
@@ -383,19 +383,19 @@ export function makeServe(
 
     // ISS-029 / #59 / #115: finished resolves when the serve loop actually terminates.
     // `loopDone` is the real loop-lifetime promise returned by rawServe():
-    //  - Deno: resolves when the nextRequest polling loop exits (null sentinel).
+    //  - Deno: resolves when its callback-woken synchronous drain loop exits.
     //  - Node / Tauri: resolves when waitServeStop() confirms the Rust task drained.
     //
-    // #115: finished must NOT resolve via onNodeClose alone. When the node closes,
-    // close_endpoint() calls serve_registry::remove() which sends the shutdown signal
-    // to the pending nextRequest Tokio task — but that task is scheduled, not yet run.
-    // If finished resolved immediately on onNodeClose, the nextRequest FFI op would
-    // still be in-flight (Deno sanitizeOps / process exit timing bug).
+    // #115: finished must NOT resolve via onNodeClose alone. When the node
+    // closes, close_endpoint() removes the serve queue and wakes the Deno
+    // request loop, but that loop still needs an event-loop turn to settle. If
+    // finished resolved immediately, Deno could cross an op-sanitizer or process
+    // exit boundary before the loop completed.
     //
     // Fix: when onNodeClose fires, chain it on loopDone. loopDone is guaranteed to
-    // resolve because close_endpoint always calls serve_registry::remove first, which
-    // unblocks the pending nextRequest. If loopDone resolves first (normal path when
-    // stopServe was called explicitly), the race wins immediately.
+    // resolve because close_endpoint always removes and wakes the native serve
+    // queue first. If loopDone resolves first (normal explicit stop), the race
+    // wins immediately.
     // #119: drain all in-flight body pipes before resolving so callers of
     // `await finished` see a true "all work done" guarantee.
     const finished: Promise<void> = Promise.race([

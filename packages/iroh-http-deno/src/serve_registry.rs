@@ -1,8 +1,9 @@
-//! Per-endpoint request queues for the serve polling model.
+//! Per-endpoint request queues for the Deno serve bridge.
 //!
-//! Because Deno FFI cannot receive Rust callbacks, the serve loop pushes each
-//! incoming [`RequestPayload`] into an `mpsc` channel.  The TypeScript adapter
-//! polls by calling `nextRequest` repeatedly (each call awaits one item).
+//! Incoming [`RequestPayload`] values stay in a bounded `mpsc` channel. A
+//! lifetime-stable Deno `UnsafeCallback` only notifies the TypeScript adapter
+//! that work is ready; TypeScript then synchronously drains the queue. No
+//! borrowed payload pointer crosses the callback boundary.
 //!
 //! Connection events (peer connect/disconnect) are similarly queued — the
 //! TypeScript adapter polls them via `nextConnectionEvent`.
@@ -16,13 +17,30 @@ use tokio::sync::mpsc;
 
 const QUEUE_CAPACITY: usize = 256;
 
-/// A queued request ready to be delivered to the TypeScript polling loop.
+/// A queued request ready to be drained by the TypeScript request loop.
 pub type QueuedRequest = serde_json::Value;
 
 /// A queued connection event (peer connect / disconnect).
 pub type QueuedConnectionEvent = serde_json::Value;
 
-/// Receiver half — held in the registry, polled by `nextRequest` / `nextConnectionEvent`.
+/// Callback that wakes the Deno event loop with an opaque serve-generation token.
+#[derive(Clone, Copy)]
+pub(crate) struct RequestReadyWaker {
+    callback: extern "C" fn(u64),
+    token: u64,
+}
+
+impl RequestReadyWaker {
+    pub(crate) fn new(callback: extern "C" fn(u64), token: u64) -> Self {
+        Self { callback, token }
+    }
+
+    fn wake(self) {
+        (self.callback)(self.token);
+    }
+}
+
+/// Receiver half — held in the registry and drained by the TypeScript adapter.
 pub struct ServeQueue {
     pub tx: mpsc::Sender<QueuedRequest>,
     pub rx: tokio::sync::Mutex<mpsc::Receiver<QueuedRequest>>,
@@ -35,6 +53,33 @@ pub struct ServeQueue {
     /// after `shutdown()` is triggered still see the closed state immediately.
     shutdown_tx: tokio::sync::watch::Sender<bool>,
     pub shutdown_rx: tokio::sync::watch::Receiver<bool>,
+    request_ready_waker: Mutex<Option<RequestReadyWaker>>,
+}
+
+impl ServeQueue {
+    /// Install the request-ready callback and wake it if work arrived first.
+    pub fn set_request_ready_waker(&self, waker: RequestReadyWaker) {
+        *self
+            .request_ready_waker
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(waker);
+
+        let request_waiting = self.rx.try_lock().map(|rx| !rx.is_empty()).unwrap_or(true);
+        if *self.shutdown_rx.borrow() || request_waiting {
+            waker.wake();
+        }
+    }
+
+    /// Notify the TypeScript adapter that it should drain the request queue.
+    pub fn wake_request_loop(&self) {
+        let waker = *self
+            .request_ready_waker
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some(waker) = waker {
+            waker.wake();
+        }
+    }
 }
 
 fn registry() -> &'static Mutex<HashMap<u64, std::sync::Arc<ServeQueue>>> {
@@ -55,6 +100,7 @@ pub fn register(endpoint_handle: u64) -> std::sync::Arc<ServeQueue> {
         conn_rx: tokio::sync::Mutex::new(conn_rx),
         shutdown_tx,
         shutdown_rx,
+        request_ready_waker: Mutex::new(None),
     });
     registry()
         .lock()
@@ -78,32 +124,34 @@ pub fn get(endpoint_handle: u64) -> Option<std::sync::Arc<ServeQueue>> {
 /// blocked `recv()` in `nextRequest`, and any future callers will also observe
 /// the shutdown state immediately (watch persists its last value).
 pub fn remove(endpoint_handle: u64) {
-    if let Some(queue) = registry()
+    let queue = registry()
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .remove(&endpoint_handle)
-    {
-        // Trigger shutdown — this unblocks all pending nextRequest recv() calls.
+        .remove(&endpoint_handle);
+    if let Some(queue) = queue {
+        // Trigger shutdown and wake the event-driven synchronous drain loop.
         let _ = queue.shutdown_tx.send(true);
+        queue.wake_request_loop();
     }
 }
 
 /// Signal shutdown without removing the queue from the registry.
 ///
-/// This allows the JS polling loop to observe shutdown immediately via the
-/// watch channel, while the caller can still drain queued items before the
-/// queue is removed.
+/// This allows the JS request loop to observe shutdown immediately via the
+/// watch channel and wake callback, while the caller can still drain queued
+/// items before the queue is removed.
 pub fn signal_shutdown(endpoint_handle: u64) {
     if let Some(queue) = get(endpoint_handle) {
         let _ = queue.shutdown_tx.send(true);
+        queue.wake_request_loop();
     }
 }
 
 /// Signal shutdown to *every* registered serve queue and drain the registry.
 ///
 /// Called from `iroh_http_close_all` so that a SIGINT path which bypasses
-/// `closeEndpoint` still wakes JS polling loops; otherwise `nextRequest`
-/// would block forever and the Deno process would never exit (issue #155).
+/// `closeEndpoint` still wakes JS request loops; otherwise the Deno process
+/// would never exit (issue #155).
 pub fn shutdown_all() {
     let drained: Vec<std::sync::Arc<ServeQueue>> = {
         let mut map = registry().lock().unwrap_or_else(|e| e.into_inner());
@@ -111,5 +159,6 @@ pub fn shutdown_all() {
     };
     for queue in drained {
         let _ = queue.shutdown_tx.send(true);
+        queue.wake_request_loop();
     }
 }

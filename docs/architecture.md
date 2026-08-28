@@ -1,18 +1,30 @@
 # Architecture
 
-This document describes the actual architecture of iroh-http as built. It is the single source of truth for how the system is structured, what each component does, and why it is structured this way. Update it when the architecture changes — an outdated architecture doc is worse than none.
+This document describes the actual architecture of iroh-http as built. It is the
+single source of truth for how the system is structured, what each component
+does, and why it is structured this way. Update it when the architecture changes
+— an outdated architecture doc is worse than none.
 
-For engineering values and invariants, see [principles.md](principles.md). For detailed rationale behind specific technical choices, see [internals/design-decisions.md](internals/design-decisions.md).
+For engineering values and invariants, see [principles.md](principles.md). For
+detailed rationale behind specific technical choices, see
+[internals/design-decisions.md](internals/design-decisions.md).
 
 ---
 
 ## What This Is
 
-iroh-http is an HTTP implementation over [Iroh](https://iroh.computer/) QUIC transport, exposed to Deno, Node.js, and Tauri via FFI bridges. Nodes are addressed by Ed25519 public key, not by domain name. Two devices that know each other's public key can exchange HTTP requests peer-to-peer, through NATs, without servers or DNS.
+iroh-http is an HTTP implementation over [Iroh](https://iroh.computer/) QUIC
+transport, exposed to Deno, Node.js, and Tauri via FFI bridges. Nodes are
+addressed by Ed25519 public key, not by domain name. Two devices that know each
+other's public key can exchange HTTP requests peer-to-peer, through NATs,
+without servers or DNS.
 
 The **user-facing API** is deliberately familiar:
-- **`fetch()`** — follows the [WHATWG Fetch specification](https://fetch.spec.whatwg.org/)
-- **`serve()`** — follows the [Deno.serve](https://docs.deno.com/api/deno/~/Deno.serve) contract
+
+- **`fetch()`** — follows the
+  [WHATWG Fetch specification](https://fetch.spec.whatwg.org/)
+- **`serve()`** — follows the
+  [Deno.serve](https://docs.deno.com/api/deno/~/Deno.serve) contract
 
 Any deviation from these contracts is a bug unless explicitly documented.
 
@@ -68,75 +80,118 @@ Any deviation from these contracts is a bug unless explicitly documented.
 
 ### iroh-http-core
 
-The Rust crate that owns all transport logic. Platform adapters depend only on its `pub` API — they have no direct dependency on hyper, tower, or iroh internals.
+The Rust crate that owns all transport logic. Platform adapters depend only on
+its `pub` API — they have no direct dependency on hyper, tower, or iroh
+internals.
 
-| File | Responsibility |
-|------|----------------|
-| `http/client.rs` | Pure-Rust `fetch_request()`. Obtains a QUIC connection via the pool, wraps it in `IrohStream`, drives hyper's HTTP/1.1 client, and returns `Response<Body>`. The FFI wrapper and response-body pumps live in `ffi/fetch.rs`. |
-| `http/server/` | `serve()`. Accepts QUIC connections, spawns per-stream hyper HTTP/1.1 handlers, enforces the global request cap through a shared tower `ConcurrencyLimitLayer`, and composes the standard `tower-http` reliability stack (`CompressionLayer`, `RequestDecompressionLayer`, `TimeoutLayer`, `LoadShedLayer`) per ADR-014. `IrohHttpService` is the concrete `tower::Service<Request<Body>, Response = Response<Body>, Error = Infallible>` shell at the hyper boundary; it delegates each request to `FfiDispatcher`, which owns the JS-bridge concerns (handle allocation, `on_request` firing, body-channel pumping, response-head rendezvous, duplex upgrade). The only bespoke layer in the stack is `HandleLayerError`, which converts `tower::timeout::Elapsed` / `tower::load_shed::Overloaded` errors into 408 / 503 responses (no `axum::error_handling::HandleErrorLayer` equivalent exists in plain tower / tower-http — see ADR-013). |
-| `http/transport/pool.rs` | `ConnectionPool`. moka async cache keyed by `NodeId`. `try_get_with` provides single-flight connection establishment — concurrent fetches to the same peer share one connection attempt. Failed attempts are not cached. |
-| `http/transport/io.rs` | `IrohStream`: merges Iroh's split `SendStream`/`RecvStream` into a single `AsyncRead + AsyncWrite` type that hyper can drive directly via `hyper_util::rt::TokioIo`. |
-| `endpoint/` | `IrohEndpoint` lifecycle, transport and resolver configuration, discovery, statistics, observation, and the HTTP/session runtimes. |
-| `ffi/` | Resource registries, request dispatch, body pumps, session operations, and FFI-facing types. Registries use `slotmap` for generational u64 keys. |
-| `addr.rs`, `crypto.rs`, `encoding.rs` | Node-address parsing, signing and verification, key handling, and base32 encoding. |
-| `error.rs`, `lib.rs` | `CoreError`/`ErrorCode`, error serializers, ALPN constants, the public API, and re-exports. |
+| File                                  | Responsibility                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `http/client.rs`                      | Pure-Rust `fetch_request()`. Obtains a QUIC connection via the pool, wraps it in `IrohStream`, drives hyper's HTTP/1.1 client, and returns `Response<Body>`. The FFI wrapper and response-body pumps live in `ffi/fetch.rs`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `http/server/`                        | `serve()`. Accepts QUIC connections, spawns per-stream hyper HTTP/1.1 handlers, enforces the global request cap through a shared tower `ConcurrencyLimitLayer`, and composes the standard `tower-http` reliability stack (`CompressionLayer`, `RequestDecompressionLayer`, `TimeoutLayer`, `LoadShedLayer`) per ADR-014. `IrohHttpService` is the concrete `tower::Service<Request<Body>, Response = Response<Body>, Error = Infallible>` shell at the hyper boundary; it delegates each request to `FfiDispatcher`, which owns the JS-bridge concerns (handle allocation, `on_request` firing, body-channel pumping, response-head rendezvous, duplex upgrade). The only bespoke layer in the stack is `HandleLayerError`, which converts `tower::timeout::Elapsed` / `tower::load_shed::Overloaded` errors into 408 / 503 responses (no `axum::error_handling::HandleErrorLayer` equivalent exists in plain tower / tower-http — see ADR-013). |
+| `http/transport/pool.rs`              | `ConnectionPool`. moka async cache keyed by `NodeId`. `try_get_with` provides single-flight connection establishment — concurrent fetches to the same peer share one connection attempt. Failed attempts are not cached.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `http/transport/io.rs`                | `IrohStream`: merges Iroh's split `SendStream`/`RecvStream` into a single `AsyncRead + AsyncWrite` type that hyper can drive directly via `hyper_util::rt::TokioIo`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `endpoint/`                           | `IrohEndpoint` lifecycle, transport and resolver configuration, discovery, statistics, observation, and the HTTP/session runtimes.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `ffi/`                                | Resource registries, request dispatch, body pumps, session operations, and FFI-facing types. Registries use `slotmap` for generational u64 keys.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `addr.rs`, `crypto.rs`, `encoding.rs` | Node-address parsing, signing and verification, key handling, and base32 encoding.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `error.rs`, `lib.rs`                  | `CoreError`/`ErrorCode`, error serializers, ALPN constants, the public API, and re-exports.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 
 ### Platform Adapters
 
 Each adapter is a thin FFI shim — no logic, no state, just type translation:
 
-| Crate | FFI | Language |
-|-------|-----|----------|
-| `iroh-http-node` | napi-rs v3 | Node.js / Bun |
-| `iroh-http-deno` | Deno FFI (`dlopen`) | Deno |
-| `iroh-http-tauri` | Tauri invoke | Tauri (desktop/mobile) |
+| Crate             | FFI                 | Language               |
+| ----------------- | ------------------- | ---------------------- |
+| `iroh-http-node`  | napi-rs v3          | Node.js / Bun          |
+| `iroh-http-deno`  | Deno FFI (`dlopen`) | Deno                   |
+| `iroh-http-tauri` | Tauri invoke        | Tauri (desktop/mobile) |
 
-Adapters translate between platform types (e.g. `BigInt` ↔ `u64`) and call into iroh-http-core. They do not contain business logic. If an adapter needs something currently `pub(crate)` in core, it must be deliberately promoted and documented.
+Adapters translate between platform types (e.g. `BigInt` ↔ `u64`) and call into
+iroh-http-core. They do not contain business logic. If an adapter needs
+something currently `pub(crate)` in core, it must be deliberately promoted and
+documented.
 
 #### Serve Callback Contract
 
-Core's `serve()` accepts an `on_request: Arc<dyn Fn(RequestPayload) + Send + Sync>` callback. Each adapter implements this differently to bridge into its platform runtime:
+Core's `serve()` accepts an
+`on_request: Arc<dyn Fn(RequestPayload) + Send + Sync>` callback. Each adapter
+implements this differently to bridge into its platform runtime:
 
-| Adapter | Mechanism | Model |
-|---------|-----------|-------|
-| Node | `ThreadsafeFunction` | Push — callback into JS event loop |
-| Deno | `mpsc` queue + `nextRequest()` | Pull — JS polls for requests |
-| Tauri | Tauri `Channel` | Push — event emitted to frontend |
+| Adapter | Mechanism                                            | Model                                                       |
+| ------- | ---------------------------------------------------- | ----------------------------------------------------------- |
+| Node    | `ThreadsafeFunction`                                 | Push — callback into JS event loop                          |
+| Deno    | bounded `mpsc` queue + `UnsafeCallback.threadSafe()` | Push notification — JS synchronously drains queued requests |
+| Tauri   | Tauri `Channel`                                      | Push — event emitted to frontend                            |
 
 **Behavioral guarantees of `on_request`:**
 
-1. Called exactly **once per accepted HTTP request** (one call per QUIC bi-stream).
-2. Called from a Tokio task — the callback must be `Send + Sync` and must not block the Tokio runtime.
-3. The callback receives a `RequestPayload` containing opaque handles; it does not own the underlying resources (those live in the core slab registries).
-4. If the callback is slow, the per-request timeout (`request_timeout_ms`) still applies — the hyper response channel will time out regardless of callback latency.
-5. The callback must not panic. A panic in a Tokio task aborts only that task, but the request will hang until the timeout fires.
+1. Called exactly **once per accepted HTTP request** (one call per QUIC
+   bi-stream).
+2. Called from a Tokio task — the callback must be `Send + Sync` and must not
+   block the Tokio runtime.
+3. The callback receives a `RequestPayload` containing opaque handles; it does
+   not own the underlying resources (those live in the core slab registries).
+4. If the callback is slow, the per-request timeout (`request_timeout_ms`) still
+   applies — the hyper response channel will time out regardless of callback
+   latency.
+5. The callback must not panic. A panic in a Tokio task aborts only that task,
+   but the request will hang until the timeout fires.
 
-Each adapter is responsible for surfacing errors from its callback mechanism. The core does not observe whether the callback succeeded.
+Each adapter is responsible for surfacing errors from its callback mechanism.
+The core does not observe whether the callback succeeded.
+
+The Deno callback carries only an opaque serve-generation token. Request
+payloads remain owned by the bounded Rust queue and cross FFI only when
+`iroh_http_try_next_request` synchronously drains them on the JS thread. One
+module-lifetime `UnsafeCallback` keeps its function pointer valid for every
+endpoint and generation; it is unrefed so an idle server does not keep the
+process alive. Generation-keyed wake signals prevent a late notification from an
+old serve cycle from waking a restarted server.
 
 #### Request-delivery seam (`RequestTransport`)
 
-The shared part of each adapter's `on_request` closure lives once in `iroh-http-adapter` behind the `RequestTransport` seam (ADR-009, #315). Core already acquires the request-body reader / response-body writer, measures header bytes, and fires `on_request` with a `RequestPayload`; the only parts that were duplicated across the three bridges — the header reshape into `Vec<Vec<String>>` and the fail-closed undeliverable fallback — are owned by the adapter:
+The shared part of each adapter's `on_request` closure lives once in
+`iroh-http-adapter` behind the `RequestTransport` seam (ADR-009, #315). Core
+already acquires the request-body reader / response-body writer, measures header
+bytes, and fires `on_request` with a `RequestPayload`; the only parts that were
+duplicated across the three bridges — the header reshape into `Vec<Vec<String>>`
+and the fail-closed undeliverable fallback — are owned by the adapter:
 
 - `DeliverableRequest::from_payload` performs the single header reshape.
-- `RequestTransport::deliver(&DeliverableRequest) -> Result<(), Undeliverable>` is the **only** per-adapter surface. Each bridge maps its native send failure (Node `ThreadsafeFunction` enqueue status; Deno registry-miss / shutdown / queue-full; Tauri `Channel::send`) to `Undeliverable`. It is a generic bound (`T`, monomorphised), not `dyn`, so `#![deny(unsafe_code)]` stays clean.
-- `deliver_request<T>(handles, transport, payload)` reshapes once, delivers, and on `Err` emits the 503 rejection **and** finishes the response body writer exactly once. Finishing the writer is required: core builds the response body from a reader that yields until the writer is finished/dropped, so an undeliverable request that only sent the rejection head would hang until the drain timeout.
+- `RequestTransport::deliver(&DeliverableRequest) -> Result<(), Undeliverable>`
+  is the **only** per-adapter surface. Each bridge maps its native send failure
+  (Node `ThreadsafeFunction` enqueue status; Deno registry-miss / shutdown /
+  queue-full; Tauri `Channel::send`) to `Undeliverable`. It is a generic bound
+  (`T`, monomorphised), not `dyn`, so `#![deny(unsafe_code)]` stays clean.
+- `deliver_request<T>(handles, transport, payload)` reshapes once, delivers, and
+  on `Err` emits the 503 rejection **and** finishes the response body writer
+  exactly once. Finishing the writer is required: core builds the response body
+  from a reader that yields until the writer is finished/dropped, so an
+  undeliverable request that only sent the rejection head would hang until the
+  drain timeout.
 
-Each bridge's `on_request` closure therefore collapses to a single `deliver_request(...)` call. The seam covers **unary** request delivery only; bidirectional streaming uses the separate session-stream API (`Session::create_bidi_stream` / `next_bidi_stream`).
+Each bridge's `on_request` closure therefore collapses to a single
+`deliver_request(...)` call. The seam covers **unary** request delivery only;
+bidirectional streaming uses the separate session-stream API
+(`Session::create_bidi_stream` / `next_bidi_stream`).
 
 ### iroh-http-shared (TypeScript)
 
 Shared TypeScript layer consumed by all JS/TS adapters:
+
 - `Bridge` interface — abstract FFI contract every adapter implements
-- `makeFetch()`, `makeServe()`, `makeConnect()` — compose the user-facing API from a Bridge
+- `makeFetch()`, `makeServe()`, `makeConnect()` — compose the user-facing API
+  from a Bridge
 - `makeReadable()`, `pipeToWriter()` — stream helpers
-- Error classification (`classifyError()` → `IrohError`, `IrohConnectError`, `IrohAbortError`, etc.)
+- Error classification (`classifyError()` → `IrohError`, `IrohConnectError`,
+  `IrohAbortError`, etc.)
 - `PublicKey`, `SecretKey`, key utilities
 
 ---
 
 ## Wire Format
 
-Standard HTTP/1.1 over QUIC bidirectional streams. Each stream carries exactly one request-response exchange. Multiplexing is at the QUIC layer.
+Standard HTTP/1.1 over QUIC bidirectional streams. Each stream carries exactly
+one request-response exchange. Multiplexing is at the QUIC layer.
 
 ```
 GET /path HTTP/1.1\r\n
@@ -146,9 +201,14 @@ Host: <node-id>\r\n
 [HTTP/1.1 chunked body]
 ```
 
-**ALPN strings:** `iroh-http/2` (HTTP request/response) and `iroh-http/2-duplex` (sessions — bi/uni streams, datagrams, server-side `req.upgrade()`). The version bump from 1 to 2 marks the migration from custom framing to hyper. Old and new builds refuse to connect — the ALPN mismatch is intentional.
+**ALPN strings:** `iroh-http/2` (HTTP request/response) and `iroh-http/2-duplex`
+(sessions — bi/uni streams, datagrams, server-side `req.upgrade()`). The version
+bump from 1 to 2 marks the migration from custom framing to hyper. Old and new
+builds refuse to connect — the ALPN mismatch is intentional.
 
-**URL scheme:** `httpi://<public-key>/path` — clean, parseable, and distinct from `http://`. The `Request` constructor normalizes to `http:` internally; `httpi://` is preserved in `Response.url` and `payload.url`.
+**URL scheme:** `httpi://<public-key>/path` — clean, parseable, and distinct
+from `http://`. The `Request` constructor normalizes to `http:` internally;
+`httpi://` is preserved in `Response.url` and `payload.url`.
 
 ---
 
@@ -158,53 +218,67 @@ The shared `ConcurrencyLimitLayer` built in `http/server/accept.rs` is the
 central concurrency gate:
 
 - `max_concurrency` (default: 1024) sets the shared tower limiter capacity.
-- One permit is held **per QUIC bi-stream** (= per HTTP request), not per connection.
+- One permit is held **per QUIC bi-stream** (= per HTTP request), not per
+  connection.
 - The permit is released when the request service future completes.
 - Graceful drain is tracked separately by `DeliveryTracker` in
   `http/server/lifecycle.rs`; an atomic in-flight counter and `Notify` wait
   until responses are transport-acknowledged, stopped, or failed.
 
-This bounds total in-flight requests across all peers. Per-peer limits are enforced separately via `max_connections_per_peer`.
+This bounds total in-flight requests across all peers. Per-peer limits are
+enforced separately via `max_connections_per_peer`.
 
 ---
 
 ## Connection Pool
 
-moka async cache keyed by `NodeId`. The critical choice is `try_get_with` (not `get_with`):
+moka async cache keyed by `NodeId`. The critical choice is `try_get_with` (not
+`get_with`):
+
 - On success: caches the connection for reuse
 - On failure: does **not** cache the error — next caller retries
-- Liveness check before returning a cached connection; on a stale hit the entry is invalidated and one reconnect attempt is made transparently — callers never observe a stale connection
+- Liveness check before returning a cached connection; on a stale hit the entry
+  is invalidated and one reconnect attempt is made transparently — callers never
+  observe a stale connection
 
-This provides single-flight semantics: many concurrent fetches to the same peer share one connection attempt. No thundering herd.
+This provides single-flight semantics: many concurrent fetches to the same peer
+share one connection attempt. No thundering herd.
 
 ---
 
 ## Handle System
 
-All resource state lives in Rust. Platform adapters hold only opaque `u64` handles (slotmap generational keys).
+All resource state lives in Rust. Platform adapters hold only opaque `u64`
+handles (slotmap generational keys).
 
 - Lower 32 bits: slot index
 - Upper 32 bits: generation counter
-- A stale handle fails with `Err("invalid handle")` instead of silently accessing a new resource
+- A stale handle fails with `Err("invalid handle")` instead of silently
+  accessing a new resource
 
-Handles cross FFI as `u64`. In JavaScript: transmitted as `BigInt`, converted at the boundary.
+Handles cross FFI as `u64`. In JavaScript: transmitted as `BigInt`, converted at
+the boundary.
 
 ---
 
 ## Security Defaults
 
-| Limit | Default | Config |
-|-------|---------|--------|
-| Max concurrent requests | 1024 | `ServeOptions::max_concurrency` |
-| Per-request timeout | 60 000 ms | `ServeOptions::request_timeout_ms` |
-| Per-peer connection limit | 8 | `ServeOptions::max_connections_per_peer` |
-| Max request head size | 64 KB | `NodeOptions::max_header_size` |
-| Max request body size | none | `ServeOptions::max_request_body_bytes` |
-| Drain timeout | 30 000 ms | `ServeOptions::drain_timeout_ms` |
+| Limit                     | Default   | Config                                   |
+| ------------------------- | --------- | ---------------------------------------- |
+| Max concurrent requests   | 1024      | `ServeOptions::max_concurrency`          |
+| Per-request timeout       | 60 000 ms | `ServeOptions::request_timeout_ms`       |
+| Per-peer connection limit | 8         | `ServeOptions::max_connections_per_peer` |
+| Max request head size     | 64 KB     | `NodeOptions::max_header_size`           |
+| Max request body size     | none      | `ServeOptions::max_request_body_bytes`   |
+| Drain timeout             | 30 000 ms | `ServeOptions::drain_timeout_ms`         |
 
-All defaults are safe against hostile peers without opt-in. Increasing limits is always explicit.
+All defaults are safe against hostile peers without opt-in. Increasing limits is
+always explicit.
 
-> **Source of truth:** these defaults are defined in `crates/iroh-http-core/src/http/server/options.rs` (e.g. `DEFAULT_CONCURRENCY = 1024`). Docs should mirror those constants — if they ever disagree, the code wins.
+> **Source of truth:** these defaults are defined in
+> `crates/iroh-http-core/src/http/server/options.rs` (e.g.
+> `DEFAULT_CONCURRENCY = 1024`). Docs should mirror those constants — if they
+> ever disagree, the code wins.
 
 ---
 
@@ -218,38 +292,52 @@ JSON envelope: {"code":"TIMEOUT","message":"..."}
 Native error types (DOMException subtypes in JS, etc.)
 ```
 
-Error codes are a finite enum: `InvalidInput`, `ConnectionFailed`, `Timeout`, `BodyTooLarge`, `HeaderTooLarge`, `PeerRejected`, `Cancelled`, `Internal`. New failure modes get new codes — never rely on catch-all.
+Error codes are a finite enum: `InvalidInput`, `ConnectionFailed`, `Timeout`,
+`BodyTooLarge`, `HeaderTooLarge`, `PeerRejected`, `Cancelled`, `Internal`. New
+failure modes get new codes — never rely on catch-all.
 
 ---
 
 ## Compression
 
-Always compiled in and runtime-opt-in through `NodeOptions.compression`.
-Policy: **zstd-only**.
+Always compiled in and runtime-opt-in through `NodeOptions.compression`. Policy:
+**zstd-only**.
 
 ```rust
 tower_http::decompression::DecompressionLayer::new()
     .gzip(false).br(false).deflate(false).zstd(true)
 ```
 
-Compression belongs in core because the Rust layer reads `Accept-Encoding` before JS sees the body. Skipped when: response already has `Content-Encoding`, `Content-Range`, `Cache-Control: no-transform`, or body is a stream.
+Compression belongs in core because the Rust layer reads `Accept-Encoding`
+before JS sees the body. Skipped when: response already has `Content-Encoding`,
+`Content-Range`, `Cache-Control: no-transform`, or body is a stream.
 
 ---
 
 ## Scope Boundaries
 
-The litmus test: *"Has the core already consumed or acted on information before the platform layer sees it?"*
+The litmus test: _"Has the core already consumed or acted on information before
+the platform layer sees it?"_
 
-**If yes → core.** Compression negotiation (core reads `Accept-Encoding`), connection limits (core accepts connections before JS can reject them), transport timeouts, upgrade handshakes.
+**If yes → core.** Compression negotiation (core reads `Accept-Encoding`),
+connection limits (core accepts connections before JS can reject them),
+transport timeouts, upgrade handshakes.
 
-**If no → userland.** Retry logic, caching, rate limiting, auth, tracing export, middleware. The core exposes enough information for userland to implement these; it does not implement them itself.
+**If no → userland.** Retry logic, caching, rate limiting, auth, tracing export,
+middleware. The core exposes enough information for userland to implement these;
+it does not implement them itself.
 
 ---
 
 ## Open Questions
 
-- [ ] Can `hyper-util` pooling replace the custom moka pool via trait impls on the Iroh transport?
-- [ ] Does the Iroh transport support extended CONNECT for WebTransport over HTTP/2, or does it require HTTP/3?
-- [ ] What is the error type hierarchy per target language? Is it consistent and documented?
-- [ ] How are streaming request/response bodies and WebTransport streams represented across FFI?
-- [ ] Path to h3: requires a `h3-noq` crate (analogous to `h3-quinn` but for Iroh's noq fork) — upstream work
+- [ ] Can `hyper-util` pooling replace the custom moka pool via trait impls on
+      the Iroh transport?
+- [ ] Does the Iroh transport support extended CONNECT for WebTransport over
+      HTTP/2, or does it require HTTP/3?
+- [ ] What is the error type hierarchy per target language? Is it consistent and
+      documented?
+- [ ] How are streaming request/response bodies and WebTransport streams
+      represented across FFI?
+- [ ] Path to h3: requires a `h3-noq` crate (analogous to `h3-quinn` but for
+      Iroh's noq fork) — upstream work

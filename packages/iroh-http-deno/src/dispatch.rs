@@ -111,10 +111,11 @@ fn err_adapter(e: AdapterInputError) -> Value {
 }
 
 /// Deno request transport: enqueues each request onto the serve-registry mpsc
-/// queue polled by the Deno event loop. Registry-miss, serve-shutdown, and
-/// queue-full are Deno-local transport-reachability failures mapped to
-/// [`Undeliverable`]; [`deliver_request`] then sends the fail-closed 503 and
-/// finishes the response body (the latter fixes the pre-#315 hang).
+/// queue, then wakes the Deno event loop to synchronously drain it.
+/// Registry-miss, serve-shutdown, and queue-full are Deno-local
+/// transport-reachability failures mapped to [`Undeliverable`];
+/// [`deliver_request`] then sends the fail-closed 503 and finishes the response
+/// body (the latter fixes the pre-#315 hang).
 struct DenoTransport {
     handle: u64,
 }
@@ -154,6 +155,7 @@ impl RequestTransport for DenoTransport {
             tracing::warn!("iroh-http-deno: serve queue full — dropping request with 503");
             return Err(Undeliverable::new("deno serve queue full"));
         }
+        q.wake_request_loop();
         Ok(())
     }
 }
@@ -842,7 +844,7 @@ async fn stop_serve(p: Value) -> Value {
         }
     };
     ep.stop_serve();
-    // Signal shutdown immediately so the JS polling loop stops dequeuing.
+    // Signal shutdown immediately so the JS drain loop stops dequeuing.
     // The watch channel persists its value — any in-flight or future
     // `try_next_request` call sees shutdown and returns -1.
     serve_registry::signal_shutdown(handle);
@@ -868,8 +870,8 @@ async fn stop_serve(p: Value) -> Value {
     // callback reject promptly without a registry miss.  The entry is
     // replaced by the next `serve_start` or removed by `close_endpoint`.
     //
-    // (Supersedes DENO-002 — the JS polling loop now stops via the
-    // shutdown watch channel, not channel disconnection.)
+    // (Supersedes DENO-002 — the JS drain loop now stops via the shutdown
+    // watch channel and request-ready wake callback, not channel disconnection.)
     //
     // #122: wait for the previous serve loop to fully terminate before returning.
     // Without this, a subsequent `serve_start` on the same endpoint would
