@@ -21,7 +21,7 @@
   "devDependencies": {
     "@tauri-apps/api": "^2.11.1",
     "jsdom": "^29.1.0",
-    "typescript": "^5",
+    "typescript": "^7",
     "vitest": "^4.1.9"
   },
   "dependencies": {
