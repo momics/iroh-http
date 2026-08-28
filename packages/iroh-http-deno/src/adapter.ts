@@ -324,6 +324,15 @@ function createYieldFn(): {
 // the -1 shutdown sentinel without a timing-dependent delay.
 const serveCancellers = new Map<number, () => void>();
 
+let servePollObserverForTesting: (() => void) | undefined;
+
+/** @internal Test-only observer for synchronous serve queue polls. */
+export function _observeServePollsForTesting(
+  observer: (() => void) | undefined,
+): void {
+  servePollObserverForTesting = observer;
+}
+
 // `serveStart` crosses the async JSON dispatch bridge. Keep its registration
 // promise so an immediate self-fetch or stop cannot overtake native setup.
 const serveStartOps = new Map<number, Promise<Record<never, never>>>();
@@ -868,7 +877,6 @@ export const rawServe: RawServeFn = (
         const yielder = createYieldFn();
         // #115: Register cancel callback so stopServe can break the yield.
         serveCancellers.set(endpointHandle, () => yielder.cancel());
-        let pollCount = 0;
         try {
           while (true) {
             // Sync poll — runs on JS thread, never enters spawn_blocking pool.
@@ -878,7 +886,7 @@ export const rawServe: RawServeFn = (
               BigInt(pollBuf.byteLength),
             ) as number;
 
-            pollCount++;
+            servePollObserverForTesting?.();
 
             if (n < -1) {
               // Buffer too small — grow and retry immediately.

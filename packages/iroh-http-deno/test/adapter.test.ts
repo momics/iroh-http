@@ -20,7 +20,10 @@ import {
 } from "jsr:@std/assert@^1";
 import { createNode, PublicKey } from "../mod.ts";
 import { generateSecretKey, publicKeyVerify, secretKeySign } from "../mod.ts";
-import { bigintToSafeNumber } from "../src/adapter.ts";
+import {
+  _observeServePollsForTesting,
+  bigintToSafeNumber,
+} from "../src/adapter.ts";
 
 async function waitFor(
   predicate: () => Promise<boolean>,
@@ -158,6 +161,44 @@ Deno.test({
   ac.abort();
   await server.close();
   await handle.finished;
+});
+
+// Regression: #397 — an idle server must sleep until Rust reports work.
+//
+// The MessageChannel yield previously caused the synchronous queue poller to
+// run continuously even when no request was queued, saturating one CPU core.
+Deno.test({
+  name: "serve — idle queue does not continuously poll (regression #397)",
+  sanitizeOps: true,
+}, async () => {
+  let polls = 0;
+  _observeServePollsForTesting(() => polls++);
+
+  const server = await createNode({ disableNetworking: true });
+  const ac = new AbortController();
+  const handle = server.serve(
+    { signal: ac.signal },
+    () => new Response("ok"),
+  );
+
+  try {
+    await waitFor(
+      () => Promise.resolve(polls > 0),
+      "serve loop did not inspect its request queue",
+    );
+    const idleBaseline = polls;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assertEquals(
+      polls,
+      idleBaseline,
+      "idle serve loop polled without a request-ready notification",
+    );
+  } finally {
+    _observeServePollsForTesting(undefined);
+    ac.abort();
+    await handle.finished;
+    await server.close();
+  }
 });
 
 Deno.test({
