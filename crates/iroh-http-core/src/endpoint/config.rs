@@ -3,12 +3,17 @@
 use crate::http::server::stack::CompressionOptions;
 
 /// Networking / QUIC transport configuration.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct NetworkingOptions {
     /// Relay server mode. `"default"`, `"staging"`, `"disabled"`, or `"custom"`. Default: `"default"`.
     pub relay_mode: Option<String>,
     /// Custom relay server URLs. Only used when `relay_mode` is `"custom"`.
     pub relays: Vec<String>,
+    /// Optional bearer token applied to every configured custom relay.
+    ///
+    /// This is rejected unless `relay_mode` is `"custom"`. Its value is
+    /// deliberately redacted from this type's [`std::fmt::Debug`] output.
+    pub relay_auth_token: Option<String>,
     /// UDP socket addresses to bind. Empty means OS-assigned.
     pub bind_addrs: Vec<String>,
     /// Milliseconds before an idle QUIC connection is cleaned up.
@@ -20,6 +25,24 @@ pub struct NetworkingOptions {
     /// Disable relay servers and DNS discovery entirely. Overrides `relay_mode`.
     /// Useful for in-process tests where endpoints connect via direct addresses.
     pub disabled: bool,
+}
+
+impl std::fmt::Debug for NetworkingOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NetworkingOptions")
+            .field("relay_mode", &self.relay_mode)
+            .field("relays", &self.relays)
+            .field(
+                "relay_auth_token",
+                &self.relay_auth_token.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("bind_addrs", &self.bind_addrs)
+            .field("idle_timeout_ms", &self.idle_timeout_ms)
+            .field("proxy_url", &self.proxy_url)
+            .field("proxy_from_env", &self.proxy_from_env)
+            .field("disabled", &self.disabled)
+            .finish()
+    }
 }
 
 /// DNS-based peer discovery configuration.

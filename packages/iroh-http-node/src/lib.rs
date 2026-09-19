@@ -378,6 +378,7 @@ pub struct JsNodeOptions {
     pub idle_timeout: Option<f64>,
     pub relay_mode: Option<String>,
     pub relays: Option<Vec<String>>,
+    pub relay_auth_token: Option<String>,
     pub bind_addrs: Option<Vec<String>>,
     pub dns_discovery: Option<String>,
     pub dns_discovery_enabled: Option<bool>,
@@ -441,6 +442,7 @@ pub async fn create_endpoint(options: Option<JsNodeOptions>) -> napi::Result<JsE
                 networking: NetworkingOptions {
                     relay_mode: o.relay_mode,
                     relays: o.relays.unwrap_or_default(),
+                    relay_auth_token: o.relay_auth_token,
                     bind_addrs: o.bind_addrs.unwrap_or_default(),
                     idle_timeout_ms: endpoint.idle_timeout_ms,
                     proxy_url: o.proxy_url,
