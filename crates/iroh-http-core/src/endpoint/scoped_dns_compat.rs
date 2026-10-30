@@ -1,17 +1,16 @@
 //! Temporary compatibility for scoped IPv6 DNS nameservers.
 //!
-//! This module exists because released `iroh-dns` accepts a full
-//! `SocketAddrV6` and then its Hickory adapter reduces it to `addr.ip()`,
-//! discarding the interface scope required to route link-local nameservers.
+//! This module exists because released Iroh constructs nameserver
+//! configurations from `IpAddr`, discarding the interface scope required to
+//! route link-local nameservers.
 //! See ADR-013 and the removal tracker:
 //! <https://github.com/momics/iroh-http/issues/368>.
 //!
 //! Upstream ownership:
-//! - <https://github.com/hickory-dns/hickory-dns/issues/3713>
-//! - <https://github.com/n0-computer/iroh/pull/4210>
+//! - <https://github.com/n0-computer/iroh/issues/4210>
 //! - <https://github.com/n0-computer/iroh/pull/4419>
 //!
-//! Per ADR-013, `iroh-dns` and its resolver transport are the ecosystem
+//! Per ADR-013, Iroh and its resolver transport are the ecosystem
 //! implementation we should use. The concrete incompatibility is that the
 //! released transport cannot preserve a destination scope ID. This private
 //! UDP-only forwarder is therefore a release bridge, not a supported DNS
@@ -89,8 +88,8 @@ impl ScopedDnsCompat {
 
 /// Per-endpoint forwarding proxy for a scoped IPv6 DNS nameserver.
 ///
-/// `iroh-dns`/Hickory preserves a configured nameserver's port but represents
-/// its destination as an `IpAddr`, which cannot carry an IPv6 scope ID. The
+/// Iroh's nameserver configuration preserves the port but constructs its
+/// destination from an `IpAddr`, which cannot carry an IPv6 scope ID. The
 /// resolver therefore talks to `local_addr`, while this task forwards each
 /// datagram to the exact scoped upstream address. Dropping the handle aborts
 /// the listener and all in-flight forwards.
