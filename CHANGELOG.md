@@ -1,3 +1,23 @@
+## [0.7.0] - 2026-10-30
+
+### 🚀 Features
+
+- *(core, adapters)* Add optional per-fetch `connectTimeout` across Rust, shared
+  TypeScript, Node.js, Deno, and Tauri, with typed `CONNECT_TIMEOUT` /
+  `IrohConnectError` failures and connection-pool coverage (#411, #400)
+
+### 🔒 Security and Dependencies
+
+- *(deps)* Upgrade Iroh from 1.0.2 to 1.4.1 and refresh compatible Rust and npm
+  dependencies to resolve the release audit findings (#410, #409)
+
+### 🛠 Compatibility and CI
+
+- Preserve the scoped IPv6 DNS compatibility guard (#368) and Android QUIC GSO
+  workaround (#388) while adapting to Iroh 1.4.1 (#410)
+- Update atomic handle allocation for the current Rust API and stop hosted
+  Android CI from requesting the removed legacy SDK tools package (#410)
+
 ## [0.6.2] - 2026-08-28
 
 ### 🐛 Bug Fixes

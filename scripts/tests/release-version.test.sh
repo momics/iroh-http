@@ -46,6 +46,7 @@ new_fixture() {
   cp "$ROOT/packages/iroh-http-deno/deno.jsonc" "$fixture/packages/iroh-http-deno/deno.jsonc"
   cp "$ROOT/packages/iroh-http-deno/src/adapter.ts" "$fixture/packages/iroh-http-deno/src/adapter.ts"
   cp "$ROOT/packages/iroh-http-node/Cargo.toml" "$fixture/packages/iroh-http-node/Cargo.toml"
+  cp "$ROOT/packages/iroh-http-node/index.js" "$fixture/packages/iroh-http-node/index.js"
   cp "$ROOT/packages/iroh-http-node/package.json" "$fixture/packages/iroh-http-node/package.json"
   cp -R "$ROOT/packages/iroh-http-node/npm/." "$fixture/packages/iroh-http-node/npm/"
   cp "$ROOT/packages/iroh-http-shared/package.json" "$fixture/packages/iroh-http-shared/package.json"
@@ -56,7 +57,7 @@ new_fixture() {
 }
 
 FIXTURE="$(new_fixture)"
-trap 'rm -rf "$FIXTURE" "${FIXTURE_2:-}" "${FIXTURE_3:-}" "${FIXTURE_4:-}"' EXIT
+trap 'rm -rf "$FIXTURE" "${FIXTURE_2:-}" "${FIXTURE_3:-}" "${FIXTURE_4:-}" "${FIXTURE_5:-}"' EXIT
 
 expect_pass "consistent release" "$FIXTURE" "$RELEASE_TAG"
 expect_fail "malformed tag" "$FIXTURE" main
@@ -76,6 +77,18 @@ node -e '
   fs.writeFileSync(file, JSON.stringify(p, null, 2) + "\n");
 ' "$FIXTURE_4/packages/iroh-http-node/package.json"
 expect_fail "missing Node platform package" "$FIXTURE_4" "$RELEASE_TAG"
+
+FIXTURE_5="$(new_fixture)"
+node -e '
+  const fs=require("fs"); const file=process.argv[1]; const version=process.argv[2];
+  const source=fs.readFileSync(file, "utf8");
+  const quote=String.fromCharCode(39);
+  fs.writeFileSync(file, source.replace(
+    `bindingPackageVersion !== ${quote}${version}${quote}`,
+    `bindingPackageVersion !== ${quote}0.0.0${quote}`,
+  ));
+' "$FIXTURE_5/packages/iroh-http-node/index.js" "$WORKSPACE_VERSION"
+expect_fail "generated Node loader drift" "$FIXTURE_5" "$RELEASE_TAG"
 
 echo ""
 echo "  $PASS passed, $FAIL failed"
