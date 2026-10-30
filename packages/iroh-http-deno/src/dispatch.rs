@@ -1058,7 +1058,7 @@ static DISCOVERY_HANDLE_COUNTER: AtomicU32 = AtomicU32::new(1);
 #[cfg(feature = "discovery")]
 fn alloc_discovery_handle() -> Result<u32, &'static str> {
     DISCOVERY_HANDLE_COUNTER
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+        .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
             current.checked_add(1)
         })
         .map_err(|_| "discovery handle space exhausted")
