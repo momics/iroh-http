@@ -44,6 +44,9 @@ pub enum FetchError {
         detail: String,
         source: Option<hyper::Error>,
     },
+    /// The connection-phase timeout elapsed while dialing a new Iroh
+    /// connection. Live pooled connections never produce this error.
+    ConnectTimeout,
     /// The caller-supplied request body yielded an error while Hyper was
     /// streaming it. This is a local request-production failure, not evidence
     /// that the pooled transport is unhealthy.
@@ -73,6 +76,7 @@ impl std::fmt::Display for FetchError {
             FetchError::ConnectionFailed { detail, .. } => {
                 write!(f, "connection failed: {detail}")
             }
+            FetchError::ConnectTimeout => f.write_str("connection timed out"),
             FetchError::RequestBodyFailed { detail, .. } => {
                 write!(f, "request body failed: {detail}")
             }
@@ -196,10 +200,12 @@ fn caller_request_body_error_detail(error: &hyper::Error) -> Option<String> {
 /// # Errors
 ///
 /// Returns [`FetchError::Timeout`] if `cfg.timeout` is set and elapsed
-/// before the response head arrived. Connection / handshake / transport
-/// failures map to [`FetchError::ConnectionFailed`]. A caller-supplied request
-/// body error maps to [`FetchError::RequestBodyFailed`] and retains the Hyper
-/// and original body-error source chain.
+/// before the response head arrived. Returns [`FetchError::ConnectTimeout`] if
+/// `cfg.connect_timeout` elapses while establishing a new pooled connection.
+/// Connection / handshake / transport failures map to
+/// [`FetchError::ConnectionFailed`]. A caller-supplied request body error maps
+/// to [`FetchError::RequestBodyFailed`] and retains the Hyper and original
+/// body-error source chain.
 pub async fn fetch_request(
     endpoint: &IrohEndpoint,
     addr: &iroh::EndpointAddr,
@@ -386,7 +392,7 @@ async fn attempt_send(
 
     let (pooled, reused) = match endpoint
         .pool()
-        .get_or_connect(node_id, ALPN, || async move {
+        .get_or_connect(node_id, ALPN, cfg.connect_timeout, || async move {
             ep_raw
                 .connect(addr_clone, ALPN)
                 .await
@@ -395,7 +401,11 @@ async fn attempt_send(
         .await
     {
         Ok(v) => v,
-        Err(e) => {
+        Err(crate::http::transport::pool::ConnectError::Timeout) => {
+            *last_dial_seq.lock().unwrap_or_else(|e| e.into_inner()) = None;
+            return (Err(FetchError::ConnectTimeout), false);
+        }
+        Err(crate::http::transport::pool::ConnectError::Failed(e)) => {
             // No connection was obtained — clear the identity so a subsequent
             // eviction (e.g. on timeout) is a no-op rather than closing an
             // unrelated cached connection.

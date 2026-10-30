@@ -137,6 +137,11 @@ pub(crate) type ClientService =
 pub struct StackConfig {
     /// Per-request timeout. `None` ⇒ no `TimeoutLayer` is applied.
     pub timeout: Option<Duration>,
+    /// Timeout applied only while establishing a new pooled connection.
+    ///
+    /// Live pooled connections bypass this timeout. `None` leaves connection
+    /// establishment governed only by the underlying Iroh transport.
+    pub connect_timeout: Option<Duration>,
     /// Maximum **wire** request body size before the server rejects with 413.
     ///
     /// This limit is applied **before** decompression, i.e. it counts compressed
@@ -173,6 +178,7 @@ impl Default for StackConfig {
     fn default() -> Self {
         Self {
             timeout: None,
+            connect_timeout: None,
             max_request_body_wire_bytes: None,
             max_request_body_decoded_bytes: None,
             load_shed: false,
@@ -191,6 +197,13 @@ impl StackConfig {
     #[must_use]
     pub fn with_timeout(mut self, timeout: Option<Duration>) -> Self {
         self.timeout = timeout;
+        self
+    }
+
+    /// Set [`Self::connect_timeout`] using the builder pattern.
+    #[must_use]
+    pub fn with_connect_timeout(mut self, connect_timeout: Option<Duration>) -> Self {
+        self.connect_timeout = connect_timeout;
         self
     }
 
@@ -538,6 +551,7 @@ mod tests {
     fn default_cfg() -> StackConfig {
         StackConfig {
             timeout: None,
+            connect_timeout: None,
             max_request_body_wire_bytes: Some(1024 * 1024),
             max_request_body_decoded_bytes: Some(1024 * 1024),
             load_shed: true,

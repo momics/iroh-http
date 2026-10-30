@@ -406,7 +406,7 @@ export declare function publicKeyVerify(publicKey: Uint8Array, data: Uint8Array,
  *
  * Low-level function — the shared TS layer wraps this in `makeFetch`.
  */
-export declare function rawFetch(endpointHandle: number, nodeId: string, url: string, method: string, headers: Array<Array<string>>, reqBodyHandle: bigint | undefined | null, fetchToken: bigint, directAddrs?: Array<string> | undefined | null, timeoutMs?: number | undefined | null, decompress?: boolean | undefined | null, maxResponseBodyBytes?: number | undefined | null): Promise<JsFfiResponse>
+export declare function rawFetch(endpointHandle: number, nodeId: string, url: string, method: string, headers: Array<Array<string>>, reqBodyHandle: bigint | undefined | null, fetchToken: bigint, directAddrs?: Array<string> | undefined | null, timeoutMs?: number | undefined | null, decompress?: boolean | undefined | null, maxResponseBodyBytes?: number | undefined | null, connectTimeoutMs?: number | undefined | null): Promise<JsFfiResponse>
 
 /**
  * Call once per request from the JS handler to send the response head.

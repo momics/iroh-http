@@ -1448,6 +1448,7 @@ pub async fn raw_fetch(
     timeout_ms: Option<f64>,
     decompress: Option<bool>,
     max_response_body_bytes: Option<f64>,
+    connect_timeout_ms: Option<f64>,
 ) -> napi::Result<JsFfiResponse> {
     let ep = get_endpoint(endpoint_handle)?;
     let opts = coerce_fetch_options(RawFetchOptions {
@@ -1457,6 +1458,7 @@ pub async fn raw_fetch(
         direct_addrs,
         headers,
         timeout_ms,
+        connect_timeout_ms,
         max_response_body_bytes,
     })
     .map_err(ffi_adapter_invalid_arg)?;
@@ -1469,8 +1471,11 @@ pub async fn raw_fetch(
     let addrs = parse_direct_addrs(&opts.direct_addrs)
         .map_err(|e| napi::Error::new(Status::InvalidArg, e))?;
     let timeout = opts.timeout_ms.map(std::time::Duration::from_millis);
+    let connect_timeout = opts
+        .connect_timeout_ms
+        .map(std::time::Duration::from_millis);
     let max_resp = opts.max_response_body_bytes;
-    let res = iroh_http_core::fetch(
+    let res = iroh_http_core::fetch_with_connect_timeout(
         &ep,
         &opts.node_id,
         &opts.url,
@@ -1479,6 +1484,7 @@ pub async fn raw_fetch(
         req_body_reader,
         Some(get_handle(fetch_token)?),
         addrs.as_deref(),
+        connect_timeout,
         timeout,
         decompress.unwrap_or(true),
         max_resp,

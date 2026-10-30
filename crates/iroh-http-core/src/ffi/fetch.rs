@@ -38,6 +38,43 @@ pub async fn fetch(
     decompress: bool,
     max_response_body_bytes: Option<usize>,
 ) -> Result<FfiResponse, CoreError> {
+    fetch_with_connect_timeout(
+        endpoint,
+        remote_node_id,
+        url,
+        method,
+        headers,
+        req_body_reader,
+        fetch_token,
+        direct_addrs,
+        None,
+        timeout,
+        decompress,
+        max_response_body_bytes,
+    )
+    .await
+}
+
+/// FFI-shaped fetch with a timeout applied only while dialing a new connection.
+///
+/// `connect_timeout` is ignored for self-fetches and verified-live pooled
+/// connections. When omitted, connection establishment keeps its existing
+/// transport-defined behavior.
+#[allow(clippy::too_many_arguments)]
+pub async fn fetch_with_connect_timeout(
+    endpoint: &IrohEndpoint,
+    remote_node_id: &str,
+    url: &str,
+    method: &str,
+    headers: &[(String, String)],
+    req_body_reader: Option<BodyReader>,
+    fetch_token: Option<u64>,
+    direct_addrs: Option<&[std::net::SocketAddr]>,
+    connect_timeout: Option<Duration>,
+    timeout: Option<Duration>,
+    decompress: bool,
+    max_response_body_bytes: Option<usize>,
+) -> Result<FfiResponse, CoreError> {
     // Reject standard web schemes.
     {
         let lower = url.to_ascii_lowercase();
@@ -135,12 +172,14 @@ pub async fn fetch(
 
     // Wire FFI-supplied knobs into the shared stack config.
     // - `timeout` bounds time-to-response-head inside `fetch_request`.
+    // - `connect_timeout` bounds only a new Iroh dial on a pool miss.
     // - `decompress` toggles the tower-http Decompression layer.
     // Per-frame body-read timeout and the response-body byte limit are
     // enforced below by `pump_hyper_body_to_channel_limited`; cancellation and
     // token cleanup are centralized by `run_with_cancel_and_timeout`.
     let cfg = crate::http::server::stack::StackConfig {
         timeout,
+        connect_timeout,
         decompression: decompress,
         ..crate::http::server::stack::StackConfig::default()
     };
@@ -252,6 +291,7 @@ where
 fn fetch_error_to_core(e: FetchError) -> CoreError {
     match e {
         FetchError::ConnectionFailed { detail, .. } => CoreError::connection_failed(detail),
+        FetchError::ConnectTimeout => CoreError::connection_timeout("connection timed out"),
         FetchError::RequestBodyFailed { detail, .. } => {
             CoreError::internal(format!("request body failed: {detail}"))
         }

@@ -95,6 +95,14 @@ export interface IrohFetchInit extends RequestInit {
   /** Per-request timeout in milliseconds.  Overrides the endpoint-wide default. */
   requestTimeout?: number;
   /**
+   * Timeout in milliseconds for establishing a new Iroh connection.
+   *
+   * Live pooled connections bypass this timeout. When omitted, connection
+   * establishment uses Iroh's transport-defined timeout behavior.
+   * Range: 0 through 300_000.
+   */
+  connectTimeout?: number;
+  /**
    * When `false`, the response body bytes are returned exactly as received
    * (no decompression layer).  Useful when forwarding a compressed payload
    * downstream or when the caller wants to decompress itself.
@@ -117,6 +125,8 @@ export interface CloseOptions {
 export interface FetchOptions {
   /** Per-request timeout in milliseconds.  Overrides endpoint default. */
   timeoutMs?: number;
+  /** Timeout in milliseconds applied only while dialing a new connection. */
+  connectTimeoutMs?: number;
   /** When `false`, the response body is not decompressed. @default true */
   decompress?: boolean;
   /** Per-call response body byte limit. Range: 0 through 256 MiB. */

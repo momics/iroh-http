@@ -178,7 +178,8 @@ export class IrohNode extends EventTarget {
    *
    * @param input An `httpi://<peer-public-key>/path` URL, as a string or `URL`.
    * @param init Standard `RequestInit` plus Iroh extras (`directAddrs`,
-   *   `relayUrl`, `requestTimeout`, `decompress`, `maxResponseBodyBytes`).
+   *   `relayUrl`, `requestTimeout`, `connectTimeout`, `decompress`,
+   *   `maxResponseBodyBytes`).
    *   Supports cancellation via `init.signal`.
    * @returns The peer's `Response`.
    *

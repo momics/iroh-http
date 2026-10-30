@@ -43,7 +43,7 @@ pub use http::server::{
 
 // ── FFI bridge surface (`mod ffi`) ────────────────────────────────
 pub use ffi::dispatcher::{ffi_serve, ffi_serve_with_callback, respond};
-pub use ffi::fetch::fetch;
+pub use ffi::fetch::{fetch, fetch_with_connect_timeout};
 #[allow(clippy::disallowed_types)] // FFI re-exports at crate root
 pub use ffi::handles::{
     make_body_channel, BodyReader, HandleStore, ResponseHeadEntry, StoreConfig,

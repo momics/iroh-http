@@ -91,7 +91,7 @@ export class IrohBindError extends IrohError {
  * try {
  *   const res = await node.fetch(peerId.toURL('/api'));
  * } catch (e) {
- *   if (e instanceof IrohConnectError && e.code === 'TIMEOUT') {
+ *   if (e instanceof IrohConnectError && e.code === 'CONNECT_TIMEOUT') {
  *     console.error('Peer unreachable — try again later');
  *   }
  * }
@@ -153,15 +153,9 @@ export class IrohHandleError extends IrohStreamError {
 // ── Classification ────────────────────────────────────────────────────────────
 
 /**
- * Map a raw Rust error string to the appropriate structured error class.
- *
- * The Rust layer uses stable, prefixed error messages (e.g. `"connect: …"`,
- * `"parse response head: …"`).  This function uses those prefixes plus a few
- * keyword tests to pick the right subclass and code.
- *
- * Long-term the Rust side should emit structured `{ code, message }` JSON,
- * but string-prefix matching is sufficient while the error messages are
- * under our control.
+ * Map the Rust layer's structured `{ code, message }` envelope to the
+ * appropriate error class. Unknown or malformed values retain an `UNKNOWN`
+ * code rather than relying on message text for classification.
  */
 export function classifyError(raw: string | unknown): IrohError {
   // Pass through already-classified errors unchanged.
@@ -225,6 +219,7 @@ export function classifyError(raw: string | unknown): IrohError {
 function classifyByCode(code: string, msg: string): IrohError {
   switch (code) {
     // ── Connection errors ──────────────────────────────────────────────────
+    case "CONNECT_TIMEOUT":
     case "TIMEOUT":
       return new IrohConnectError(msg, code);
     case "DNS_FAILURE":

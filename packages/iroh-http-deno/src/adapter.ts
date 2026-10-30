@@ -700,6 +700,7 @@ export const rawFetch: RawFetchFn = async (
         : null,
       directAddrs: directAddrs ?? null,
       timeout_ms: fetchOptions?.timeoutMs ?? null,
+      connect_timeout_ms: fetchOptions?.connectTimeoutMs ?? null,
       decompress: fetchOptions?.decompress ?? null,
       max_response_body_bytes: fetchOptions?.maxResponseBodyBytes ?? null,
     },

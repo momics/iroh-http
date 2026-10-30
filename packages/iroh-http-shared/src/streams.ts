@@ -56,6 +56,8 @@ export interface PipeToWriterOptions {
    * {@link pipeToWriter} for the full rationale.
    */
   skipFinishOnError?: boolean;
+  /** Internal lifecycle hook for coordinating one-shot writer cleanup. */
+  releaseWriter?: () => Promise<void>;
   /**
    * Maximum size (bytes) of each `sendChunk` piece. Larger source chunks are
    * split into pieces of at most this size. Defaults to 64 KiB.
@@ -106,6 +108,8 @@ export async function pipeToWriter(
   options?: PipeToWriterOptions,
 ): Promise<void> {
   const skipFinishOnError = options?.skipFinishOnError ?? false;
+  const releaseWriter = options?.releaseWriter ??
+    (() => adapter.finishBody(handle));
   // Match the Rust-side max chunk size so each sendChunk is a single
   // channel push (O(1) when the channel has capacity). Honors the node's
   // configured maxChunkSizeBytes (#287). A fractional or non-positive value
@@ -143,14 +147,14 @@ export async function pipeToWriter(
     reader.releaseLock();
     if (completed) {
       // Clean end-of-body: the source drained without error.
-      await adapter.finishBody(handle);
+      await releaseWriter();
     } else if (!skipFinishOnError) {
       // Errored, but this call site has no reset mechanism (e.g. response
       // bodies). Best-effort finish so the peer isn't left waiting for EOF and
       // the handle doesn't leak until the TTL sweep. Swallow any finishBody
       // error so it can't mask the original failure that `finally` re-throws.
       try {
-        await adapter.finishBody(handle);
+        await releaseWriter();
       } catch {
         // ignore — the original error propagates
       }
