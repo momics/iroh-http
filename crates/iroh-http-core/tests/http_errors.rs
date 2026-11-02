@@ -4,7 +4,8 @@ mod common;
 use bytes::Bytes;
 use iroh_http_core::respond;
 use iroh_http_core::{
-    fetch, ffi_serve, IrohEndpoint, NetworkingOptions, NodeOptions, RequestPayload, ServeOptions,
+    fetch, fetch_with_connect_timeout, ffi_serve, IrohEndpoint, NetworkingOptions, NodeOptions,
+    RequestPayload, ServeOptions,
 };
 
 // -- Fetch cancellation -------------------------------------------------------
@@ -30,6 +31,7 @@ async fn fetch_cancelled_via_token() {
         },
     );
 
+    let baseline = client_ep.handles().count_handles().3;
     let token = client_ep.handles().alloc_fetch_token().unwrap();
 
     // Cancel as soon as the server has received the request — no sleep needed.
@@ -58,6 +60,7 @@ async fn fetch_cancelled_via_token() {
         result.unwrap_err().code,
         iroh_http_core::ErrorCode::Cancelled
     );
+    assert_eq!(client_ep.handles().count_handles().3, baseline);
 }
 
 // -- respond() error path -----------------------------------------------------
@@ -150,6 +153,45 @@ async fn fetch_unknown_peer() {
             res.status
         ),
     }
+}
+
+#[tokio::test]
+async fn connection_timeout_is_typed_and_releases_fetch_token() {
+    let fake_key = iroh_http_core::generate_secret_key().unwrap();
+    let fake_pk = iroh::SecretKey::from_bytes(&fake_key).public();
+    let fake_id = iroh_http_core::base32_encode(fake_pk.as_bytes());
+    let client_ep = IrohEndpoint::bind(NodeOptions {
+        networking: NetworkingOptions {
+            disabled: true,
+            ..Default::default()
+        },
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    let baseline = client_ep.handles().count_handles().3;
+    let token = client_ep.handles().alloc_fetch_token().unwrap();
+    let unreachable = ["192.0.2.1:9".parse().expect("valid test-net address")];
+
+    let error = fetch_with_connect_timeout(
+        &client_ep,
+        &fake_id,
+        "/",
+        "GET",
+        &[],
+        None,
+        Some(token),
+        Some(&unreachable),
+        Some(std::time::Duration::from_millis(25)),
+        Some(std::time::Duration::from_secs(5)),
+        true,
+        None,
+    )
+    .await
+    .expect_err("zero connection timeout should expire");
+
+    assert_eq!(error.code, iroh_http_core::ErrorCode::ConnectionTimeout);
+    assert_eq!(client_ep.handles().count_handles().3, baseline);
 }
 
 /// Request timeout: server handler takes longer than `request_timeout_ms`;

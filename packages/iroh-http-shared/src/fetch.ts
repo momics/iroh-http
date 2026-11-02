@@ -70,12 +70,17 @@ export function makeFetch(
       init?.requestTimeout,
       "requestTimeout",
     );
+    const connectTimeout = validateJsonSafeNumber(
+      init?.connectTimeout,
+      "connectTimeout",
+    );
     const maxResponseBodyBytes = validateJsonSafeNumber(
       init?.maxResponseBodyBytes,
       "maxResponseBodyBytes",
     );
     const fetchOptions = {
       timeoutMs: requestTimeout,
+      connectTimeoutMs: connectTimeout,
       decompress: init?.decompress,
       maxResponseBodyBytes,
     };
@@ -126,12 +131,12 @@ export function makeFetch(
     // This fires even if the signal is already aborted.
     let cancelAbortListener: (() => void) | null = null;
     if (signal) {
-      if (signal.aborted) {
-        adapter.cancelFetch(fetchToken);
-        throw new DOMException("The operation was aborted", "AbortError");
-      }
       cancelAbortListener = () => adapter.cancelFetch(fetchToken);
-      signal.addEventListener("abort", cancelAbortListener, { once: true });
+      if (signal.aborted) {
+        cancelAbortListener();
+      } else {
+        signal.addEventListener("abort", cancelAbortListener, { once: true });
+      }
     }
 
     // Build an abort promise for the JS-side race (still needed so the Promise
@@ -141,7 +146,11 @@ export function makeFetch(
       ? new Promise<never>((_, reject) => {
         onAbort = () =>
           reject(new DOMException("The operation was aborted", "AbortError"));
-        signal.addEventListener("abort", onAbort);
+        if (signal.aborted) {
+          onAbort();
+        } else {
+          signal.addEventListener("abort", onAbort);
+        }
       })
       : null;
 
@@ -163,14 +172,30 @@ export function makeFetch(
       fetchOptions,
     );
 
+    // A failed fetch drops the Rust BodyReader, but the JS-owned writer handle
+    // remains registered until finishBody removes it. Release it only after the
+    // native fetch has settled: doing so earlier could present a truncated
+    // upload as clean EOF while the request stream is still live.
+    let requestBodyWriterReleased = false;
+    const releaseRequestBodyWriter = async (): Promise<void> => {
+      if (reqBodyHandle === null || requestBodyWriterReleased) return;
+      requestBodyWriterReleased = true;
+      try {
+        await adapter.finishBody(reqBodyHandle);
+      } catch {
+        // The successful body pipe may already have removed the handle.
+      }
+    };
+
     // NOW start the body pipe — rawFetch has been dispatched to Rust, so the
     // body reader will have a consumer by the time the channel fills up.
-    if (bodyStream && reqBodyHandle !== null) {
+    if (bodyStream && reqBodyHandle !== null && !signal?.aborted) {
       // skipFinishOnError: on a mid-stream failure, do NOT call finishBody — a
       // clean finish would present a truncated body to the peer as complete.
       // The catch below resets the request stream via cancelFetch instead.
       bodyPipePromise = pipeToWriter(adapter, bodyStream, reqBodyHandle, {
         skipFinishOnError: true,
+        releaseWriter: releaseRequestBodyWriter,
         maxChunkSizeBytes,
       });
       // If the body source fails mid-stream, reset the request stream instead
@@ -193,6 +218,18 @@ export function makeFetch(
         ? await Promise.race([fetchPromise, abortPromise])
         : await fetchPromise;
     } catch (err) {
+      if (reqBodyHandle !== null) {
+        if (err instanceof DOMException && err.name === "AbortError") {
+          // Preserve immediate AbortSignal rejection while deferring native
+          // writer cleanup until cancellation has dropped the Rust reader.
+          void fetchPromise.then(
+            releaseRequestBodyWriter,
+            releaseRequestBodyWriter,
+          );
+        } else {
+          await releaseRequestBodyWriter();
+        }
+      }
       if (err instanceof DOMException && err.name === "AbortError") throw err;
       throw classifyError(err);
     } finally {

@@ -388,6 +388,7 @@ pub struct RawFetchOptions {
     pub direct_addrs: Option<Vec<String>>,
     pub headers: Vec<Vec<String>>,
     pub timeout_ms: Option<f64>,
+    pub connect_timeout_ms: Option<f64>,
     pub max_response_body_bytes: Option<f64>,
 }
 
@@ -400,6 +401,7 @@ pub struct FetchOptions {
     pub direct_addrs: Option<Vec<String>>,
     pub headers: Vec<(String, String)>,
     pub timeout_ms: Option<u64>,
+    pub connect_timeout_ms: Option<u64>,
     pub max_response_body_bytes: Option<usize>,
 }
 
@@ -419,6 +421,10 @@ pub fn coerce_fetch_options(raw: RawFetchOptions) -> Result<FetchOptions, Adapte
         .timeout_ms
         .map(|ms| safe_f64_to_u64(ms, "timeoutMs", MAX_TIMEOUT_MS))
         .transpose()?;
+    let connect_timeout_ms = raw
+        .connect_timeout_ms
+        .map(|ms| safe_f64_to_u64(ms, "connectTimeoutMs", MAX_TIMEOUT_MS))
+        .transpose()?;
     let max_response_body_bytes = raw
         .max_response_body_bytes
         .map(|b| safe_f64_to_usize(b, "maxResponseBodyBytes", MAX_RESPONSE_BODY_BYTES))
@@ -430,6 +436,7 @@ pub fn coerce_fetch_options(raw: RawFetchOptions) -> Result<FetchOptions, Adapte
         direct_addrs: raw.direct_addrs,
         headers,
         timeout_ms,
+        connect_timeout_ms,
         max_response_body_bytes,
     })
 }
@@ -589,6 +596,7 @@ pub fn core_error_to_json(e: &CoreError) -> String {
     let code = match e.code {
         ErrorCode::InvalidInput => "INVALID_INPUT",
         ErrorCode::ConnectionFailed => "REFUSED",
+        ErrorCode::ConnectionTimeout => "CONNECT_TIMEOUT",
         ErrorCode::Timeout => "TIMEOUT",
         ErrorCode::BodyTooLarge => "BODY_TOO_LARGE",
         ErrorCode::HeaderTooLarge => "HEADER_TOO_LARGE",
@@ -701,6 +709,14 @@ mod tests {
         let json = core_error_to_json(&e);
         assert!(json.contains("\"code\":\"TIMEOUT\""));
         assert!(json.contains("timed out"));
+    }
+
+    #[test]
+    fn core_error_to_json_connection_timeout() {
+        let e = CoreError::connection_timeout("dial timed out");
+        let json = core_error_to_json(&e);
+        assert!(json.contains("\"code\":\"CONNECT_TIMEOUT\""));
+        assert!(json.contains("dial timed out"));
     }
 
     #[test]
@@ -956,11 +972,13 @@ mod tests {
             direct_addrs: Some(vec!["127.0.0.1:1234".to_string()]),
             headers: vec![vec!["x".to_string(), "y".to_string()]],
             timeout_ms: Some(1000.0),
+            connect_timeout_ms: Some(500.0),
             max_response_body_bytes: Some(2048.0),
         })
         .expect("valid fetch options");
         assert_eq!(ok.headers, vec![("x".to_string(), "y".to_string())]);
         assert_eq!(ok.timeout_ms, Some(1000));
+        assert_eq!(ok.connect_timeout_ms, Some(500));
         assert_eq!(ok.max_response_body_bytes, Some(2048));
 
         // Invalid node id is rejected.
@@ -971,6 +989,7 @@ mod tests {
             direct_addrs: None,
             headers: vec![],
             timeout_ms: None,
+            connect_timeout_ms: None,
             max_response_body_bytes: None,
         });
         assert!(matches!(bad_node, Err(AdapterInputError::InvalidNodeId)));
@@ -983,12 +1002,31 @@ mod tests {
             direct_addrs: None,
             headers: vec![],
             timeout_ms: Some((MAX_TIMEOUT_MS + 1) as f64),
+            connect_timeout_ms: None,
             max_response_body_bytes: None,
         });
         assert!(matches!(
             bad_timeout,
             Err(AdapterInputError::InvalidArgument {
                 field: "timeoutMs",
+                ..
+            })
+        ));
+
+        let bad_connect_timeout = coerce_fetch_options(RawFetchOptions {
+            node_id: "aaaa".to_string(),
+            url: "httpi://peer/".to_string(),
+            method: "GET".to_string(),
+            direct_addrs: None,
+            headers: vec![],
+            timeout_ms: None,
+            connect_timeout_ms: Some((MAX_TIMEOUT_MS + 1) as f64),
+            max_response_body_bytes: None,
+        });
+        assert!(matches!(
+            bad_connect_timeout,
+            Err(AdapterInputError::InvalidArgument {
+                field: "connectTimeoutMs",
                 ..
             })
         ));
@@ -1010,6 +1048,7 @@ mod tests {
                 direct_addrs: None,
                 headers: vec![],
                 timeout_ms: None,
+                connect_timeout_ms: None,
                 max_response_body_bytes: Some(value as f64),
             })
             .expect("response limit through the core default should be accepted");
@@ -1024,6 +1063,7 @@ mod tests {
             direct_addrs: None,
             headers: vec![],
             timeout_ms: None,
+            connect_timeout_ms: None,
             max_response_body_bytes: Some((CORE_DEFAULT_MAX_RESPONSE_BODY_BYTES + 1) as f64),
         });
         assert!(matches!(

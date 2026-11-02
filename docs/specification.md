@@ -190,6 +190,11 @@ interface IrohFetchInit extends RequestInit {
   relayUrl?: string;
   /** Per-request timeout in milliseconds. Maximum: 300 000. */
   requestTimeout?: number;
+  /**
+   * Timeout in milliseconds for establishing a new Iroh connection.
+   * Maximum: 300 000. Omitted = use Iroh's transport-defined behavior.
+   */
+  connectTimeout?: number;
   /** Whether to decompress the response body. Default: true. */
   decompress?: boolean;
   /**
@@ -343,7 +348,8 @@ All errors extend `IrohError`. Adapters must use these exact class names and
 
 | Rust error code | JS class | `name` property | When |
 |---|---|---|---|
-| `TIMEOUT` | `IrohConnectError` | `"NetworkError"` | Connection timeout |
+| `CONNECT_TIMEOUT` | `IrohConnectError` | `"NetworkError"` | A new Iroh connection was not established within `connectTimeout` |
+| `TIMEOUT` | `IrohConnectError` | `"NetworkError"` | Whole-request timeout before the response head |
 | `REFUSED` | `IrohConnectError` | `"NetworkError"` | Connection refused |
 | `PEER_REJECTED` | `IrohConnectError` | `"NetworkError"` | Peer rejected connection |
 | `BODY_TOO_LARGE` | `IrohProtocolError` | `"IrohProtocolError"` | Body exceeds limit |
@@ -671,6 +677,19 @@ in-process to the node's own serve service (ADR-015) rather than dialing over
 QUIC, which iroh refuses for self-connections. This requires an active
 `serve()`; otherwise it returns a `CONNECTION_FAILED` error explaining the
 missing server.
+
+`IrohFetchInit.connectTimeout` is optional and accepts the same JSON-safe
+integer range as `requestTimeout`: 0 through 300 000 milliseconds. It applies
+only when a pool miss, or an evicted stale pooled connection, requires
+`Endpoint::connect`. A verified-live pooled connection bypasses it. Opening the
+HTTP bidirectional stream, completing the Hyper handshake, dispatching the
+request, and waiting for the response head remain governed only by
+`requestTimeout`. Omitting `connectTimeout` preserves the transport-defined
+connection behavior used before this option existed.
+
+Concurrent pool misses retain moka single-flight semantics: one dial runs for a
+peer/ALPN key and all waiters observe its shared success, connection failure, or
+`CONNECT_TIMEOUT` result. Failed, timed-out, and cancelled dials are not cached.
 
 A dedicated `connect`/`raw_connect` FFI symbol no longer exists; bidirectional connections go through the session API (`session_connect`, `session_create_bidi_stream`, etc., see below).
 
