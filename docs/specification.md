@@ -5,7 +5,7 @@
 > adapter must expose. Coding-style guidance lives in [guidelines/](guidelines/README.md);
 > behavioural details live in [features/](features/README.md).
 >
-> **As of iroh-http-core 0.4.0.** Update this stamp when the public API changes.
+> **As of iroh-http-core 0.7.0.** Update this stamp when the public API changes.
 
 ---
 
