@@ -22,7 +22,7 @@ use iroh::{
 /// [`AddressLookupSource`] for every independent browse session.
 ///
 /// Retiring a source removes it from all future [`AddressLookup::resolve`]
-/// snapshots. Iroh 1.0.2 can separately retain paths it already consumed in
+/// snapshots. Iroh 1.4.1 can separately retain paths it already consumed in
 /// its private remote-path cache; that cache has no public invalidation API and
 /// is cleared only with the endpoint itself.
 #[derive(Debug, Clone)]

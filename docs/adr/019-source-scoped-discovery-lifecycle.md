@@ -60,7 +60,7 @@ instance, owner, and terminal-state identities at the adapter seams.
   the same node during restart, interface migration, or overlapping callers.
 - Iroh's address-lookup registry supports adding a provider but not removing
   one. A retired provider must therefore become empty and harmless.
-- Iroh 1.0.2 copies lookup results into a private `RemotePathState`. Its public
+- Iroh 1.4.1 copies lookup results into a private `RemotePathState`. Its public
   API has no way to invalidate addresses that were already consumed by an
   earlier dial; provider retirement can prevent future resolution but cannot
   synchronously purge that internal path cache.

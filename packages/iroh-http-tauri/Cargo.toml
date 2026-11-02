@@ -2,7 +2,7 @@
 name = "tauri-plugin-iroh-http"
 version = "0.6.2"
 edition = "2021"
-rust-version = "1.77.2"
+rust-version = "1.91"
 description = "Tauri plugin for iroh-http peer-to-peer HTTP"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/momics/iroh-http"
@@ -13,10 +13,10 @@ links = "tauri-plugin-iroh-http"
 
 # This crate is its own standalone workspace (not a member of the repo-root
 # workspace). Pin `iroh` here so `[dependencies]` can inherit it with
-# `workspace = true` — the same `"1.0"` requirement the repo root pins — keeping
+# `workspace = true` — the same exact requirement the repo root pins — keeping
 # this crate's iroh locked to the same version as iroh-http-core / -adapter.
 [workspace.dependencies]
-iroh = "1.0"
+iroh = "=1.4.1"
 
 # staticlib = iOS, cdylib = Android, rlib = desktop / tests
 [lib]

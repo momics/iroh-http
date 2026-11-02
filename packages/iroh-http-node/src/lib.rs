@@ -248,7 +248,7 @@ static DISCOVERY_HANDLE_COUNTER: AtomicU32 = AtomicU32::new(1);
 #[cfg(feature = "discovery")]
 fn alloc_discovery_handle() -> napi::Result<u32> {
     DISCOVERY_HANDLE_COUNTER
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+        .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
             current.checked_add(1)
         })
         .map_err(|_| {
