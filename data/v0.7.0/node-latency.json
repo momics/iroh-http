@@ -1,0 +1,52 @@
+[
+  {
+    "name": "node/iroh/cold-connect",
+    "unit": "us",
+    "value": 13406.878
+  },
+  {
+    "name": "node/native/cold-connect",
+    "unit": "us",
+    "value": 1515.2230999999972
+  },
+  {
+    "name": "node/iroh/warm-request",
+    "unit": "us",
+    "value": 1004.2272399999979
+  },
+  {
+    "name": "node/native/warm-request",
+    "unit": "us",
+    "value": 962.7086000000077
+  },
+  {
+    "name": "node/iroh/multiplex-x8",
+    "unit": "us",
+    "value": 3096.51264000001
+  },
+  {
+    "name": "node/native/multiplex-x8",
+    "unit": "us",
+    "value": 3003.748919999971
+  },
+  {
+    "name": "node/iroh/multiplex-x32",
+    "unit": "us",
+    "value": 9111.465679999992
+  },
+  {
+    "name": "node/native/multiplex-x32",
+    "unit": "us",
+    "value": 7164.81127999994
+  },
+  {
+    "name": "node/iroh/serve-rps",
+    "unit": "us",
+    "value": 559.5499999999083
+  },
+  {
+    "name": "node/native/serve-rps",
+    "unit": "us",
+    "value": 243.27299999997194
+  }
+]
