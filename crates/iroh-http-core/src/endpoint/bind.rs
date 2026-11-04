@@ -12,7 +12,7 @@ use std::{sync::Arc, time::Duration};
 use iroh::{
     address_lookup::{DnsAddressLookup, PkarrPublisher},
     endpoint::{IdleTimeout, QuicTransportConfig},
-    Endpoint, RelayMode, SecretKey,
+    Endpoint, RelayMap, RelayMode, SecretKey,
 };
 
 use crate::ffi::handles::{HandleStore, StoreConfig};
@@ -55,37 +55,7 @@ impl IrohEndpoint {
             ));
         }
 
-        let relay_mode = if opts.networking.disabled {
-            RelayMode::Disabled
-        } else {
-            match opts.networking.relay_mode.as_deref() {
-                None | Some("default") => RelayMode::Default,
-                Some("staging") => RelayMode::Staging,
-                Some("disabled") => RelayMode::Disabled,
-                Some("custom") => {
-                    if opts.networking.relays.is_empty() {
-                        return Err(crate::CoreError::invalid_input(
-                            "relay_mode \"custom\" requires at least one URL in `relays`",
-                        ));
-                    }
-                    let urls = opts
-                        .networking
-                        .relays
-                        .iter()
-                        .map(|u| {
-                            u.parse::<iroh::RelayUrl>()
-                                .map_err(crate::CoreError::invalid_input)
-                        })
-                        .collect::<Result<Vec<_>, _>>()?;
-                    RelayMode::custom(urls)
-                }
-                Some(other) => {
-                    return Err(crate::CoreError::invalid_input(format!(
-                        "unknown relay_mode: {other}"
-                    )))
-                }
-            }
-        };
+        let relay_mode = configured_relay_mode(&opts.networking)?;
 
         // Validate capabilities against known ALPN values.
         for cap in &opts.capabilities {
@@ -294,6 +264,121 @@ impl IrohEndpoint {
         }
 
         Ok(Self { inner })
+    }
+}
+
+fn configured_relay_mode(
+    networking: &super::config::NetworkingOptions,
+) -> Result<RelayMode, crate::CoreError> {
+    if networking.disabled {
+        if networking.relay_auth_token.is_some() {
+            return Err(crate::CoreError::invalid_input(
+                "relay authentication requires custom relay URLs",
+            ));
+        }
+        return Ok(RelayMode::Disabled);
+    }
+
+    match networking.relay_mode.as_deref() {
+        None | Some("default") => reject_unused_relay_auth(networking, RelayMode::Default),
+        Some("staging") => reject_unused_relay_auth(networking, RelayMode::Staging),
+        Some("disabled") => reject_unused_relay_auth(networking, RelayMode::Disabled),
+        Some("custom") => {
+            if networking.relays.is_empty() {
+                return Err(crate::CoreError::invalid_input(
+                    "relay_mode \"custom\" requires at least one URL in `relays`",
+                ));
+            }
+            let urls = networking
+                .relays
+                .iter()
+                .map(|url| {
+                    url.parse::<iroh::RelayUrl>()
+                        .map_err(crate::CoreError::invalid_input)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let mut relay_map = RelayMap::from_iter(urls);
+            if let Some(token) = networking.relay_auth_token.as_deref() {
+                validate_relay_auth_token(token)?;
+                relay_map = relay_map.with_auth_token(token);
+            }
+            Ok(RelayMode::Custom(relay_map))
+        }
+        Some(other) => Err(crate::CoreError::invalid_input(format!(
+            "unknown relay_mode: {other}"
+        ))),
+    }
+}
+
+fn reject_unused_relay_auth(
+    networking: &super::config::NetworkingOptions,
+    relay_mode: RelayMode,
+) -> Result<RelayMode, crate::CoreError> {
+    if networking.relay_auth_token.is_some() {
+        return Err(crate::CoreError::invalid_input(
+            "relay authentication requires custom relay URLs",
+        ));
+    }
+    Ok(relay_mode)
+}
+
+fn validate_relay_auth_token(token: &str) -> Result<(), crate::CoreError> {
+    const MAX_RELAY_AUTH_TOKEN_BYTES: usize = 4_096;
+    if token.is_empty() || token.len() > MAX_RELAY_AUTH_TOKEN_BYTES {
+        return Err(crate::CoreError::invalid_input(
+            "relay authentication token must contain 1 to 4096 bytes",
+        ));
+    }
+    format!("Bearer {token}")
+        .parse::<http::HeaderValue>()
+        .map_err(|_| {
+            crate::CoreError::invalid_input(
+                "relay authentication token is not a valid HTTP header value",
+            )
+        })?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod relay_auth_tests {
+    use super::*;
+    use crate::endpoint::NetworkingOptions;
+
+    const SYNTHETIC_TOKEN: &str = "synthetic-relay-token-for-tests-only";
+    const RELAY_URL: &str = "https://relay.invalid";
+
+    #[test]
+    fn custom_relay_auth_reaches_native_relay_config_and_debug_is_redacted() {
+        let networking = NetworkingOptions {
+            relay_mode: Some("custom".to_string()),
+            relays: vec![RELAY_URL.to_string()],
+            relay_auth_token: Some(SYNTHETIC_TOKEN.to_string()),
+            ..Default::default()
+        };
+
+        let mode = configured_relay_mode(&networking).expect("valid custom relay options");
+        let relay_url: iroh::RelayUrl = RELAY_URL.parse().expect("valid relay URL");
+        let relay = mode
+            .relay_map()
+            .get(&relay_url)
+            .expect("configured relay must be present");
+        assert_eq!(relay.auth_token.as_deref(), Some(SYNTHETIC_TOKEN));
+
+        let diagnostic = format!("{networking:?}");
+        assert!(diagnostic.contains("[REDACTED]"));
+        assert!(!diagnostic.contains(SYNTHETIC_TOKEN));
+    }
+
+    #[test]
+    fn relay_auth_is_rejected_without_custom_relays_and_errors_do_not_disclose_it() {
+        let networking = NetworkingOptions {
+            relay_mode: Some("default".to_string()),
+            relay_auth_token: Some(SYNTHETIC_TOKEN.to_string()),
+            ..Default::default()
+        };
+
+        let error = configured_relay_mode(&networking).expect_err("token requires custom relays");
+        assert!(!error.to_string().contains(SYNTHETIC_TOKEN));
     }
 }
 

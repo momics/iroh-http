@@ -133,7 +133,12 @@ interface NodeOptions {
   key?: SecretKey | Uint8Array;
 
   // ── Connectivity ──────────────────────────────────────────────────
-  relay?: { mode?: RelayMode; urls?: string[] };
+  relay?: {
+    mode?: RelayMode;
+    urls?: string[];
+    /** Bearer token for the configured custom relays. Requires `urls`. */
+    authToken?: string;
+  };
   /** Local bind address(es). */
   bindAddr?: string | string[];
   connections?: {

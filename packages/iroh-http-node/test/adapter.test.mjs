@@ -65,6 +65,24 @@ test("createNode exposes secretKey only when a key is supplied", async () => {
   }
 });
 
+test("custom relay auth reaches native validation without disclosure", async () => {
+  const syntheticToken = "synthetic-invalid\nrelay-token-for-tests-only";
+  await assert.rejects(
+    () =>
+      createNode({
+        relay: {
+          urls: ["https://relay.invalid"],
+          authToken: syntheticToken,
+        },
+      }),
+    (error) => {
+      assert.match(error.message, /valid HTTP header value/);
+      assert.equal(error.message.includes(syntheticToken), false);
+      return true;
+    },
+  );
+});
+
 test("an immediate serve close survives native registration", {
   timeout: 5_000,
 }, async () => {

@@ -21,6 +21,7 @@ export function nodeAddrWithRelay(nodeId: string, relayUrl?: string): string {
 export interface NormalisedRelay {
   relayMode: string | undefined;
   relays: string[] | null;
+  relayAuthToken: string | undefined;
   disableNetworking: boolean;
 }
 
@@ -28,24 +29,43 @@ export interface NormalisedRelay {
  * Normalise a `relay` option group into the shape expected by the Rust FFI layer.
  */
 export function normaliseRelayMode(
-  relay?: { mode?: RelayMode; urls?: string[] },
+  relay?: { mode?: RelayMode; urls?: string[]; authToken?: string },
 ): NormalisedRelay {
   if (relay?.urls && relay.urls.length > 0) {
     return {
       relayMode: "custom",
       relays: relay.urls,
+      relayAuthToken: relay.authToken,
       disableNetworking: false,
     };
   }
+  if (relay?.authToken !== undefined) {
+    throw new TypeError("relay.authToken requires a non-empty relay.urls list");
+  }
   const mode = relay?.mode;
   if (mode === "disabled") {
-    return { relayMode: "disabled", relays: [], disableNetworking: true };
+    return {
+      relayMode: "disabled",
+      relays: [],
+      relayAuthToken: undefined,
+      disableNetworking: true,
+    };
   }
   if (mode === "staging") {
-    return { relayMode: "staging", relays: null, disableNetworking: false };
+    return {
+      relayMode: "staging",
+      relays: null,
+      relayAuthToken: undefined,
+      disableNetworking: false,
+    };
   }
   // "default" or undefined: use Iroh's public relay servers
-  return { relayMode: undefined, relays: null, disableNetworking: false };
+  return {
+    relayMode: undefined,
+    relays: null,
+    relayAuthToken: undefined,
+    disableNetworking: false,
+  };
 }
 
 // ── Discovery normalisation ───────────────────────────────────────────────────

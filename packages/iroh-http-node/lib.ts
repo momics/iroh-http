@@ -574,9 +574,10 @@ export async function createNode(
       : (options.key as SecretKey).toBytes()
     : undefined;
 
-  const { relayMode, relays, disableNetworking } = normaliseRelayMode(
-    options?.relay,
-  );
+  const { relayMode, relays, relayAuthToken, disableNetworking } =
+    normaliseRelayMode(
+      options?.relay,
+    );
   const discovery = normaliseDiscovery(options?.discovery);
   const compression = normaliseCompression(options?.compression);
   const disableNetworkingFinal = disableNetworking ||
@@ -592,6 +593,7 @@ export async function createNode(
         idleTimeout: options.connections?.idleTimeoutMs,
         relayMode,
         relays: relays ?? undefined,
+        relayAuthToken,
         bindAddrs,
         dnsDiscovery: discovery.dnsServerUrl ?? undefined,
         dnsDiscoveryEnabled: discovery.dnsEnabled,

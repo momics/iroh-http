@@ -760,9 +760,10 @@ export async function createNode(options?: NodeOptions): Promise<IrohNode> {
     )
     : null;
 
-  const { relayMode, relays, disableNetworking } = normaliseRelayMode(
-    options?.relay,
-  );
+  const { relayMode, relays, relayAuthToken, disableNetworking } =
+    normaliseRelayMode(
+      options?.relay,
+    );
   const discovery = normaliseDiscovery(options?.discovery);
   const compression = normaliseCompression(options?.compression);
   const bindAddrs = options?.bindAddr
@@ -779,6 +780,7 @@ export async function createNode(options?: NodeOptions): Promise<IrohNode> {
         idleTimeout: options.connections?.idleTimeoutMs ?? null,
         relayMode: relayMode ?? null,
         relays,
+        relayAuthToken: relayAuthToken ?? null,
         bindAddrs,
         dnsDiscovery: discovery.dnsServerUrl ?? null,
         dnsDiscoveryEnabled: discovery.dnsEnabled,

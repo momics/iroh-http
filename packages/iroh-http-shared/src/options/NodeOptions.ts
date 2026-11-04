@@ -31,6 +31,11 @@ export interface NodeOptions {
      * these URLs are used exclusively as the relay server list.
      */
     urls?: string[];
+    /**
+     * Bearer token sent to every configured custom relay. This option requires
+     * a non-empty `urls` list and is never placed in a relay URL.
+     */
+    authToken?: string;
   };
 
   /**
