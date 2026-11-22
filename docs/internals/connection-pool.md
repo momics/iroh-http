@@ -75,9 +75,11 @@ keepalive detects the dead path and fails the connection.
 | Migration in progress during `fetch()` | Higher latency while QUIC retries on the new path; typically resolves in < 1 s |
 | Old path dies, new path not yet established | Request times out; pool evicts the connection and retries on the next call |
 
-The timeout duration is bounded by `NodeOptions.requestTimeout` (default 60 s),
-not `idleTimeout`. In practice, QUIC's keepalive probes fail the connection
-long before the request timeout fires.
+Callers may bound a replacement dial with per-fetch `connectTimeout`; a live
+pooled connection bypasses that deadline. The separate `requestTimeout`
+continues to govern stream opening, HTTP handshake/dispatch, and response-head
+receipt. In practice, QUIC's keepalive probes often fail a stale connection
+before either deadline fires.
 
 ### Current mitigation
 
@@ -98,9 +100,9 @@ consider:
    increases the chance that a post-migration connection is fresh rather than
    cached. Trade-off: more reconnects.
 
-2. **Catch timeout errors and retry once.** A single retry after a timeout
-   will pick up the newly established path. Use `requestTimeout` to bound
-   the wait:
+2. **Catch connection timeout errors and retry once.** A single retry after a
+   `CONNECT_TIMEOUT` will start a fresh pool attempt. Use `connectTimeout` to
+   bound the dial without shortening the response-head budget:
 
    ```ts
    async function fetchWithRetry(node, peer, url) {

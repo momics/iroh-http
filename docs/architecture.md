@@ -182,6 +182,8 @@ moka async cache keyed by `NodeId`. The critical choice is `try_get_with` (not `
 - On success: caches the connection for reuse
 - On failure: does **not** cache the error — next caller retries
 - Liveness check before returning a cached connection; on a stale hit the entry is invalidated and one reconnect attempt is made transparently — callers never observe a stale connection
+- An optional per-fetch connection timeout wraps only the single-flight dial on
+  a miss or stale replacement; verified-live hits bypass it
 
 This provides single-flight semantics: many concurrent fetches to the same peer share one connection attempt. No thundering herd.
 
@@ -226,7 +228,11 @@ JSON envelope: {"code":"TIMEOUT","message":"..."}
 Native error types (DOMException subtypes in JS, etc.)
 ```
 
-Error codes are a finite enum: `InvalidInput`, `ConnectionFailed`, `Timeout`, `BodyTooLarge`, `HeaderTooLarge`, `PeerRejected`, `Cancelled`, `Internal`. New failure modes get new codes — never rely on catch-all.
+Error codes are a finite enum: `InvalidInput`, `ConnectionFailed`,
+`ConnectionTimeout`, `Timeout`, `BodyTooLarge`, `HeaderTooLarge`,
+`PeerRejected`, `Cancelled`, `Internal`. `ConnectionTimeout` identifies only a
+new-connection dial deadline; `Timeout` identifies the existing whole-request
+deadline. New failure modes get new codes — never rely on catch-all.
 
 ---
 

@@ -1,7 +1,7 @@
 //! Explicit ordinary-DNS nameserver configuration for the endpoint resolver.
 //!
 //! This stable module validates adapter-provided nameserver addresses and
-//! constructs `iroh-dns`. Scoped IPv6 destinations temporarily pass through
+//! constructs Iroh's DNS resolver. Scoped IPv6 destinations temporarily pass through
 //! [`super::scoped_dns_compat`]; resolving issue #368 removes only that child
 //! implementation, not ordinary resolver configuration or input policy.
 
@@ -34,7 +34,10 @@ impl ConfiguredDns {
             match parse_dns_nameserver(nameserver) {
                 Ok(addr) => {
                     let resolver_addr = compat.resolver_addr(nameserver, addr).await?;
-                    builder = builder.with_nameserver(resolver_addr, iroh::dns::DnsProtocol::Udp);
+                    builder = builder.add_nameserver_config(
+                        iroh::dns::NameserverConfig::udp(resolver_addr.ip())
+                            .with_port(resolver_addr.port()),
+                    );
                     added = added.saturating_add(1);
                 }
                 Err(reason) => rejected.push(reason),

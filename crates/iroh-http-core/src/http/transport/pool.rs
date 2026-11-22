@@ -11,6 +11,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use iroh::endpoint::Connection;
 use iroh::PublicKey;
@@ -18,6 +19,15 @@ use iroh::PublicKey;
 /// Process-wide monotonic dial counter. Each `PooledConnection` gets a unique,
 /// never-reused id from this. See [`PooledConnection::dial_seq`].
 static DIAL_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Failure while establishing a connection for a pool miss.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ConnectError {
+    /// The Iroh dial failed before producing a connection.
+    Failed(String),
+    /// The caller's connection-phase deadline elapsed.
+    Timeout,
+}
 
 /// A pooled QUIC connection (clone-cheap).
 #[derive(Clone)]
@@ -134,8 +144,9 @@ impl ConnectionPool {
         &self,
         node_id: PublicKey,
         alpn: &'static [u8],
+        connect_timeout: Option<Duration>,
         connect_fn: F,
-    ) -> Result<(PooledConnection, bool), String>
+    ) -> Result<(PooledConnection, bool), ConnectError>
     where
         F: FnOnce() -> Fut + Send,
         Fut: std::future::Future<Output = Result<Connection, String>> + Send,
@@ -177,9 +188,14 @@ impl ConnectionPool {
         let result = self
             .cache
             .try_get_with(key.clone(), async move {
-                connect_fn()
-                    .await
-                    .map(|conn| Arc::new(PooledConnection::new(conn)))
+                let connect = async { connect_fn().await.map_err(ConnectError::Failed) };
+                let conn = match connect_timeout {
+                    Some(timeout) => tokio::time::timeout(timeout, connect)
+                        .await
+                        .map_err(|_| ConnectError::Timeout)??,
+                    None => connect.await?,
+                };
+                Ok::<_, ConnectError>(Arc::new(PooledConnection::new(conn)))
             })
             .await;
 
@@ -215,7 +231,9 @@ impl ConnectionPool {
                             }
                         }
                     }
-                    return Err("pooled connection closed immediately after connect".to_string());
+                    return Err(ConnectError::Failed(
+                        "pooled connection closed immediately after connect".to_string(),
+                    ));
                 }
                 Ok(((*pooled).clone(), false))
             }
@@ -387,6 +405,85 @@ mod tests {
         assert_eq!(pool.len().await, 0);
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn connection_timeout_is_single_flight_and_not_cached() {
+        let pool = Arc::new(ConnectionPool::new(None, None, None));
+        let node_id = iroh::SecretKey::generate().public();
+        let started = Arc::new(tokio::sync::Notify::new());
+        let dial_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        let first_pool = pool.clone();
+        let first_started = started.clone();
+        let first_count = dial_count.clone();
+        let first = tokio::spawn(async move {
+            first_pool
+                .get_or_connect(
+                    node_id,
+                    crate::ALPN,
+                    Some(Duration::from_secs(10)),
+                    move || {
+                        first_count.fetch_add(1, Ordering::SeqCst);
+                        first_started.notify_one();
+                        std::future::pending::<Result<Connection, String>>()
+                    },
+                )
+                .await
+        });
+        started.notified().await;
+
+        tokio::time::advance(Duration::from_secs(5)).await;
+        let second_pool = pool.clone();
+        let second_count = dial_count.clone();
+        let second = tokio::spawn(async move {
+            second_pool
+                .get_or_connect(
+                    node_id,
+                    crate::ALPN,
+                    Some(Duration::from_secs(30)),
+                    move || {
+                        second_count.fetch_add(1, Ordering::SeqCst);
+                        std::future::pending::<Result<Connection, String>>()
+                    },
+                )
+                .await
+        });
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(5)).await;
+
+        assert!(matches!(
+            first.await.expect("first waiter should not panic"),
+            Err(ConnectError::Timeout)
+        ));
+        assert!(matches!(
+            second.await.expect("second waiter should not panic"),
+            Err(ConnectError::Timeout)
+        ));
+        assert_eq!(dial_count.load(Ordering::SeqCst), 1);
+        assert_eq!(pool.len().await, 0);
+    }
+
+    #[tokio::test]
+    async fn cancelling_connection_attempt_leaves_no_pool_entry() {
+        let pool = Arc::new(ConnectionPool::new(None, None, None));
+        let node_id = iroh::SecretKey::generate().public();
+        let started = Arc::new(tokio::sync::Notify::new());
+        let task_pool = pool.clone();
+        let task_started = started.clone();
+        let task = tokio::spawn(async move {
+            task_pool
+                .get_or_connect(node_id, crate::ALPN, None, move || {
+                    task_started.notify_one();
+                    std::future::pending::<Result<Connection, String>>()
+                })
+                .await
+        });
+
+        started.notified().await;
+        task.abort();
+        assert!(matches!(task.await, Err(error) if error.is_cancelled()));
+        assert_eq!(pool.len().await, 0);
+    }
+
     /// A task that observed stale connection A must not unconditionally evict
     /// live replacement B if another task installed B before stale cleanup ran.
     /// Besides destroying healthy multiplexed streams, that race forces an
@@ -422,7 +519,7 @@ mod tests {
         let initial_addr = connect_addr.clone();
         let (stale, _) = client
             .pool()
-            .get_or_connect(node_id, crate::ALPN, || async move {
+            .get_or_connect(node_id, crate::ALPN, None, || async move {
                 initial_raw
                     .connect(initial_addr, crate::ALPN)
                     .await
@@ -457,7 +554,7 @@ mod tests {
             let task_raw = task_client.raw().clone();
             task_client
                 .pool()
-                .get_or_connect(node_id, crate::ALPN, move || {
+                .get_or_connect(node_id, crate::ALPN, None, move || {
                     task_dials.fetch_add(1, Ordering::SeqCst);
                     async move {
                         task_raw
@@ -579,7 +676,7 @@ mod tests {
             let attempt_raw = attempt_client.raw().clone();
             attempt_client
                 .pool()
-                .get_or_connect(node_id, crate::ALPN, move || async move {
+                .get_or_connect(node_id, crate::ALPN, None, move || async move {
                     let connection = attempt_raw
                         .connect(attempt_addr, crate::ALPN)
                         .await
@@ -701,7 +798,7 @@ mod tests {
         let ep_raw = client.raw().clone();
         let (pooled, _reused) = client
             .pool()
-            .get_or_connect(node_id, crate::ALPN, || async move {
+            .get_or_connect(node_id, crate::ALPN, None, || async move {
                 ep_raw
                     .connect(connect_addr, crate::ALPN)
                     .await
@@ -711,6 +808,58 @@ mod tests {
             .expect("client should connect to the server");
 
         (client, node_id, pooled, server_guard)
+    }
+
+    #[tokio::test]
+    async fn live_pool_hit_bypasses_connection_timeout() {
+        let (client, node_id, pooled, _server_guard) = pooled_connection().await;
+        let dial_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let task_count = dial_count.clone();
+
+        let (observed, reused) = client
+            .pool()
+            .get_or_connect(
+                node_id,
+                crate::ALPN,
+                Some(Duration::ZERO),
+                move || async move {
+                    task_count.fetch_add(1, Ordering::SeqCst);
+                    Err("live cache hit must not dial".to_string())
+                },
+            )
+            .await
+            .expect("live pooled connection should bypass timeout");
+
+        assert!(reused);
+        assert_eq!(observed.dial_seq, pooled.dial_seq);
+        assert_eq!(dial_count.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn stale_pool_hit_applies_connection_timeout_to_replacement() {
+        let (client, node_id, pooled, _server_guard) = pooled_connection().await;
+        pooled.conn.close(0u32.into(), b"test stale connection");
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while pooled.conn.close_reason().is_none() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("local close should mark the pooled connection stale");
+
+        let dial_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let task_count = dial_count.clone();
+        let result = client
+            .pool()
+            .get_or_connect(node_id, crate::ALPN, Some(Duration::ZERO), move || {
+                task_count.fetch_add(1, Ordering::SeqCst);
+                std::future::pending::<Result<Connection, String>>()
+            })
+            .await;
+
+        assert!(matches!(result, Err(ConnectError::Timeout)));
+        assert_eq!(dial_count.load(Ordering::SeqCst), 1);
+        assert_eq!(client.pool().len().await, 0);
     }
 
     /// P2/L1: `evict_and_close` is connection-scoped — it must close+invalidate

@@ -56,10 +56,10 @@ remaining #310 work is well-defined.
 
 ## What we know
 
-**iroh core exposes a targeted resolver, not a browser.** In iroh 1.0.x
-(repo pins `iroh = "1.0"`, resolving to 1.0.1) the `Endpoint`'s discovery
-contract is the `AddressLookup` trait
-(`iroh/src/address_lookup.rs:333`) with exactly two methods:
+**iroh core exposes a targeted resolver, not a browser.** In iroh 1.4.1
+(repo pins `iroh = "=1.4.1"`) the `Endpoint`'s discovery contract is the
+`AddressLookup` trait (`iroh/src/address_lookup.rs:335`) with exactly two
+methods:
 
 - `publish(&EndpointData)` — fire-and-forget broadcast of *this* node's own
   endpoint info.

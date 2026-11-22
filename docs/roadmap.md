@@ -1,6 +1,6 @@
 # Roadmap
 
-## Current state — v0.6.x (testing phase)
+## Current state — v0.7.x (testing phase)
 
 The library is functionally complete and published on npm and JSR, but we are
 in an active testing phase before calling anything "stable". Semver signals
@@ -9,13 +9,15 @@ this: all packages are `0.x`. Breaking changes are possible.
 ### What is shipped and working
 
 - [x] crates.io publish metadata (`repository`, `documentation`, `keywords`, `categories`)
-- [x] Release CI workflow (`release.yml` with cross-platform matrix build, OIDC publishing)
+- [x] Guarded release pipeline (tagged Build, Extended, and Benchmarks workflows;
+  manual OIDC-backed Publish promotion)
 - [x] CI workflow (`ci.yml` — Rust check, TypeScript typecheck, E2E tests)
 - [x] Clean repository state (`.gitignore` for workspace/, .obsidian/, generated files)
 - [x] Issue templates (`bug.yml`, `feature.yml`)
 - [x] Cross-platform builds: Node (5 targets), Deno (5 targets)
 - [x] Build logic lives in each package (not root shell scripts)
-- [x] `CHANGELOG.md` — generated via `git-cliff` and updated each release in CI
+- [x] `CHANGELOG.md` — generated via `git-cliff`, reviewed in-repo, and reused
+  verbatim for GitHub release notes
 - [x] `SECURITY.md` — GitHub Security Advisories disclosure policy
 - [x] Repository public on GitHub
 - [x] Planned release work through v0.6.1 shipped
@@ -26,6 +28,8 @@ this: all packages are `0.x`. Breaking changes are possible.
 - [x] `node.pathChanges(nodeId)` — `AsyncIterable<PathInfo>` path-change stream
 - [x] Per-peer rate limiting (`maxConnectionsPerPeer`) at the QUIC layer
 - [x] Connection pool with moka-backed single-flight establishment
+- [x] Optional per-fetch `connectTimeout` with typed cross-adapter errors
+- [x] Iroh 1.4.1 runtime and security dependency refresh
 - [x] QPACK header compression (zstd, feature-gated)
 - [x] WebTransport-compatible `IrohSession` (bidirectional streams, datagrams, close info)
 - [x] Node tickets — compact shareable `NodeAddr` strings

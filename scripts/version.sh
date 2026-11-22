@@ -122,6 +122,17 @@ for dir in "${PLATFORM_DIRS[@]}"; do
   echo "  ✓ $dir/package.json"
 done
 
+# ── Generated Node loader ─────────────────────────────────────────────────────
+# napi-rs embeds the package version in every native-package compatibility
+# check. Keep the generated loader aligned without rebuilding a host-specific
+# binary during release preparation.
+NODE_LOADER="$ROOT/packages/iroh-http-node/index.js"
+if [[ -f "$NODE_LOADER" ]]; then
+  sed -i '' "s/\(bindingPackageVersion !== '\)[^']*'/\1$NEW'/g" "$NODE_LOADER"
+  sed -i '' "s/\(version mismatch, expected \)[^ ]*/\1$NEW/g" "$NODE_LOADER"
+  echo "  ✓ packages/iroh-http-node/index.js (native package version checks)"
+fi
+
 # ── deno.jsonc ────────────────────────────────────────────────────────────────
 DENO_JSON="$ROOT/packages/iroh-http-deno/deno.jsonc"
 if [[ -f "$DENO_JSON" ]]; then

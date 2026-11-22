@@ -672,6 +672,8 @@ struct RawFetchPayload {
     direct_addrs: Option<Vec<String>>,
     #[serde(alias = "timeout_ms")]
     timeout_ms: Option<f64>,
+    #[serde(alias = "connect_timeout_ms")]
+    connect_timeout_ms: Option<f64>,
     decompress: Option<bool>,
     #[serde(alias = "max_response_body_bytes")]
     max_response_body_bytes: Option<f64>,
@@ -715,6 +717,7 @@ async fn raw_fetch_impl(args: RawFetchPayload) -> Value {
         direct_addrs: args.direct_addrs,
         headers: args.headers,
         timeout_ms: args.timeout_ms,
+        connect_timeout_ms: args.connect_timeout_ms,
         max_response_body_bytes: args.max_response_body_bytes,
     }) {
         Ok(v) => v,
@@ -729,6 +732,9 @@ async fn raw_fetch_impl(args: RawFetchPayload) -> Value {
     };
 
     let timeout = opts.timeout_ms.map(std::time::Duration::from_millis);
+    let connect_timeout = opts
+        .connect_timeout_ms
+        .map(std::time::Duration::from_millis);
     let max_response_body_bytes = opts.max_response_body_bytes;
 
     // #126: If the caller didn't supply a fetch token, allocate one
@@ -738,7 +744,7 @@ async fn raw_fetch_impl(args: RawFetchPayload) -> Value {
         None => ep.handles().alloc_fetch_token().ok(),
     };
 
-    match iroh_http_core::fetch(
+    match iroh_http_core::fetch_with_connect_timeout(
         &ep,
         &opts.node_id,
         &opts.url,
@@ -747,6 +753,7 @@ async fn raw_fetch_impl(args: RawFetchPayload) -> Value {
         reader,
         fetch_token,
         addrs.as_deref(),
+        connect_timeout,
         timeout,
         args.decompress.unwrap_or(true),
         max_response_body_bytes,
@@ -1060,7 +1067,7 @@ static DISCOVERY_HANDLE_COUNTER: AtomicU32 = AtomicU32::new(1);
 #[cfg(feature = "discovery")]
 fn alloc_discovery_handle() -> Result<u32, &'static str> {
     DISCOVERY_HANDLE_COUNTER
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+        .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
             current.checked_add(1)
         })
         .map_err(|_| "discovery handle space exhausted")

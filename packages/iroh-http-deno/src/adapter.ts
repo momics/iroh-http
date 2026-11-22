@@ -66,7 +66,7 @@ function libName(): string {
 }
 
 /** Version must match the tag used for GitHub releases (v0.1.0 → tag v0.1.0). */
-const VERSION = "0.6.2";
+const VERSION = "0.7.0";
 const DOWNLOAD_BASE =
   `https://github.com/momics/iroh-http/releases/download/v${VERSION}`;
 
@@ -700,6 +700,7 @@ export const rawFetch: RawFetchFn = async (
         : null,
       directAddrs: directAddrs ?? null,
       timeout_ms: fetchOptions?.timeoutMs ?? null,
+      connect_timeout_ms: fetchOptions?.connectTimeoutMs ?? null,
       decompress: fetchOptions?.decompress ?? null,
       max_response_body_bytes: fetchOptions?.maxResponseBodyBytes ?? null,
     },

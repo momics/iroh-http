@@ -222,6 +222,7 @@ class TauriAdapter extends IrohAdapter {
           : null,
         directAddrs: directAddrs ?? null,
         timeoutMs: fetchOptions?.timeoutMs ?? null,
+        connectTimeoutMs: fetchOptions?.connectTimeoutMs ?? null,
         decompress: fetchOptions?.decompress ?? null,
         maxResponseBodyBytes: fetchOptions?.maxResponseBodyBytes ?? null,
       },

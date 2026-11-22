@@ -224,7 +224,7 @@ The refactor is complete only when all behavior above is green and the code has:
   TXT/address fitting and validation policy.
 - Do not claim synchronous invalidation of addresses that iroh has already
   copied into its private remote-path cache. Source retirement guarantees
-  future provider results only; upstream iroh 1.0.2 exposes no purge API.
+  future provider results only; upstream iroh 1.4.1 exposes no purge API.
 - Do not delete or weaken test scenarios merely because the implementation
   moves. Native harnesses may be retargeted to the generic adapter, while peer
   interpretation cases move to Rust projection tests.

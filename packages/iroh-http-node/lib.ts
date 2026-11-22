@@ -240,6 +240,7 @@ class NodeAdapter extends IrohAdapter {
       timeoutMs?: number | null,
       decompress?: boolean | null,
       maxResponseBodyBytes?: number | null,
+      connectTimeoutMs?: number | null,
     ) => Promise<{
       status: number;
       headers: string[][];
@@ -257,6 +258,7 @@ class NodeAdapter extends IrohAdapter {
       fetchOptions?.timeoutMs ?? undefined,
       fetchOptions?.decompress ?? undefined,
       fetchOptions?.maxResponseBodyBytes ?? undefined,
+      fetchOptions?.connectTimeoutMs ?? undefined,
     );
     return {
       status: res.status,

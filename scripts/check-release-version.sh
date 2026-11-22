@@ -133,6 +133,10 @@ while IFS=$'\t' read -r name dependency_version; do
   check_value "$name optional dependency" "$dependency_version" "$VERSION"
 done <<< "$NODE_PLATFORM_VERSIONS"
 
+NODE_LOADER_VERSIONS="$(sed -n "s/.*bindingPackageVersion !== '\([^']*\)'.*/\1/p" \
+  "$ROOT/packages/iroh-http-node/index.js" | sort -u)"
+check_value "Node generated loader version checks" "$NODE_LOADER_VERSIONS" "$VERSION"
+
 if [[ "$ERRORS" -ne 0 ]]; then
   echo "Release version check failed with $ERRORS problem(s)." >&2
   exit 1

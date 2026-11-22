@@ -273,6 +273,9 @@ jobs:
           distribution: temurin
           java-version: '17'
       - uses: android-actions/setup-android@v3
+        with:
+          # The legacy "tools" package was removed from the SDK repository.
+          packages: platform-tools
       - name: Install Android SDK packages
         # compileSdk: 34 (plugin) + 36 (tauri-android); build-tools 35.0.0 is
         # AGP 8.11's default. Kept minimal — Kotlin compile needs no NDK.
