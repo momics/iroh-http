@@ -69,6 +69,9 @@ export function adapterValidationTests({
         await assertThrows(async () => {
           await node.fetch(url, { requestTimeout: value });
         }, `requestTimeout=${String(value)}`);
+        await assertThrows(async () => {
+          await node.fetch(url, { connectTimeout: value });
+        }, `connectTimeout=${String(value)}`);
       }
       for (const value of bodyValues) {
         await assertThrows(async () => {

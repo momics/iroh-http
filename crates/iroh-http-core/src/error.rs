@@ -11,6 +11,7 @@
 pub enum ErrorCode {
     InvalidInput,
     ConnectionFailed,
+    ConnectionTimeout,
     Timeout,
     BodyTooLarge,
     HeaderTooLarge,
@@ -39,6 +40,12 @@ impl CoreError {
     pub fn connection_failed(detail: impl std::fmt::Display) -> Self {
         CoreError {
             code: ErrorCode::ConnectionFailed,
+            message: detail.to_string(),
+        }
+    }
+    pub fn connection_timeout(detail: impl std::fmt::Display) -> Self {
+        CoreError {
+            code: ErrorCode::ConnectionTimeout,
             message: detail.to_string(),
         }
     }

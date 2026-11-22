@@ -204,6 +204,7 @@ pub(super) async fn accept_loop<S>(
             } else {
                 Some(timeout_dur)
             },
+            connect_timeout: None,
             max_request_body_wire_bytes: cfg.max_request_body_wire_bytes,
             max_request_body_decoded_bytes: cfg.max_request_body_decoded_bytes,
             load_shed: cfg.load_shed_enabled,

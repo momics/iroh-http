@@ -613,6 +613,7 @@ pub struct RawFetchArgs {
     pub fetch_token: Option<u64>,
     pub direct_addrs: Option<Vec<String>>,
     pub timeout_ms: Option<f64>,
+    pub connect_timeout_ms: Option<f64>,
     pub decompress: Option<bool>,
     pub max_response_body_bytes: Option<f64>,
 }
@@ -644,6 +645,7 @@ pub async fn fetch(args: RawFetchArgs) -> Result<FfiResponsePayload, String> {
         direct_addrs: args.direct_addrs,
         headers: args.headers,
         timeout_ms: args.timeout_ms,
+        connect_timeout_ms: args.connect_timeout_ms,
         max_response_body_bytes: args.max_response_body_bytes,
     })
     .map_err(|e| e.to_json())?;
@@ -654,8 +656,11 @@ pub async fn fetch(args: RawFetchArgs) -> Result<FfiResponsePayload, String> {
 
     let addrs = parse_direct_addrs(&opts.direct_addrs)?;
     let timeout = opts.timeout_ms.map(std::time::Duration::from_millis);
+    let connect_timeout = opts
+        .connect_timeout_ms
+        .map(std::time::Duration::from_millis);
     let max_response_body_bytes = opts.max_response_body_bytes;
-    let res = iroh_http_core::fetch(
+    let res = iroh_http_core::fetch_with_connect_timeout(
         &ep,
         &opts.node_id,
         &opts.url,
@@ -664,6 +669,7 @@ pub async fn fetch(args: RawFetchArgs) -> Result<FfiResponsePayload, String> {
         req_body_reader,
         args.fetch_token,
         addrs.as_deref(),
+        connect_timeout,
         timeout,
         args.decompress.unwrap_or(true),
         max_response_body_bytes,

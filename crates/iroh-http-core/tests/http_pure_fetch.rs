@@ -114,13 +114,44 @@ impl Service<hyper::Request<Body>> for SlowPeerService {
 
     fn call(&mut self, _req: hyper::Request<Body>) -> Self::Future {
         Box::pin(async {
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            std::future::pending::<()>().await;
             Ok(hyper::Response::builder()
                 .status(200)
                 .body(Body::empty())
                 .expect("valid response"))
         })
     }
+}
+
+#[tokio::test]
+async fn live_pooled_fetch_bypasses_connection_timeout() {
+    let (server_ep, client_ep) = common::make_pair().await;
+    let server_pk = server_ep.raw().id();
+    let addrs = common::server_addrs(&server_ep);
+    let _handle = serve(server_ep, ServeOptions::default(), EchoPeerService);
+
+    let mut addr = iroh::EndpointAddr::new(server_pk);
+    for socket_addr in addrs {
+        addr = addr.with_ip_addr(socket_addr);
+    }
+
+    let first = hyper::Request::builder()
+        .uri("/warm")
+        .body(Body::empty())
+        .expect("valid request");
+    fetch_request(&client_ep, &addr, first, &StackConfig::default())
+        .await
+        .expect("warm fetch should establish the pooled connection");
+
+    let pooled = hyper::Request::builder()
+        .uri("/pooled")
+        .body(Body::empty())
+        .expect("valid request");
+    let cfg = StackConfig::default().with_connect_timeout(Some(std::time::Duration::ZERO));
+    let response = fetch_request(&client_ep, &addr, pooled, &cfg)
+        .await
+        .expect("live pooled fetch must bypass the connection timeout");
+    assert_eq!(response.status(), hyper::StatusCode::OK);
 }
 
 /// `cfg.timeout` elapses before the slow peer responds → typed `Timeout`.
@@ -325,7 +356,9 @@ async fn pure_rust_fetch_unreachable_addr_returns_connection_failed() {
         .expect("valid request");
 
     // Short timeout so the test does not block on dial retries.
-    let cfg = StackConfig::default().with_timeout(Some(std::time::Duration::from_secs(2)));
+    let cfg = StackConfig::default()
+        .with_timeout(Some(std::time::Duration::from_secs(2)))
+        .with_connect_timeout(Some(std::time::Duration::from_millis(25)));
     let err = fetch_request(&client_ep, &addr, req, &cfg)
         .await
         .err()
@@ -333,7 +366,7 @@ async fn pure_rust_fetch_unreachable_addr_returns_connection_failed() {
     assert!(
         matches!(
             err,
-            FetchError::ConnectionFailed { .. } | FetchError::Timeout
+            FetchError::ConnectionFailed { .. } | FetchError::ConnectTimeout | FetchError::Timeout
         ),
         "expected FetchError::ConnectionFailed (or Timeout if dial slow), got {err:?}"
     );
