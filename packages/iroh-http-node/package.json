@@ -25,7 +25,7 @@
     "test:compliance": "node test/compliance.mjs"
   },
   "devDependencies": {
-    "@napi-rs/cli": "^3.7.3",
+    "@napi-rs/cli": "^3.8.6",
     "@types/node": "^26.1.1",
     "typescript": "^5"
   },
