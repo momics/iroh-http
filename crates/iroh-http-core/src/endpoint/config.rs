@@ -11,8 +11,8 @@ pub struct NetworkingOptions {
     pub relays: Vec<String>,
     /// Optional bearer token applied to every configured custom relay.
     ///
-    /// This is rejected unless `relay_mode` is `"custom"`. Its value is
-    /// deliberately redacted from this type's [`std::fmt::Debug`] output.
+    /// Requires `relay_mode` to be `"custom"` and every relay URL to use HTTPS or WSS.
+    /// Its value is redacted from this type's [`std::fmt::Debug`] output.
     pub relay_auth_token: Option<String>,
     /// UDP socket addresses to bind. Empty means OS-assigned.
     pub bind_addrs: Vec<String>,

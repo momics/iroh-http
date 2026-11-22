@@ -38,3 +38,19 @@ Deno.test("relay authentication requires custom URLs without disclosing the toke
   }
   assertEquals(error.message.includes(SYNTHETIC_TOKEN), false);
 });
+
+Deno.test("relay authentication requires TLS for every custom URL", () => {
+  for (const url of ["http://relay.invalid", "ws://relay.invalid"]) {
+    const urls = ["https://relay.invalid", url];
+    let error: unknown;
+    try {
+      normaliseRelayMode({ urls, authToken: SYNTHETIC_TOKEN });
+    } catch (cause) {
+      error = cause;
+    }
+    if (!(error instanceof TypeError)) throw new Error("expected TypeError");
+    assertEquals(error.message.includes("HTTPS or WSS"), true);
+    assertEquals(error.message.includes(SYNTHETIC_TOKEN), false);
+    assertEquals(normaliseRelayMode({ urls }).relays, urls);
+  }
+});

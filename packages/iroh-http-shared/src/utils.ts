@@ -32,6 +32,20 @@ export function normaliseRelayMode(
   relay?: { mode?: RelayMode; urls?: string[]; authToken?: string },
 ): NormalisedRelay {
   if (relay?.urls && relay.urls.length > 0) {
+    if (
+      relay.authToken !== undefined && !relay.urls.every((url) => {
+        try {
+          const { protocol } = new URL(url);
+          return protocol === "https:" || protocol === "wss:";
+        } catch {
+          return false;
+        }
+      })
+    ) {
+      throw new TypeError(
+        "relay.authToken requires HTTPS or WSS for every custom relay URL",
+      );
+    }
     return {
       relayMode: "custom",
       relays: relay.urls,

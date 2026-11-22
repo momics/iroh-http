@@ -23,7 +23,7 @@ const node = await createNode({
   relay: {
     mode: "default", // or "staging" / "disabled"
     urls: ["https://my-relay.example.com"], // optional custom relay list
-    // Optional bearer for custom relays; load from a secret source.
+    // Optional bearer for custom relays. Every relay URL must use HTTPS or WSS.
     // It is sent as an Authorization header, never in the relay URL.
     authToken: process.env.IROH_RELAY_AUTH_TOKEN,
   },

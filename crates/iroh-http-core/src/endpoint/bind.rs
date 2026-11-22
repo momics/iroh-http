@@ -297,12 +297,21 @@ fn configured_relay_mode(
                         .map_err(crate::CoreError::invalid_input)
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            let mut relay_map = RelayMap::from_iter(urls);
             if let Some(token) = networking.relay_auth_token.as_deref() {
                 validate_relay_auth_token(token)?;
-                relay_map = relay_map.with_auth_token(token);
+                if urls
+                    .iter()
+                    .any(|url| !matches!(url.scheme(), "https" | "wss"))
+                {
+                    return Err(crate::CoreError::invalid_input(
+                        "relay authentication requires HTTPS or WSS for every custom relay URL",
+                    ));
+                }
+                return Ok(RelayMode::Custom(
+                    RelayMap::from_iter(urls).with_auth_token(token),
+                ));
             }
-            Ok(RelayMode::Custom(relay_map))
+            Ok(RelayMode::Custom(RelayMap::from_iter(urls)))
         }
         Some(other) => Err(crate::CoreError::invalid_input(format!(
             "unknown relay_mode: {other}"
@@ -348,21 +357,42 @@ mod relay_auth_tests {
     const RELAY_URL: &str = "https://relay.invalid";
 
     #[test]
+    fn custom_relay_auth_requires_tls_for_every_url() {
+        for plaintext_url in ["http://relay.invalid", "ws://relay.invalid"] {
+            let mut networking = NetworkingOptions {
+                relay_mode: Some("custom".to_string()),
+                relays: vec![RELAY_URL.to_string(), plaintext_url.to_string()],
+                relay_auth_token: Some(SYNTHETIC_TOKEN.to_string()),
+                ..Default::default()
+            };
+            let error = configured_relay_mode(&networking)
+                .expect_err("a single plaintext relay must reject authentication");
+            assert!(error.to_string().contains("HTTPS or WSS"));
+            assert!(!error.to_string().contains(SYNTHETIC_TOKEN));
+
+            networking.relay_auth_token = None;
+            assert!(configured_relay_mode(&networking).is_ok());
+        }
+    }
+
+    #[test]
     fn custom_relay_auth_reaches_native_relay_config_and_debug_is_redacted() {
         let networking = NetworkingOptions {
             relay_mode: Some("custom".to_string()),
-            relays: vec![RELAY_URL.to_string()],
+            relays: vec![RELAY_URL.to_string(), "wss://relay.invalid".to_string()],
             relay_auth_token: Some(SYNTHETIC_TOKEN.to_string()),
             ..Default::default()
         };
 
         let mode = configured_relay_mode(&networking).expect("valid custom relay options");
-        let relay_url: iroh::RelayUrl = RELAY_URL.parse().expect("valid relay URL");
-        let relay = mode
-            .relay_map()
-            .get(&relay_url)
-            .expect("configured relay must be present");
-        assert_eq!(relay.auth_token.as_deref(), Some(SYNTHETIC_TOKEN));
+        for url in &networking.relays {
+            let relay_url: iroh::RelayUrl = url.parse().expect("valid relay URL");
+            let relay = mode
+                .relay_map()
+                .get(&relay_url)
+                .expect("configured relay must be present");
+            assert_eq!(relay.auth_token.as_deref(), Some(SYNTHETIC_TOKEN));
+        }
 
         let diagnostic = format!("{networking:?}");
         assert!(diagnostic.contains("[REDACTED]"));

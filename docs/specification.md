@@ -136,7 +136,7 @@ interface NodeOptions {
   relay?: {
     mode?: RelayMode;
     urls?: string[];
-    /** Bearer token for the configured custom relays. Requires `urls`. */
+    /** Bearer token for custom relays. Requires all `urls` to use HTTPS or WSS. */
     authToken?: string;
   };
   /** Local bind address(es). */
