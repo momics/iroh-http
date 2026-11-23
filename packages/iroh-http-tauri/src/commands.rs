@@ -24,13 +24,14 @@ use iroh_http_adapter::{
 /// Options for creating an Iroh endpoint from the Tauri frontend.
 ///
 /// All fields are optional — omit for sensible defaults.
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateEndpointArgs {
     pub key: Option<String>,
     pub idle_timeout: Option<f64>,
     pub relay_mode: Option<String>,
     pub relays: Option<Vec<String>>,
+    pub relay_auth_token: Option<String>,
     pub bind_addrs: Option<Vec<String>>,
     pub dns_discovery: Option<String>,
     pub dns_discovery_enabled: Option<bool>,
@@ -100,6 +101,7 @@ pub async fn create_endpoint<R: tauri::Runtime>(
                 networking: NetworkingOptions {
                     relay_mode: a.relay_mode,
                     relays: a.relays.unwrap_or_default(),
+                    relay_auth_token: a.relay_auth_token,
                     bind_addrs: a.bind_addrs.unwrap_or_default(),
                     idle_timeout_ms: endpoint.idle_timeout_ms,
                     proxy_url: a.proxy_url,
