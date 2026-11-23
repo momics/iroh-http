@@ -217,6 +217,7 @@ export interface JsNodeOptions {
   idleTimeout?: number
   relayMode?: string
   relays?: Array<string>
+  relayAuthToken?: string
   bindAddrs?: Array<string>
   dnsDiscovery?: string
   dnsDiscoveryEnabled?: boolean

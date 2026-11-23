@@ -289,6 +289,7 @@ struct CreateEndpointPayload {
     idle_timeout: Option<f64>,
     relay_mode: Option<String>,
     relays: Option<Vec<String>>,
+    relay_auth_token: Option<String>,
     bind_addrs: Option<Vec<String>>,
     dns_discovery: Option<String>,
     dns_discovery_enabled: Option<bool>,
@@ -349,6 +350,7 @@ async fn create_endpoint(p: Value) -> Value {
         networking: NetworkingOptions {
             relay_mode: args.relay_mode,
             relays: args.relays.unwrap_or_default(),
+            relay_auth_token: args.relay_auth_token,
             bind_addrs: args.bind_addrs.unwrap_or_default(),
             idle_timeout_ms: endpoint.idle_timeout_ms,
             proxy_url: args.proxy_url,
