@@ -6,15 +6,4 @@ ignore = [
     # paste: unmaintained, no patched version (dtolnay archived the repo)
     # https://rustsec.org/advisories/RUSTSEC-2024-0436
     "RUSTSEC-2024-0436",
-    # atomic-polyfill: unmaintained, no patched version (embassy-rs deprecated it)
-    # https://rustsec.org/advisories/RUSTSEC-2023-0089
-    "RUSTSEC-2023-0089",
-    # hickory-net NSEC3 unbounded loop — fixed in 0.26.1; blocked on iroh upgrading.
-    # Remove once iroh bumps hickory. Tracking: #197
-    # https://rustsec.org/advisories/RUSTSEC-2026-0120
-    "RUSTSEC-2026-0120",
-    # hickory-proto O(n²) name compression CPU exhaustion — fixed in 0.26.1; blocked on iroh.
-    # Remove once iroh bumps hickory. Tracking: #197
-    # https://rustsec.org/advisories/RUSTSEC-2026-0119
-    "RUSTSEC-2026-0119",
 ]
