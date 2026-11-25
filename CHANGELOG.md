@@ -1,3 +1,19 @@
+## [0.8.0] - 2026-11-25
+
+### 🚀 Features
+
+- *(core, adapters)* Support bearer authentication for custom Iroh relays.
+  Token-bearing relay URLs require HTTPS or WSS (#408).
+
+### 🔒 Security and Dependencies
+
+- *(deps-dev)* Bump @napi-rs/cli from 3.7.3 to 3.8.6 (#401)
+- *(deps-dev)* Bump @types/node from 26.1.1 to 26.4.0 (#402)
+- *(deps-dev)* Bump @tauri-apps/api from 2.11.1 to 2.12.5 (#417)
+- *(deps)* Upgrade Iroh to 1.5.0 and include its resolver, metrics, and watcher
+  dependency fixes (#420).
+- *(deps)* Update `url` to 2.5.9 to resolve RUSTSEC-2026-0592 (#408).
+
 ## [0.7.0] - 2026-10-30
 
 ### 🚀 Features

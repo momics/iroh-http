@@ -1588,7 +1588,7 @@ dependencies = [
 
 [[package]]
 name = "iroh-http-adapter"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "iroh-http-core",
  "serde_json",
@@ -1597,7 +1597,7 @@ dependencies = [
 
 [[package]]
 name = "iroh-http-core"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "base32",
  "bytes",
@@ -1628,7 +1628,7 @@ dependencies = [
 
 [[package]]
 name = "iroh-http-deno"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -1644,7 +1644,7 @@ dependencies = [
 
 [[package]]
 name = "iroh-http-discovery"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "base32",
  "futures",
@@ -1659,7 +1659,7 @@ dependencies = [
 
 [[package]]
 name = "iroh-http-node"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "bytes",
  "dashmap",
