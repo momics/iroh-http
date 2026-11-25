@@ -1,0 +1,37 @@
+[
+  {
+    "name": "rust/connection_establishment",
+    "unit": "us",
+    "value": 2923.681428235294
+  },
+  {
+    "name": "rust/fetch_get_latency",
+    "unit": "us",
+    "value": 164.71720556436546
+  },
+  {
+    "name": "rust/handle_ops/alloc_body_writer",
+    "unit": "us",
+    "value": 0.29408773801356664
+  },
+  {
+    "name": "rust/handle_ops/make_body_channel",
+    "unit": "us",
+    "value": 0.2526261286779547
+  },
+  {
+    "name": "rust/latency_iroh_1kb",
+    "unit": "us",
+    "value": 181.25588833280628
+  },
+  {
+    "name": "rust/multiplex/32",
+    "unit": "us",
+    "value": 1819.1856540496583
+  },
+  {
+    "name": "rust/multiplex/8",
+    "unit": "us",
+    "value": 568.203188268751
+  }
+]

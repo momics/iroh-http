@@ -1,0 +1,42 @@
+[
+  {
+    "name": "node/iroh/throughput-1kb",
+    "unit": "MB/s",
+    "value": 1.623965293501344
+  },
+  {
+    "name": "node/native/throughput-1kb",
+    "unit": "MB/s",
+    "value": 1.4525277094504656
+  },
+  {
+    "name": "node/iroh/throughput-64kb",
+    "unit": "MB/s",
+    "value": 76.87786422321149
+  },
+  {
+    "name": "node/native/throughput-64kb",
+    "unit": "MB/s",
+    "value": 111.24838271551157
+  },
+  {
+    "name": "node/iroh/throughput-1mb",
+    "unit": "MB/s",
+    "value": 260.4134169242348
+  },
+  {
+    "name": "node/native/throughput-1mb",
+    "unit": "MB/s",
+    "value": 505.2972636516
+  },
+  {
+    "name": "node/iroh/throughput-10mb",
+    "unit": "MB/s",
+    "value": 311.45736726395586
+  },
+  {
+    "name": "node/native/throughput-10mb",
+    "unit": "MB/s",
+    "value": 713.0260620722834
+  }
+]
