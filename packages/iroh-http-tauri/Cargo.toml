@@ -16,7 +16,7 @@ links = "tauri-plugin-iroh-http"
 # `workspace = true` — the same exact requirement the repo root pins — keeping
 # this crate's iroh locked to the same version as iroh-http-core / -adapter.
 [workspace.dependencies]
-iroh = "=1.4.1"
+iroh = "=1.5.0"
 
 # staticlib = iOS, cdylib = Android, rlib = desktop / tests
 [lib]
