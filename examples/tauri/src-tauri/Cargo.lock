@@ -873,7 +873,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7ab67060fc6b8ef687992d439ca0fa36e7ed17e9a0b16b25b601e8757df720de"
 dependencies = [
  "data-encoding",
- "syn 2.0.117",
+ "syn 1.0.109",
 ]
 
 [[package]]
@@ -1197,7 +1197,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2357,7 +2357,7 @@ dependencies = [
  "portable-atomic",
  "rand 0.10.1",
  "rustls",
- "simple-dns 0.13.1",
+ "simple-dns",
  "strum",
  "tokio",
  "tracing",
@@ -2429,9 +2429,9 @@ dependencies = [
 
 [[package]]
 name = "iroh-metrics"
-version = "1.0.2"
+version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8ede55536349842337f7cdc63012ec33dc637945f3259c98a0763aac364cdf09"
+checksum = "e136dab0f56d67ae1e8e4de75f84e271b6b2ccf0cdbed1be79936783247c1590"
 dependencies = [
  "iroh-metrics-derive",
  "itoa",
@@ -2961,9 +2961,9 @@ dependencies = [
 
 [[package]]
 name = "n0-dns-resolver"
-version = "0.1.0"
+version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "535c99c9a786bee714155d2ee4fc2477405c2c43536e1bc6a51de09a0d1448f7"
+checksum = "0381996935dc55768ae8b13e7db69d3a90f13afb51dde80f870484027968bcd2"
 dependencies = [
  "derive_more 2.1.1",
  "ipconfig",
@@ -2976,7 +2976,7 @@ dependencies = [
  "reqwest",
  "rustc-hash",
  "rustls",
- "simple-dns 0.12.0",
+ "simple-dns",
  "system-configuration",
  "tokio",
  "tokio-rustls",
@@ -3028,13 +3028,14 @@ dependencies = [
 
 [[package]]
 name = "n0-watcher"
-version = "1.0.0"
+version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bbc618745ad0b7414b149d0517ad8b5573b2fb4d4e2717add3d2446ce1fdd826"
+checksum = "64bf1ecb076a87e0e3f5edcf726e7d29e788c273bb0161ba30666b53f085906c"
 dependencies = [
  "derive_more 2.1.1",
  "n0-error",
  "n0-future",
+ "slotmap",
 ]
 
 [[package]]
@@ -4421,7 +4422,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -4564,7 +4565,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5b55fb86dfd3a2f5f76ea78310a88f96c4ea21a3031f8d212443d56123fd0521"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -4887,15 +4888,6 @@ name = "simdutf8"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
-
-[[package]]
-name = "simple-dns"
-version = "0.12.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2b6f884fa9a8d48101774bfbd3aeb81e968dd22cffd19a372da69f183db22c1a"
-dependencies = [
- "bitflags 2.11.0",
-]
 
 [[package]]
 name = "simple-dns"
@@ -6499,7 +6491,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
